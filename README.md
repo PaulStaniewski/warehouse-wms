@@ -47,8 +47,9 @@ Start the stack:
 docker compose up --build
 ```
 
-The frontend runs on `http://localhost:5173`.
+The frontend runs on `http://localhost:3000`.
 The backend runs on `http://localhost:8000`.
+The backend health endpoint runs on `http://localhost:8000/api/health/`.
 
 ## Current Scope
 
