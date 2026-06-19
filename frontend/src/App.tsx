@@ -8,6 +8,8 @@ import { LocationsPage } from "./pages/LocationsPage";
 import { OrdersPage } from "./pages/OrdersPage";
 import { ProductsPage } from "./pages/ProductsPage";
 import { RouteMonitorPage } from "./pages/RouteMonitorPage";
+import { ScannerPickingPage } from "./pages/ScannerPickingPage";
+import { ScannerRoutesPage } from "./pages/ScannerRoutesPage";
 
 function App() {
   return (
@@ -19,6 +21,8 @@ function App() {
         <Route path="orders" element={<OrdersPage />} />
         <Route path="locations" element={<LocationsPage />} />
         <Route path="routes-monitor" element={<RouteMonitorPage />} />
+        <Route path="scanner/routes" element={<ScannerRoutesPage />} />
+        <Route path="scanner/route-runs/:id/picking" element={<ScannerPickingPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

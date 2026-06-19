@@ -1,4 +1,4 @@
-import { Boxes, ClipboardList, LayoutDashboard, MapPin, PackageSearch, Route, Warehouse } from "lucide-react";
+import { Barcode, Boxes, ClipboardList, LayoutDashboard, MapPin, PackageSearch, Route, Warehouse } from "lucide-react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 
 
@@ -9,6 +9,7 @@ const navItems = [
   { to: "/orders", label: "Orders", icon: ClipboardList },
   { to: "/locations", label: "Locations", icon: MapPin },
   { to: "/routes-monitor", label: "Route Monitor", icon: Route },
+  { to: "/scanner/routes", label: "Scanner", icon: Barcode },
 ];
 
 const pageTitles: Record<string, string> = {
@@ -18,11 +19,12 @@ const pageTitles: Record<string, string> = {
   "/orders": "Orders",
   "/locations": "Locations",
   "/routes-monitor": "Route Monitor",
+  "/scanner/routes": "Scanner",
 };
 
 export function AppLayout() {
   const location = useLocation();
-  const title = pageTitles[location.pathname] ?? "Warehouse WMS";
+  const title = pageTitles[location.pathname] ?? (location.pathname.startsWith("/scanner") ? "Scanner" : "Warehouse WMS");
 
   return (
     <div className="app-shell">

@@ -50,6 +50,14 @@ class DeliveryRouteViewSet(ReadOnlyModelViewSet):
     ordering_fields = ["branch__code", "code", "name", "created_at", "updated_at"]
 
 
+class OrderLineFilter(django_filters.FilterSet):
+    route_run = django_filters.NumberFilter(field_name="order__route_run_id")
+
+    class Meta:
+        model = OrderLine
+        fields = ["order", "product", "route_run"]
+
+
 class RouteRunViewSet(ReadOnlyModelViewSet):
     queryset = RouteRun.objects.select_related("route", "route__branch")
     serializer_class = RouteRunSerializer
@@ -67,10 +75,10 @@ class OrderViewSet(ReadOnlyModelViewSet):
 
 
 class OrderLineViewSet(ReadOnlyModelViewSet):
-    queryset = OrderLine.objects.select_related("order", "product")
+    queryset = OrderLine.objects.select_related("order", "product").prefetch_related("picking_tasks__source_location")
     serializer_class = OrderLineSerializer
-    filterset_fields = ["order", "product"]
-    search_fields = ["order__external_reference", "product__sku", "product__name"]
+    filterset_class = OrderLineFilter
+    search_fields = ["order__external_reference", "product__sku", "product__name", "order__route_run__route__code"]
     ordering_fields = ["order", "line_number", "created_at", "updated_at"]
 
 

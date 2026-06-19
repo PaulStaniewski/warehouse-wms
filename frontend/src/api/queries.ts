@@ -1,7 +1,17 @@
 import { useQuery } from "@tanstack/react-query";
 
-import { getHealth, getList } from "./client";
-import type { Branch, InventoryItem, Location, Order, PickingTask, Product, ReturnBatch, RouteRun } from "../types/api";
+import { apiClient, getHealth, getList } from "./client";
+import type {
+  Branch,
+  InventoryItem,
+  Location,
+  Order,
+  OrderLine,
+  PickingTask,
+  Product,
+  ReturnBatch,
+  RouteRun,
+} from "../types/api";
 
 
 export function useHealth() {
@@ -64,5 +74,24 @@ export function useRouteRuns(branchId?: number) {
   return useQuery({
     queryKey: ["route-runs", branchId ?? "all"],
     queryFn: () => getList<RouteRun>(branchId ? `/route-runs/?branch=${branchId}` : "/route-runs/"),
+  });
+}
+
+export function useRouteRun(routeRunId?: string) {
+  return useQuery({
+    enabled: Boolean(routeRunId),
+    queryKey: ["route-run", routeRunId],
+    queryFn: async () => {
+      const response = await apiClient.get<RouteRun>(`/route-runs/${routeRunId}/`);
+      return response.data;
+    },
+  });
+}
+
+export function useOrderLines(routeRunId?: string) {
+  return useQuery({
+    enabled: Boolean(routeRunId),
+    queryKey: ["order-lines", routeRunId],
+    queryFn: () => getList<OrderLine>(`/order-lines/?route_run=${routeRunId}`),
   });
 }

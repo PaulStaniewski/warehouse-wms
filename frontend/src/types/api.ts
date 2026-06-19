@@ -83,6 +83,21 @@ export type RouteRun = {
   is_selectable: boolean;
 };
 
+export type OrderLine = {
+  id: number;
+  order: number;
+  order_reference: string;
+  product: number;
+  product_sku: string;
+  product_name: string;
+  line_number: number;
+  quantity_ordered: string;
+  quantity_picked: string;
+  remaining_quantity: string;
+  source_location_code: string | null;
+  source_location_name: string | null;
+};
+
 export type PickingTask = {
   id: number;
   branch: number;

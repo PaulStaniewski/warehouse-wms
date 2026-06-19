@@ -99,6 +99,25 @@ class OrderSerializer(serializers.ModelSerializer):
 class OrderLineSerializer(serializers.ModelSerializer):
     order_reference = serializers.CharField(source="order.external_reference", read_only=True)
     product_sku = serializers.CharField(source="product.sku", read_only=True)
+    product_name = serializers.CharField(source="product.name", read_only=True)
+    remaining_quantity = serializers.SerializerMethodField()
+    source_location_code = serializers.SerializerMethodField()
+    source_location_name = serializers.SerializerMethodField()
+
+    def get_remaining_quantity(self, obj: OrderLine) -> str:
+        return str(obj.quantity_ordered - obj.quantity_picked)
+
+    def get_source_location_code(self, obj: OrderLine) -> str | None:
+        picking_task = obj.picking_tasks.select_related("source_location").first()
+        if picking_task is None:
+            return None
+        return picking_task.source_location.code
+
+    def get_source_location_name(self, obj: OrderLine) -> str | None:
+        picking_task = obj.picking_tasks.select_related("source_location").first()
+        if picking_task is None:
+            return None
+        return picking_task.source_location.name
 
     class Meta:
         model = OrderLine
@@ -108,9 +127,13 @@ class OrderLineSerializer(serializers.ModelSerializer):
             "order_reference",
             "product",
             "product_sku",
+            "product_name",
             "line_number",
             "quantity_ordered",
             "quantity_picked",
+            "remaining_quantity",
+            "source_location_code",
+            "source_location_name",
             "created_at",
             "updated_at",
         ]
