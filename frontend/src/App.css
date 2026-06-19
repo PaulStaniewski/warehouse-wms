@@ -174,7 +174,7 @@ a {
 
 .summary-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 16px;
   margin-bottom: 24px;
 }
@@ -198,6 +198,73 @@ a {
   color: #172026;
   font-size: 2rem;
   line-height: 1;
+}
+
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.dashboard-section {
+  margin-top: 24px;
+}
+
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 20px;
+}
+
+.dashboard-section > .section-header {
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.section-header h2 {
+  margin: 0;
+  color: #172026;
+  font-size: 1rem;
+}
+
+.overview-panel {
+  min-height: 220px;
+}
+
+.status-overview-list {
+  display: grid;
+  gap: 8px;
+  padding: 0 20px 20px;
+}
+
+.status-overview-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border: 1px solid #e8edf0;
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+
+.status-overview-row span {
+  color: #526570;
+  font-weight: 700;
+  text-transform: capitalize;
+}
+
+.status-overview-row strong {
+  color: #172026;
+  font-size: 1.25rem;
+}
+
+.empty-panel-text {
+  margin: 0;
+  padding: 0 20px 20px;
+  color: #72838d;
 }
 
 .panel {
@@ -284,7 +351,11 @@ tr:last-child td {
   }
 
   .summary-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .dashboard-grid {
+    grid-template-columns: 1fr;
   }
 }
 

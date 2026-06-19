@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 
 import { getHealth, getList } from "./client";
-import type { InventoryItem, Location, Order, Product } from "../types/api";
+import type { InventoryItem, Location, Order, PickingTask, Product, ReturnBatch } from "../types/api";
 
 
 export function useHealth() {
@@ -36,5 +36,19 @@ export function useLocations() {
   return useQuery({
     queryKey: ["locations"],
     queryFn: () => getList<Location>("/locations/"),
+  });
+}
+
+export function usePickingTasks() {
+  return useQuery({
+    queryKey: ["picking-tasks"],
+    queryFn: () => getList<PickingTask>("/picking-tasks/"),
+  });
+}
+
+export function useReturnBatches() {
+  return useQuery({
+    queryKey: ["return-batches"],
+    queryFn: () => getList<ReturnBatch>("/return-batches/"),
   });
 }
