@@ -174,7 +174,7 @@ a {
 
 .summary-grid {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: 16px;
   margin-bottom: 24px;
 }
@@ -267,6 +267,144 @@ a {
   color: #72838d;
 }
 
+.priority-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid #e5bd72;
+  border-radius: 8px;
+  margin-bottom: 20px;
+  padding: 14px 16px;
+  background: #fff7e6;
+  color: #775000;
+  font-weight: 800;
+}
+
+.route-monitor-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 16px;
+}
+
+.route-run-card {
+  border: 1px solid #dce3e8;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 18px;
+}
+
+.route-run-card--locked {
+  background: #f6f8f9;
+  color: #72838d;
+}
+
+.route-run-card-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.route-run-kicker {
+  margin: 0 0 6px;
+  color: #647782;
+  font-size: 0.75rem;
+  font-weight: 800;
+}
+
+.route-run-card h2 {
+  margin: 0;
+  color: #172026;
+  font-size: 1.125rem;
+}
+
+.route-run-card h2 span {
+  display: block;
+  margin-top: 4px;
+  color: #647782;
+  font-size: 0.875rem;
+  font-weight: 700;
+}
+
+.route-run-icon {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 8px;
+  background: #eaf1f3;
+  color: #153f4b;
+}
+
+.route-run-meta,
+.route-run-labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.route-run-meta span,
+.route-label {
+  border-radius: 8px;
+  padding: 6px 9px;
+  background: #f0f4f6;
+  color: #526570;
+  font-size: 0.75rem;
+  font-weight: 800;
+  text-transform: capitalize;
+}
+
+.route-run-times,
+.route-run-counts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 16px 0;
+}
+
+.route-run-times div,
+.route-run-counts div {
+  border: 1px solid #e8edf0;
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.route-run-times dt,
+.route-run-counts span {
+  margin: 0 0 6px;
+  color: #72838d;
+  font-size: 0.75rem;
+  font-weight: 800;
+}
+
+.route-run-times dd,
+.route-run-counts strong {
+  margin: 0;
+  color: #172026;
+  font-size: 1rem;
+}
+
+.route-label--urgent {
+  background: #fff0d6;
+  color: #8a5400;
+}
+
+.route-label--selectable {
+  background: #e6f5eb;
+  color: #17633a;
+}
+
+.route-label--locked {
+  background: #f3e6e6;
+  color: #8a1f1f;
+}
+
+.route-label--neutral {
+  background: #eef2f4;
+  color: #647782;
+}
+
 .panel {
   overflow: hidden;
   border: 1px solid #dce3e8;
@@ -339,7 +477,7 @@ tr:last-child td {
   }
 
   .sidebar-nav {
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    grid-template-columns: repeat(6, minmax(0, 1fr));
   }
 
   .nav-link {

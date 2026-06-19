@@ -2,11 +2,13 @@ from django.contrib import admin
 
 from operations.models import (
     AuditLog,
+    DeliveryRoute,
     Order,
     OrderLine,
     PickingTask,
     ReturnBatch,
     ReturnLine,
+    RouteRun,
     StockMovement,
 )
 
@@ -16,11 +18,43 @@ class OrderLineInline(admin.TabularInline):
     extra = 0
 
 
+@admin.register(DeliveryRoute)
+class DeliveryRouteAdmin(admin.ModelAdmin):
+    list_display = ["code", "name", "branch", "is_active", "updated_at"]
+    list_filter = ["branch", "is_active"]
+    search_fields = ["code", "name", "branch__code", "branch__name"]
+
+
+@admin.register(RouteRun)
+class RouteRunAdmin(admin.ModelAdmin):
+    list_display = [
+        "route",
+        "service_date",
+        "run_number",
+        "departure_time",
+        "status",
+        "orders_count",
+        "pending_lines_count",
+        "is_urgent",
+        "is_selectable",
+    ]
+    list_filter = ["status", "service_date", "route__branch", "route"]
+    search_fields = ["route__code", "route__name", "route__branch__code"]
+
+
 @admin.register(Order)
 class OrderAdmin(admin.ModelAdmin):
-    list_display = ["external_reference", "branch", "status", "customer_name", "requested_ship_date", "created_at"]
-    list_filter = ["status", "branch", "requested_ship_date"]
-    search_fields = ["external_reference", "customer_name"]
+    list_display = [
+        "external_reference",
+        "branch",
+        "route_run",
+        "status",
+        "customer_name",
+        "requested_ship_date",
+        "created_at",
+    ]
+    list_filter = ["status", "branch", "route_run", "requested_ship_date"]
+    search_fields = ["external_reference", "customer_name", "route_run__route__code"]
     inlines = [OrderLineInline]
 
 

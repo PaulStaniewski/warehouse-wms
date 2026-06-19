@@ -2,11 +2,13 @@ from rest_framework.routers import DefaultRouter
 
 from operations.viewsets import (
     AuditLogViewSet,
+    DeliveryRouteViewSet,
     OrderLineViewSet,
     OrderViewSet,
     PickingTaskViewSet,
     ReturnBatchViewSet,
     ReturnLineViewSet,
+    RouteRunViewSet,
     StockMovementViewSet,
 )
 from warehouse.viewsets import BranchViewSet, InventoryItemViewSet, LocationViewSet, ProductViewSet
@@ -17,6 +19,8 @@ router.register("branches", BranchViewSet, basename="branch")
 router.register("locations", LocationViewSet, basename="location")
 router.register("products", ProductViewSet, basename="product")
 router.register("inventory-items", InventoryItemViewSet, basename="inventory-item")
+router.register("delivery-routes", DeliveryRouteViewSet, basename="delivery-route")
+router.register("route-runs", RouteRunViewSet, basename="route-run")
 router.register("orders", OrderViewSet, basename="order")
 router.register("order-lines", OrderLineViewSet, basename="order-line")
 router.register("return-batches", ReturnBatchViewSet, basename="return-batch")

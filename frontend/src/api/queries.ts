@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 
 import { getHealth, getList } from "./client";
-import type { InventoryItem, Location, Order, PickingTask, Product, ReturnBatch } from "../types/api";
+import type { InventoryItem, Location, Order, PickingTask, Product, ReturnBatch, RouteRun } from "../types/api";
 
 
 export function useHealth() {
@@ -50,5 +50,12 @@ export function useReturnBatches() {
   return useQuery({
     queryKey: ["return-batches"],
     queryFn: () => getList<ReturnBatch>("/return-batches/"),
+  });
+}
+
+export function useRouteRuns() {
+  return useQuery({
+    queryKey: ["route-runs"],
+    queryFn: () => getList<RouteRun>("/route-runs/"),
   });
 }

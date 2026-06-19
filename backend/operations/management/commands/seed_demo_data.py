@@ -1,3 +1,4 @@
+from datetime import timedelta
 from decimal import Decimal
 
 from django.core.management.base import BaseCommand
@@ -6,11 +7,13 @@ from django.utils import timezone
 
 from operations.models import (
     AuditLog,
+    DeliveryRoute,
     Order,
     OrderLine,
     PickingTask,
     ReturnBatch,
     ReturnLine,
+    RouteRun,
     StockMovement,
 )
 from warehouse.models import Branch, InventoryItem, Location, Product
@@ -25,7 +28,9 @@ class Command(BaseCommand):
         locations = self.create_locations(branches)
         products = self.create_products()
         inventory_items = self.create_inventory_items(branches, locations, products)
-        orders, order_lines = self.create_orders(branches, products)
+        delivery_routes = self.create_delivery_routes(branches)
+        route_runs = self.create_route_runs(delivery_routes)
+        orders, order_lines = self.create_orders(branches, products, route_runs)
         return_batch, return_lines = self.create_returns(branches, products)
         picking_tasks = self.create_picking_tasks(branches, locations, order_lines)
         stock_movements = self.create_stock_movements(branches, locations, products, inventory_items)
@@ -36,6 +41,8 @@ class Command(BaseCommand):
         self.stdout.write(f"Locations: {len(locations)}")
         self.stdout.write(f"Products: {len(products)}")
         self.stdout.write(f"Inventory items: {len(inventory_items)}")
+        self.stdout.write(f"Delivery routes: {len(delivery_routes)}")
+        self.stdout.write(f"Route runs: {len(route_runs)}")
         self.stdout.write(f"Orders: {len(orders)}")
         self.stdout.write(f"Order lines: {len(order_lines)}")
         self.stdout.write(f"Returns: 1 batch, {len(return_lines)} lines")
@@ -136,25 +143,126 @@ class Command(BaseCommand):
             inventory_items[(branch_code, location_code, sku)] = item
         return inventory_items
 
-    def create_orders(self, branches, products):
+    def create_delivery_routes(self, branches):
+        route_data = []
+        route_data.extend(("GDY", f"ROUTE-{number:02d}", f"Trasa {number}") for number in range(1, 11))
+        route_data.extend(("GDA", f"ROUTE-{number:02d}", f"Trasa Gdańsk {number}") for number in range(1, 4))
+
+        routes = {}
+        for branch_code, code, name in route_data:
+            route, _ = DeliveryRoute.objects.update_or_create(
+                branch=branches[branch_code],
+                code=code,
+                defaults={
+                    "name": name,
+                    "is_active": True,
+                },
+            )
+            routes[(branch_code, code)] = route
+        return routes
+
+    def create_route_runs(self, delivery_routes):
+        now = timezone.localtime()
+        today = timezone.localdate()
+
+        def as_time(delta: timedelta):
+            return (now + delta).time().replace(microsecond=0)
+
+        run_data = [
+            (
+                "GDY",
+                "ROUTE-01",
+                1,
+                as_time(timedelta(minutes=0)),
+                as_time(timedelta(minutes=1)),
+                as_time(timedelta(minutes=10)),
+                RouteRun.Status.OPEN,
+            ),
+            (
+                "GDY",
+                "ROUTE-01",
+                2,
+                as_time(timedelta(hours=3, minutes=50)),
+                as_time(timedelta(hours=3, minutes=51)),
+                as_time(timedelta(hours=4)),
+                RouteRun.Status.OPEN,
+            ),
+            (
+                "GDY",
+                "ROUTE-02",
+                1,
+                as_time(timedelta(hours=1, minutes=50)),
+                as_time(timedelta(hours=1, minutes=51)),
+                as_time(timedelta(hours=2)),
+                RouteRun.Status.OPEN,
+            ),
+            (
+                "GDY",
+                "ROUTE-03",
+                1,
+                as_time(timedelta(hours=5, minutes=50)),
+                as_time(timedelta(hours=5, minutes=51)),
+                as_time(timedelta(hours=6)),
+                RouteRun.Status.CLOSED,
+            ),
+            (
+                "GDA",
+                "ROUTE-01",
+                1,
+                as_time(timedelta(hours=2, minutes=50)),
+                as_time(timedelta(hours=2, minutes=51)),
+                as_time(timedelta(hours=3)),
+                RouteRun.Status.OPEN,
+            ),
+            (
+                "GDA",
+                "ROUTE-02",
+                1,
+                as_time(timedelta(hours=4, minutes=50)),
+                as_time(timedelta(hours=4, minutes=51)),
+                as_time(timedelta(hours=5)),
+                RouteRun.Status.OPEN,
+            ),
+        ]
+
+        route_runs = {}
+        for branch_code, route_code, run_number, cutoff_time, sync_time, departure_time, status in run_data:
+            route = delivery_routes[(branch_code, route_code)]
+            route_run, _ = RouteRun.objects.update_or_create(
+                route=route,
+                service_date=today,
+                run_number=run_number,
+                defaults={
+                    "order_cutoff_time": cutoff_time,
+                    "sync_time": sync_time,
+                    "departure_time": departure_time,
+                    "status": status,
+                },
+            )
+            route_runs[(branch_code, route_code, run_number)] = route_run
+        return route_runs
+
+    def create_orders(self, branches, products, route_runs):
         orders_data = [
             (
                 "AX-ORDER-0001",
                 "GDY",
                 "Demo Client One",
+                ("GDY", "ROUTE-01", 1),
                 [("FILTR-001", 1, "2"), ("OLEJ-001", 2, "4")],
             ),
-            ("AX-ORDER-0002", "GDY", "Demo Client Two", [("KLOCKI-001", 1, "1")]),
-            ("AX-ORDER-0003", "GDA", "Demo Client Three", [("FILTR-001", 1, "3")]),
+            ("AX-ORDER-0002", "GDY", "Demo Client Two", ("GDY", "ROUTE-01", 2), [("KLOCKI-001", 1, "1")]),
+            ("AX-ORDER-0003", "GDA", "Demo Client Three", ("GDA", "ROUTE-01", 1), [("FILTR-001", 1, "3")]),
         ]
 
         orders = {}
         order_lines = {}
-        for reference, branch_code, customer_name, lines in orders_data:
+        for reference, branch_code, customer_name, route_run_key, lines in orders_data:
             order, _ = Order.objects.update_or_create(
                 external_reference=reference,
                 defaults={
                     "branch": branches[branch_code],
+                    "route_run": route_runs[route_run_key],
                     "customer_name": customer_name,
                     "status": Order.Status.IMPORTED,
                     "requested_ship_date": None,

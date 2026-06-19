@@ -3,20 +3,24 @@ from rest_framework.viewsets import ReadOnlyModelViewSet
 
 from operations.models import (
     AuditLog,
+    DeliveryRoute,
     Order,
     OrderLine,
     PickingTask,
     ReturnBatch,
     ReturnLine,
+    RouteRun,
     StockMovement,
 )
 from operations.serializers import (
     AuditLogSerializer,
+    DeliveryRouteSerializer,
     OrderLineSerializer,
     OrderSerializer,
     PickingTaskSerializer,
     ReturnBatchSerializer,
     ReturnLineSerializer,
+    RouteRunSerializer,
     StockMovementSerializer,
 )
 
@@ -29,11 +33,27 @@ class AuditLogFilter(django_filters.FilterSet):
         fields = ["actor", "action", "action_type"]
 
 
+class DeliveryRouteViewSet(ReadOnlyModelViewSet):
+    queryset = DeliveryRoute.objects.select_related("branch")
+    serializer_class = DeliveryRouteSerializer
+    filterset_fields = ["branch", "code", "is_active"]
+    search_fields = ["code", "name", "branch__code", "branch__name"]
+    ordering_fields = ["branch__code", "code", "name", "created_at", "updated_at"]
+
+
+class RouteRunViewSet(ReadOnlyModelViewSet):
+    queryset = RouteRun.objects.select_related("route", "route__branch")
+    serializer_class = RouteRunSerializer
+    filterset_fields = ["route", "status", "service_date", "departure_time"]
+    search_fields = ["route__code", "route__name", "route__branch__code"]
+    ordering_fields = ["service_date", "departure_time", "run_number", "status", "created_at", "updated_at"]
+
+
 class OrderViewSet(ReadOnlyModelViewSet):
-    queryset = Order.objects.select_related("branch")
+    queryset = Order.objects.select_related("branch", "route_run", "route_run__route")
     serializer_class = OrderSerializer
-    filterset_fields = ["branch", "status", "external_reference"]
-    search_fields = ["external_reference", "customer_name", "branch__code"]
+    filterset_fields = ["branch", "status", "external_reference", "route_run"]
+    search_fields = ["external_reference", "customer_name", "branch__code", "route_run__route__code"]
     ordering_fields = ["external_reference", "status", "requested_ship_date", "created_at", "updated_at"]
 
 

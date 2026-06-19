@@ -2,17 +2,80 @@ from rest_framework import serializers
 
 from operations.models import (
     AuditLog,
+    DeliveryRoute,
     Order,
     OrderLine,
     PickingTask,
     ReturnBatch,
     ReturnLine,
+    RouteRun,
     StockMovement,
 )
 
 
+class DeliveryRouteSerializer(serializers.ModelSerializer):
+    branch_code = serializers.CharField(source="branch.code", read_only=True)
+
+    class Meta:
+        model = DeliveryRoute
+        fields = [
+            "id",
+            "branch",
+            "branch_code",
+            "code",
+            "name",
+            "is_active",
+            "created_at",
+            "updated_at",
+        ]
+
+
+class RouteRunSerializer(serializers.ModelSerializer):
+    route_code = serializers.CharField(source="route.code", read_only=True)
+    route_name = serializers.CharField(source="route.name", read_only=True)
+    branch_code = serializers.CharField(source="route.branch.code", read_only=True)
+    orders_count = serializers.IntegerField(read_only=True)
+    order_lines_count = serializers.IntegerField(read_only=True)
+    picked_lines_count = serializers.IntegerField(read_only=True)
+    pending_lines_count = serializers.IntegerField(read_only=True)
+    has_pending_work = serializers.BooleanField(read_only=True)
+    is_urgent = serializers.BooleanField(read_only=True)
+    is_selectable = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = RouteRun
+        fields = [
+            "id",
+            "route",
+            "route_code",
+            "route_name",
+            "branch_code",
+            "service_date",
+            "run_number",
+            "order_cutoff_time",
+            "sync_time",
+            "departure_time",
+            "status",
+            "orders_count",
+            "order_lines_count",
+            "picked_lines_count",
+            "pending_lines_count",
+            "has_pending_work",
+            "is_urgent",
+            "is_selectable",
+            "created_at",
+            "updated_at",
+        ]
+
+
 class OrderSerializer(serializers.ModelSerializer):
     branch_code = serializers.CharField(source="branch.code", read_only=True)
+    route_run_label = serializers.SerializerMethodField()
+
+    def get_route_run_label(self, obj: Order) -> str | None:
+        if obj.route_run is None:
+            return None
+        return str(obj.route_run)
 
     class Meta:
         model = Order
@@ -20,6 +83,8 @@ class OrderSerializer(serializers.ModelSerializer):
             "id",
             "branch",
             "branch_code",
+            "route_run",
+            "route_run_label",
             "external_reference",
             "customer_name",
             "status",

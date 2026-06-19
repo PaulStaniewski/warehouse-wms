@@ -1,7 +1,13 @@
+from datetime import datetime, timedelta
+
 from django.conf import settings
+from django.db.models import Count, F, Q
 from django.db import models
+from django.utils import timezone
 
 from warehouse.models import Branch, InventoryItem, Location, Product
+
+PRIORITY_LOCK_WINDOW_MINUTES = 15
 
 
 class TimestampedModel(models.Model):
@@ -10,6 +16,120 @@ class TimestampedModel(models.Model):
 
     class Meta:
         abstract = True
+
+
+class DeliveryRoute(TimestampedModel):
+    branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="delivery_routes")
+    code = models.CharField(max_length=32)
+    name = models.CharField(max_length=255)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["branch__code", "code"]
+        constraints = [
+            models.UniqueConstraint(fields=["branch", "code"], name="unique_delivery_route_code_per_branch"),
+        ]
+        indexes = [
+            models.Index(fields=["branch", "code"]),
+            models.Index(fields=["is_active"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.branch.code} / {self.code} - {self.name}"
+
+
+class RouteRun(TimestampedModel):
+    class Status(models.TextChoices):
+        OPEN = "open", "Open"
+        SYNCING = "syncing", "Syncing"
+        PICKING = "picking", "Picking"
+        READY_TO_CLOSE = "ready_to_close", "Ready to close"
+        CLOSED = "closed", "Closed"
+        DISPATCHED = "dispatched", "Dispatched"
+        CANCELLED = "cancelled", "Cancelled"
+
+    route = models.ForeignKey(DeliveryRoute, on_delete=models.PROTECT, related_name="runs")
+    service_date = models.DateField()
+    run_number = models.PositiveIntegerField()
+    order_cutoff_time = models.TimeField()
+    sync_time = models.TimeField()
+    departure_time = models.TimeField()
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.OPEN)
+
+    class Meta:
+        ordering = ["service_date", "route__code", "run_number"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["route", "service_date", "run_number"],
+                name="unique_route_run_per_service_date",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["route", "service_date"]),
+            models.Index(fields=["status"]),
+            models.Index(fields=["service_date", "departure_time"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.route.code} / run {self.run_number} / {self.departure_time}"
+
+    @property
+    def orders_count(self) -> int:
+        return self.orders.count()
+
+    @property
+    def order_lines_count(self) -> int:
+        return OrderLine.objects.filter(order__route_run=self).count()
+
+    @property
+    def picked_lines_count(self) -> int:
+        return OrderLine.objects.filter(
+            order__route_run=self,
+            quantity_picked__gte=F("quantity_ordered"),
+        ).count()
+
+    @property
+    def pending_lines_count(self) -> int:
+        return OrderLine.objects.filter(
+            order__route_run=self,
+            quantity_picked__lt=F("quantity_ordered"),
+        ).count()
+
+    @property
+    def has_pending_work(self) -> bool:
+        return self.pending_lines_count > 0
+
+    @property
+    def is_urgent(self) -> bool:
+        if self.status in {self.Status.CLOSED, self.Status.DISPATCHED, self.Status.CANCELLED}:
+            return False
+        if not self.has_pending_work:
+            return False
+
+        now = timezone.localtime()
+        departure_at = timezone.make_aware(
+            datetime.combine(self.service_date, self.departure_time),
+            timezone.get_current_timezone(),
+        )
+        return now <= departure_at <= now + timedelta(minutes=PRIORITY_LOCK_WINDOW_MINUTES)
+
+    @property
+    def is_selectable(self) -> bool:
+        if self.status in {self.Status.CLOSED, self.Status.DISPATCHED, self.Status.CANCELLED}:
+            return False
+        if not self.has_pending_work:
+            return False
+
+        urgent_exists = RouteRun.objects.exclude(
+            status__in=[self.Status.CLOSED, self.Status.DISPATCHED, self.Status.CANCELLED],
+        ).annotate(
+            pending_lines=Count(
+                "orders__lines",
+                filter=Q(orders__lines__quantity_picked__lt=F("orders__lines__quantity_ordered")),
+            ),
+        ).filter(pending_lines__gt=0)
+
+        return not any(run.is_urgent for run in urgent_exists) or self.is_urgent
 
 
 class Order(TimestampedModel):
@@ -21,6 +141,13 @@ class Order(TimestampedModel):
         CANCELLED = "cancelled", "Cancelled"
 
     branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="orders")
+    route_run = models.ForeignKey(
+        RouteRun,
+        on_delete=models.SET_NULL,
+        related_name="orders",
+        blank=True,
+        null=True,
+    )
     external_reference = models.CharField(max_length=128, unique=True)
     customer_name = models.CharField(max_length=255, blank=True)
     status = models.CharField(max_length=32, choices=Status.choices, default=Status.IMPORTED)

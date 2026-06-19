@@ -53,10 +53,33 @@ export type Order = {
   id: number;
   branch: number;
   branch_code: string;
+  route_run: number | null;
+  route_run_label: string | null;
   external_reference: string;
   customer_name: string;
   status: string;
   requested_ship_date: string | null;
+};
+
+export type RouteRun = {
+  id: number;
+  route: number;
+  route_code: string;
+  route_name: string;
+  branch_code: string;
+  service_date: string;
+  run_number: number;
+  order_cutoff_time: string;
+  sync_time: string;
+  departure_time: string;
+  status: string;
+  orders_count: number;
+  order_lines_count: number;
+  picked_lines_count: number;
+  pending_lines_count: number;
+  has_pending_work: boolean;
+  is_urgent: boolean;
+  is_selectable: boolean;
 };
 
 export type PickingTask = {

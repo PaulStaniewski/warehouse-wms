@@ -1,4 +1,4 @@
-import { Boxes, ClipboardList, LayoutDashboard, MapPin, PackageSearch, Warehouse } from "lucide-react";
+import { Boxes, ClipboardList, LayoutDashboard, MapPin, PackageSearch, Route, Warehouse } from "lucide-react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 
 
@@ -8,6 +8,7 @@ const navItems = [
   { to: "/inventory", label: "Inventory", icon: Boxes },
   { to: "/orders", label: "Orders", icon: ClipboardList },
   { to: "/locations", label: "Locations", icon: MapPin },
+  { to: "/routes-monitor", label: "Route Monitor", icon: Route },
 ];
 
 const pageTitles: Record<string, string> = {
@@ -16,6 +17,7 @@ const pageTitles: Record<string, string> = {
   "/inventory": "Inventory",
   "/orders": "Orders",
   "/locations": "Locations",
+  "/routes-monitor": "Route Monitor",
 };
 
 export function AppLayout() {

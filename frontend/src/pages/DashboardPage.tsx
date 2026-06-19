@@ -10,6 +10,7 @@ import {
   usePickingTasks,
   useProducts,
   useReturnBatches,
+  useRouteRuns,
 } from "../api/queries";
 import type { Order, ReturnBatch } from "../types/api";
 
@@ -82,14 +83,16 @@ export function DashboardPage() {
   const locations = useLocations();
   const pickingTasks = usePickingTasks();
   const returnBatches = useReturnBatches();
+  const routeRuns = useRouteRuns();
 
   const backendTone = health.isLoading ? "loading" : health.data?.status === "ok" ? "ok" : "error";
   const backendLabel = health.isLoading ? "Backend: checking" : `Backend: ${health.data?.status ?? "error"}`;
-  const allQueries = [products, inventory, orders, locations, pickingTasks, returnBatches];
+  const allQueries = [products, inventory, orders, locations, pickingTasks, returnBatches, routeRuns];
 
   const orderRows = orders.data?.results ?? [];
   const pickingRows = pickingTasks.data?.results ?? [];
   const returnRows = returnBatches.data?.results ?? [];
+  const routeRunRows = routeRuns.data?.results ?? [];
   const orderStatusOverview = countByStatus(orderRows, orderStatuses);
   const pickingWorkload = countByStatus(pickingRows, pickingStatuses);
   const verifiedReturnBatches = returnRows.filter((batch) => batch.status === "verified");
@@ -115,6 +118,7 @@ export function DashboardPage() {
           <SummaryCard label="Orders" value={orders.data?.count ?? 0} />
           <SummaryCard label="Open picking tasks" value={pickingRows.filter((task) => task.status === "open").length} />
           <SummaryCard label="Verified returns" value={verifiedReturnBatches.length} />
+          <SummaryCard label="Urgent route runs" value={routeRunRows.filter((run) => run.is_urgent).length} />
         </section>
 
         <section className="dashboard-grid">
