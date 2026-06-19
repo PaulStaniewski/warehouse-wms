@@ -1,7 +1,7 @@
 import { ArrowLeft } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
 
-import { useOrderLines, useRouteRun } from "../api/queries";
+import { usePickingTasks, useRouteRun } from "../api/queries";
 import { DataState } from "../components/DataState";
 
 
@@ -34,11 +34,13 @@ function formatQuantity(value: number) {
 export function ScannerPickingPage() {
   const { id } = useParams();
   const routeRun = useRouteRun(id);
-  const orderLines = useOrderLines(id);
-  const lines = orderLines.data?.results ?? [];
-  const totalOrdered = lines.reduce((sum, line) => sum + toNumber(line.quantity_ordered), 0);
-  const totalPicked = lines.reduce((sum, line) => sum + toNumber(line.quantity_picked), 0);
-  const totalRemaining = lines.reduce((sum, line) => sum + toNumber(line.remaining_quantity), 0);
+  const pickingTasks = usePickingTasks(id);
+  const tasks = pickingTasks.data?.results ?? [];
+  const totalToPick = tasks.reduce((sum, task) => sum + toNumber(task.quantity_to_pick), 0);
+  const totalPicked = tasks.reduce((sum, task) => sum + toNumber(task.quantity_picked), 0);
+  const totalRemaining = tasks.reduce((sum, task) => sum + toNumber(task.remaining_quantity), 0);
+  const openTasksCount = tasks.filter((task) => task.status === "open" || task.status === "assigned").length;
+  const completedTasksCount = tasks.filter((task) => task.status === "completed").length;
 
   return (
     <>
@@ -51,9 +53,9 @@ export function ScannerPickingPage() {
       </div>
 
       <DataState
-        isLoading={routeRun.isLoading || orderLines.isLoading}
-        isError={routeRun.isError || orderLines.isError}
-        error={routeRun.error || orderLines.error}
+        isLoading={routeRun.isLoading || pickingTasks.isLoading}
+        isError={routeRun.isError || pickingTasks.isError}
+        error={routeRun.error || pickingTasks.error}
       >
         {routeRun.data && (
           <section className="scanner-header-panel">
@@ -94,8 +96,8 @@ export function ScannerPickingPage() {
 
         <section className="scanner-progress-grid">
           <article>
-            <span>Ordered</span>
-            <strong>{formatQuantity(totalOrdered)}</strong>
+            <span>To pick</span>
+            <strong>{formatQuantity(totalToPick)}</strong>
           </article>
           <article>
             <span>Picked</span>
@@ -105,38 +107,47 @@ export function ScannerPickingPage() {
             <span>Remaining</span>
             <strong>{formatQuantity(totalRemaining)}</strong>
           </article>
+          <article>
+            <span>Open tasks</span>
+            <strong>{openTasksCount}</strong>
+          </article>
+          <article>
+            <span>Completed tasks</span>
+            <strong>{completedTasksCount}</strong>
+          </article>
         </section>
 
-        {lines.length === 0 ? (
-          <div className="state-box">No picking lines found for this route run.</div>
+        {tasks.length === 0 ? (
+          <div className="state-box">No picking tasks found for this route run.</div>
         ) : (
           <section className="picking-list">
-            {lines.map((line) => (
-              <article className="picking-row" key={line.id}>
+            {tasks.map((task) => (
+              <article className="picking-row" key={task.id}>
                 <div className="picking-location">
                   <span>Location</span>
-                  <strong>{line.source_location_code ?? "Not assigned"}</strong>
-                  {line.source_location_name && <small>{line.source_location_name}</small>}
+                  <strong>{task.source_location_code ?? "Not assigned"}</strong>
+                  {task.source_location_name && <small>{task.source_location_name}</small>}
                 </div>
 
                 <div className="picking-product">
-                  <span className="mono">{line.product_sku}</span>
-                  <h2>{line.product_name}</h2>
-                  <p>Order {line.order_reference}</p>
+                  <span className="mono">{task.product_sku}</span>
+                  <h2>{task.product_name}</h2>
+                  <p>Order {task.order_reference}</p>
+                  <p>Status {formatStatus(task.status)}</p>
                 </div>
 
                 <div className="picking-quantities">
                   <div>
-                    <span>Ordered</span>
-                    <strong>{line.quantity_ordered}</strong>
+                    <span>To pick</span>
+                    <strong>{task.quantity_to_pick}</strong>
                   </div>
                   <div>
                     <span>Picked</span>
-                    <strong>{line.quantity_picked}</strong>
+                    <strong>{task.quantity_picked}</strong>
                   </div>
                   <div>
                     <span>Remaining</span>
-                    <strong>{line.remaining_quantity}</strong>
+                    <strong>{task.remaining_quantity}</strong>
                   </div>
                 </div>
               </article>

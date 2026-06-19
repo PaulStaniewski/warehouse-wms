@@ -105,13 +105,16 @@ export type PickingTask = {
   order_line: number;
   order_reference: string;
   product_sku: string;
+  product_name: string;
   source_location: number;
   source_location_code: string;
+  source_location_name: string;
   assigned_to: number | null;
   assigned_to_username: string | null;
   status: string;
   quantity_to_pick: string;
   quantity_picked: string;
+  remaining_quantity: string;
 };
 
 export type ReturnBatch = {

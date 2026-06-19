@@ -58,6 +58,14 @@ class OrderLineFilter(django_filters.FilterSet):
         fields = ["order", "product", "route_run"]
 
 
+class PickingTaskFilter(django_filters.FilterSet):
+    route_run = django_filters.NumberFilter(field_name="order_line__order__route_run_id")
+
+    class Meta:
+        model = PickingTask
+        fields = ["branch", "status", "assigned_to", "route_run"]
+
+
 class RouteRunViewSet(ReadOnlyModelViewSet):
     queryset = RouteRun.objects.select_related("route", "route__branch")
     serializer_class = RouteRunSerializer
@@ -107,7 +115,7 @@ class PickingTaskViewSet(ReadOnlyModelViewSet):
         "source_location",
     )
     serializer_class = PickingTaskSerializer
-    filterset_fields = ["branch", "status", "assigned_to"]
+    filterset_class = PickingTaskFilter
     search_fields = [
         "order_line__order__external_reference",
         "order_line__product__sku",

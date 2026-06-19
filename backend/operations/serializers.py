@@ -180,8 +180,14 @@ class PickingTaskSerializer(serializers.ModelSerializer):
     branch_code = serializers.CharField(source="branch.code", read_only=True)
     order_reference = serializers.CharField(source="order_line.order.external_reference", read_only=True)
     product_sku = serializers.CharField(source="order_line.product.sku", read_only=True)
+    product_name = serializers.CharField(source="order_line.product.name", read_only=True)
     source_location_code = serializers.CharField(source="source_location.code", read_only=True)
+    source_location_name = serializers.CharField(source="source_location.name", read_only=True)
     assigned_to_username = serializers.CharField(source="assigned_to.username", read_only=True)
+    remaining_quantity = serializers.SerializerMethodField()
+
+    def get_remaining_quantity(self, obj: PickingTask) -> str:
+        return str(obj.quantity_to_pick - obj.quantity_picked)
 
     class Meta:
         model = PickingTask
@@ -192,13 +198,16 @@ class PickingTaskSerializer(serializers.ModelSerializer):
             "order_line",
             "order_reference",
             "product_sku",
+            "product_name",
             "source_location",
             "source_location_code",
+            "source_location_name",
             "assigned_to",
             "assigned_to_username",
             "status",
             "quantity_to_pick",
             "quantity_picked",
+            "remaining_quantity",
             "created_at",
             "updated_at",
         ]

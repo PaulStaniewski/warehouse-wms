@@ -56,10 +56,10 @@ export function useBranches() {
   });
 }
 
-export function usePickingTasks() {
+export function usePickingTasks(routeRunId?: string) {
   return useQuery({
-    queryKey: ["picking-tasks"],
-    queryFn: () => getList<PickingTask>("/picking-tasks/"),
+    queryKey: ["picking-tasks", routeRunId ?? "all"],
+    queryFn: () => getList<PickingTask>(routeRunId ? `/picking-tasks/?route_run=${routeRunId}` : "/picking-tasks/"),
   });
 }
 
