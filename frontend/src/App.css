@@ -280,6 +280,35 @@ a {
   font-weight: 800;
 }
 
+.branch-selector {
+  display: grid;
+  gap: 6px;
+  min-width: 220px;
+}
+
+.branch-selector label {
+  color: #647782;
+  font-size: 0.75rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.branch-selector select {
+  min-height: 38px;
+  border: 1px solid #c8d3d9;
+  border-radius: 8px;
+  padding: 0 12px;
+  background: #ffffff;
+  color: #172026;
+  font-weight: 700;
+}
+
+.branch-context {
+  margin: -6px 0 18px;
+  color: #526570;
+  font-weight: 800;
+}
+
 .route-monitor-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));

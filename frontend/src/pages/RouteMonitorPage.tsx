@@ -1,9 +1,10 @@
+import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, Lock, Route, ShieldCheck } from "lucide-react";
 
-import { useRouteRuns } from "../api/queries";
+import { useBranches, useRouteRuns } from "../api/queries";
 import { DataState } from "../components/DataState";
 import { PageHeader } from "../components/PageHeader";
-import type { RouteRun } from "../types/api";
+import type { Branch, RouteRun } from "../types/api";
 
 
 function formatStatus(status: string) {
@@ -103,19 +104,58 @@ function RouteRunCard({ run }: { run: RouteRun }) {
   );
 }
 
+function getDefaultBranch(branches: Branch[]) {
+  return branches.find((branch) => branch.code === "GDY") ?? branches[0];
+}
+
 export function RouteMonitorPage() {
-  const routeRuns = useRouteRuns();
+  const branches = useBranches();
+  const [selectedBranchId, setSelectedBranchId] = useState<number | undefined>();
+  const branchRows = useMemo(() => branches.data?.results ?? [], [branches.data?.results]);
+  const selectedBranch = branchRows.find((branch) => branch.id === selectedBranchId);
+  const routeRuns = useRouteRuns(selectedBranchId);
   const rows = routeRuns.data?.results ?? [];
   const hasPriorityMode = rows.some((run) => run.is_urgent);
+
+  useEffect(() => {
+    if (selectedBranchId || branchRows.length === 0) {
+      return;
+    }
+
+    setSelectedBranchId(getDefaultBranch(branchRows).id);
+  }, [branchRows, selectedBranchId]);
 
   return (
     <>
       <PageHeader
         title="Route monitor"
         description="Read-only overview of route runs, departure windows, and picking pressure."
+        action={
+          <div className="branch-selector">
+            <label htmlFor="branch-select">Branch</label>
+            <select
+              disabled={branches.isLoading || branchRows.length === 0}
+              id="branch-select"
+              onChange={(event) => setSelectedBranchId(Number(event.target.value))}
+              value={selectedBranchId ?? ""}
+            >
+              {branchRows.map((branch) => (
+                <option key={branch.id} value={branch.id}>
+                  {branch.code} / {branch.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        }
       />
 
-      <DataState isLoading={routeRuns.isLoading} isError={routeRuns.isError} error={routeRuns.error}>
+      <DataState
+        isLoading={branches.isLoading || routeRuns.isLoading || !selectedBranchId}
+        isError={branches.isError || routeRuns.isError}
+        error={branches.error || routeRuns.error}
+      >
+        {selectedBranch && <p className="branch-context">Viewing branch: {selectedBranch.code}</p>}
+
         {hasPriorityMode && (
           <div className="priority-banner">
             <ShieldCheck size={18} />

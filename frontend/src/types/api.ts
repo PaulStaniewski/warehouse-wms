@@ -64,6 +64,7 @@ export type Order = {
 export type RouteRun = {
   id: number;
   route: number;
+  branch: number;
   route_code: string;
   route_name: string;
   branch_code: string;

@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 
 import { getHealth, getList } from "./client";
-import type { InventoryItem, Location, Order, PickingTask, Product, ReturnBatch, RouteRun } from "../types/api";
+import type { Branch, InventoryItem, Location, Order, PickingTask, Product, ReturnBatch, RouteRun } from "../types/api";
 
 
 export function useHealth() {
@@ -39,6 +39,13 @@ export function useLocations() {
   });
 }
 
+export function useBranches() {
+  return useQuery({
+    queryKey: ["branches"],
+    queryFn: () => getList<Branch>("/branches/"),
+  });
+}
+
 export function usePickingTasks() {
   return useQuery({
     queryKey: ["picking-tasks"],
@@ -53,9 +60,9 @@ export function useReturnBatches() {
   });
 }
 
-export function useRouteRuns() {
+export function useRouteRuns(branchId?: number) {
   return useQuery({
-    queryKey: ["route-runs"],
-    queryFn: () => getList<RouteRun>("/route-runs/"),
+    queryKey: ["route-runs", branchId ?? "all"],
+    queryFn: () => getList<RouteRun>(branchId ? `/route-runs/?branch=${branchId}` : "/route-runs/"),
   });
 }

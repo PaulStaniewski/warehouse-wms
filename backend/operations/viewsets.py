@@ -33,6 +33,15 @@ class AuditLogFilter(django_filters.FilterSet):
         fields = ["actor", "action", "action_type"]
 
 
+class RouteRunFilter(django_filters.FilterSet):
+    branch = django_filters.NumberFilter(field_name="route__branch_id")
+    branch_code = django_filters.CharFilter(field_name="route__branch__code", lookup_expr="iexact")
+
+    class Meta:
+        model = RouteRun
+        fields = ["route", "branch", "branch_code", "status", "service_date", "departure_time"]
+
+
 class DeliveryRouteViewSet(ReadOnlyModelViewSet):
     queryset = DeliveryRoute.objects.select_related("branch")
     serializer_class = DeliveryRouteSerializer
@@ -44,7 +53,7 @@ class DeliveryRouteViewSet(ReadOnlyModelViewSet):
 class RouteRunViewSet(ReadOnlyModelViewSet):
     queryset = RouteRun.objects.select_related("route", "route__branch")
     serializer_class = RouteRunSerializer
-    filterset_fields = ["route", "status", "service_date", "departure_time"]
+    filterset_class = RouteRunFilter
     search_fields = ["route__code", "route__name", "route__branch__code"]
     ordering_fields = ["service_date", "departure_time", "run_number", "status", "created_at", "updated_at"]
 

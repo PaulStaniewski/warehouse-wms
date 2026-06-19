@@ -33,6 +33,7 @@ class DeliveryRouteSerializer(serializers.ModelSerializer):
 class RouteRunSerializer(serializers.ModelSerializer):
     route_code = serializers.CharField(source="route.code", read_only=True)
     route_name = serializers.CharField(source="route.name", read_only=True)
+    branch = serializers.IntegerField(source="route.branch_id", read_only=True)
     branch_code = serializers.CharField(source="route.branch.code", read_only=True)
     orders_count = serializers.IntegerField(read_only=True)
     order_lines_count = serializers.IntegerField(read_only=True)
@@ -47,6 +48,7 @@ class RouteRunSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "route",
+            "branch",
             "route_code",
             "route_name",
             "branch_code",
