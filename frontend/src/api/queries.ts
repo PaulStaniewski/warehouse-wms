@@ -98,9 +98,21 @@ export function useOrderLines(routeRunId?: string) {
 
 export function useCompletePickingTask() {
   return useMutation({
-    mutationFn: async (taskId: number) => {
+    mutationFn: async ({
+      locationCode,
+      productCode,
+      taskId,
+    }: {
+      locationCode: string;
+      productCode: string;
+      taskId: number;
+    }) => {
       const response = await apiClient.post<{ message: string; task: PickingTask }>(
         `/picking-tasks/${taskId}/complete/`,
+        {
+          location_code: locationCode,
+          product_code: productCode,
+        },
       );
       return response.data;
     },

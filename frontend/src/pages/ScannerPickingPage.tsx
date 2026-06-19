@@ -38,6 +38,7 @@ export function ScannerPickingPage() {
   const { id } = useParams();
   const queryClient = useQueryClient();
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [scanValues, setScanValues] = useState<Record<number, { locationCode: string; productCode: string }>>({});
   const routeRun = useRouteRun(id);
   const pickingTasks = usePickingTasks(id);
   const completePickingTask = useCompletePickingTask();
@@ -48,12 +49,33 @@ export function ScannerPickingPage() {
   const openTasksCount = tasks.filter((task) => task.status === "open" || task.status === "assigned").length;
   const completedTasksCount = tasks.filter((task) => task.status === "completed").length;
 
+  function updateScanValue(taskId: number, field: "locationCode" | "productCode", value: string) {
+    setScanValues((current) => ({
+      ...current,
+      [taskId]: {
+        locationCode: current[taskId]?.locationCode ?? "",
+        productCode: current[taskId]?.productCode ?? "",
+        [field]: value,
+      },
+    }));
+  }
+
   async function handleComplete(taskId: number) {
     setMessage(null);
+    const values = scanValues[taskId] ?? { locationCode: "", productCode: "" };
 
     try {
-      const result = await completePickingTask.mutateAsync(taskId);
+      const result = await completePickingTask.mutateAsync({
+        locationCode: values.locationCode,
+        productCode: values.productCode,
+        taskId,
+      });
       setMessage({ type: "success", text: result.message });
+      setScanValues((current) => {
+        const next = { ...current };
+        delete next[taskId];
+        return next;
+      });
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["picking-tasks", id] }),
         queryClient.invalidateQueries({ queryKey: ["route-run", id] }),
@@ -175,6 +197,27 @@ export function ScannerPickingPage() {
                     <span>Remaining</span>
                     <strong>{task.remaining_quantity}</strong>
                   </div>
+                </div>
+
+                <div className="picking-scan-fields">
+                  <label>
+                    <span>Scan location</span>
+                    <input
+                      disabled={task.status === "completed" || task.status === "cancelled"}
+                      onChange={(event) => updateScanValue(task.id, "locationCode", event.target.value)}
+                      placeholder={task.source_location_code}
+                      value={scanValues[task.id]?.locationCode ?? ""}
+                    />
+                  </label>
+                  <label>
+                    <span>Scan product barcode or SKU</span>
+                    <input
+                      disabled={task.status === "completed" || task.status === "cancelled"}
+                      onChange={(event) => updateScanValue(task.id, "productCode", event.target.value)}
+                      placeholder={task.product_sku}
+                      value={scanValues[task.id]?.productCode ?? ""}
+                    />
+                  </label>
                 </div>
 
                 <div className="picking-actions">

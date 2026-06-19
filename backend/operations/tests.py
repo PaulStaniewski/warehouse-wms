@@ -64,17 +64,43 @@ class PickingTaskCompleteActionTests(APITestCase):
             quantity_picked=Decimal("0"),
         )
 
-    def complete_task(self, task=None):
+    def complete_task(self, task=None, location_code="A-01-01", product_code="990000000001"):
         task = task or self.task
-        return self.client.post(f"/api/picking-tasks/{task.id}/complete/")
+        return self.client.post(
+            f"/api/picking-tasks/{task.id}/complete/",
+            {
+                "location_code": location_code,
+                "product_code": product_code,
+            },
+            format="json",
+        )
 
-    def test_completing_open_task_succeeds(self):
+    def test_completing_with_correct_location_and_product_succeeds(self):
         response = self.complete_task()
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.task.refresh_from_db()
         self.assertEqual(self.task.status, PickingTask.Status.COMPLETED)
         self.assertEqual(self.task.quantity_picked, Decimal("2.000"))
+
+    def test_wrong_location_code_fails(self):
+        response = self.complete_task(location_code="WRONG-01")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("location", response.data["detail"])
+
+    def test_wrong_product_code_fails(self):
+        response = self.complete_task(product_code="WRONG-SKU")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("product", response.data["detail"])
+
+    def test_product_sku_can_be_used_instead_of_barcode(self):
+        response = self.complete_task(product_code="TEST-001")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.task.refresh_from_db()
+        self.assertEqual(self.task.status, PickingTask.Status.COMPLETED)
 
     def test_completed_task_cannot_be_completed_again(self):
         first_response = self.complete_task()

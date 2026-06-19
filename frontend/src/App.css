@@ -613,7 +613,7 @@ a {
 
 .picking-row {
   display: grid;
-  grid-template-columns: 180px minmax(220px, 1fr) minmax(260px, 0.7fr) 150px;
+  grid-template-columns: 180px minmax(220px, 1fr) minmax(260px, 0.7fr);
   gap: 18px;
   border: 1px solid #dce3e8;
   border-left: 6px solid #1d4f5d;
@@ -672,9 +672,44 @@ a {
   font-size: 1.5rem;
 }
 
+.picking-scan-fields {
+  display: grid;
+  grid-column: 1 / span 3;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.picking-scan-fields label {
+  display: grid;
+  gap: 8px;
+}
+
+.picking-scan-fields span {
+  color: #526570;
+  font-size: 0.875rem;
+  font-weight: 900;
+}
+
+.picking-scan-fields input {
+  min-height: 48px;
+  border: 1px solid #c8d3d9;
+  border-radius: 8px;
+  padding: 0 14px;
+  background: #ffffff;
+  color: #172026;
+  font-size: 1rem;
+  font-weight: 800;
+}
+
+.picking-scan-fields input:disabled {
+  background: #eef2f4;
+  color: #72838d;
+}
+
 .picking-actions {
   display: flex;
   align-items: center;
+  grid-column: 1 / span 3;
 }
 
 .picking-actions button {
@@ -808,6 +843,11 @@ tr:last-child td {
   .picking-row {
     grid-template-columns: 1fr;
   }
+
+  .picking-scan-fields,
+  .picking-actions {
+    grid-column: auto;
+  }
 }
 
 @media (max-width: 640px) {
@@ -835,7 +875,8 @@ tr:last-child td {
 
   .scanner-header-panel dl,
   .scanner-progress-grid,
-  .picking-quantities {
+  .picking-quantities,
+  .picking-scan-fields {
     grid-template-columns: 1fr;
   }
 }

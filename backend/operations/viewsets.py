@@ -144,6 +144,8 @@ class PickingTaskViewSet(ReadOnlyModelViewSet):
                     pk=pk,
                 )
             )
+            location_code = str(request.data.get("location_code", "")).strip()
+            product_code = str(request.data.get("product_code", "")).strip()
 
             if task.status == PickingTask.Status.COMPLETED:
                 return Response({"detail": "Picking task is already completed."}, status=status.HTTP_400_BAD_REQUEST)
@@ -156,6 +158,20 @@ class PickingTaskViewSet(ReadOnlyModelViewSet):
                 return Response({"detail": "Picking task has no remaining quantity to pick."}, status=status.HTTP_400_BAD_REQUEST)
 
             order_line = task.order_line
+            product = order_line.product
+
+            if not location_code:
+                return Response({"detail": "Location code is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+            if location_code != task.source_location.code:
+                return Response({"detail": "Scanned location does not match the task source location."}, status=status.HTTP_400_BAD_REQUEST)
+
+            if not product_code:
+                return Response({"detail": "Product barcode or SKU is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+            if product_code not in {product.sku, product.barcode}:
+                return Response({"detail": "Scanned product does not match the picking task product."}, status=status.HTTP_400_BAD_REQUEST)
+
             order_remaining = order_line.quantity_ordered - order_line.quantity_picked
             if quantity_to_pick > order_remaining:
                 return Response({"detail": "Completing this task would overpick the order line."}, status=status.HTTP_400_BAD_REQUEST)
@@ -165,7 +181,7 @@ class PickingTaskViewSet(ReadOnlyModelViewSet):
                 .filter(
                     branch=task.branch,
                     location=task.source_location,
-                    product=order_line.product,
+                    product=product,
                 )
                 .first()
             )
@@ -187,7 +203,7 @@ class PickingTaskViewSet(ReadOnlyModelViewSet):
 
             StockMovement.objects.create(
                 branch=task.branch,
-                product=order_line.product,
+                product=product,
                 inventory_item=inventory_item,
                 source_location=task.source_location,
                 movement_type=StockMovement.MovementType.PICK,
