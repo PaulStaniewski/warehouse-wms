@@ -1,4 +1,10 @@
 import django_filters
+from django.shortcuts import get_object_or_404
+from django.db import transaction
+from django.db.models import F
+from rest_framework import status
+from rest_framework.decorators import action
+from rest_framework.response import Response
 from rest_framework.viewsets import ReadOnlyModelViewSet
 
 from operations.models import (
@@ -23,6 +29,7 @@ from operations.serializers import (
     RouteRunSerializer,
     StockMovementSerializer,
 )
+from warehouse.models import InventoryItem
 
 
 class AuditLogFilter(django_filters.FilterSet):
@@ -123,6 +130,88 @@ class PickingTaskViewSet(ReadOnlyModelViewSet):
         "assigned_to__username",
     ]
     ordering_fields = ["status", "created_at", "updated_at"]
+
+    @action(detail=True, methods=["post"])
+    def complete(self, request, pk=None):
+        with transaction.atomic():
+            task = (
+                get_object_or_404(
+                    PickingTask.objects.select_for_update().select_related(
+                        "branch",
+                        "order_line__product",
+                        "source_location",
+                    ),
+                    pk=pk,
+                )
+            )
+
+            if task.status == PickingTask.Status.COMPLETED:
+                return Response({"detail": "Picking task is already completed."}, status=status.HTTP_400_BAD_REQUEST)
+
+            if task.status == PickingTask.Status.CANCELLED:
+                return Response({"detail": "Cancelled picking task cannot be completed."}, status=status.HTTP_400_BAD_REQUEST)
+
+            quantity_to_pick = task.quantity_to_pick - task.quantity_picked
+            if quantity_to_pick <= 0:
+                return Response({"detail": "Picking task has no remaining quantity to pick."}, status=status.HTTP_400_BAD_REQUEST)
+
+            order_line = task.order_line
+            order_remaining = order_line.quantity_ordered - order_line.quantity_picked
+            if quantity_to_pick > order_remaining:
+                return Response({"detail": "Completing this task would overpick the order line."}, status=status.HTTP_400_BAD_REQUEST)
+
+            inventory_item = (
+                InventoryItem.objects.select_for_update()
+                .filter(
+                    branch=task.branch,
+                    location=task.source_location,
+                    product=order_line.product,
+                )
+                .first()
+            )
+            if inventory_item is None:
+                return Response({"detail": "No inventory found at the source location."}, status=status.HTTP_400_BAD_REQUEST)
+
+            if inventory_item.quantity_on_hand < quantity_to_pick:
+                return Response({"detail": "Not enough stock at the source location."}, status=status.HTTP_400_BAD_REQUEST)
+
+            task.quantity_picked = task.quantity_to_pick
+            task.status = PickingTask.Status.COMPLETED
+            task.save(update_fields=["quantity_picked", "status", "updated_at"])
+
+            order_line.quantity_picked = F("quantity_picked") + quantity_to_pick
+            order_line.save(update_fields=["quantity_picked", "updated_at"])
+
+            inventory_item.quantity_on_hand = F("quantity_on_hand") - quantity_to_pick
+            inventory_item.save(update_fields=["quantity_on_hand", "updated_at"])
+
+            StockMovement.objects.create(
+                branch=task.branch,
+                product=order_line.product,
+                inventory_item=inventory_item,
+                source_location=task.source_location,
+                movement_type=StockMovement.MovementType.PICK,
+                quantity=quantity_to_pick,
+                reference=f"PICK-TASK-{task.id}",
+                performed_by=None,
+            )
+            AuditLog.objects.create(
+                action_type=AuditLog.ActionType.STATUS_CHANGE,
+                entity_name="PickingTask",
+                entity_id=str(task.id),
+                message=f"Picking task {task.id} completed.",
+            )
+
+            task.refresh_from_db()
+
+        serializer = self.get_serializer(task)
+        return Response(
+            {
+                "message": "Picking task completed successfully.",
+                "task": serializer.data,
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class StockMovementViewSet(ReadOnlyModelViewSet):

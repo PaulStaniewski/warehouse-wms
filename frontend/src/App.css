@@ -613,13 +613,18 @@ a {
 
 .picking-row {
   display: grid;
-  grid-template-columns: 180px minmax(220px, 1fr) minmax(260px, 0.7fr);
+  grid-template-columns: 180px minmax(220px, 1fr) minmax(260px, 0.7fr) 150px;
   gap: 18px;
   border: 1px solid #dce3e8;
   border-left: 6px solid #1d4f5d;
   border-radius: 8px;
   background: #ffffff;
   padding: 18px;
+}
+
+.picking-row--completed {
+  border-left-color: #79b88f;
+  background: #f7fbf8;
 }
 
 .picking-location span,
@@ -665,6 +670,47 @@ a {
   display: block;
   margin-top: 8px;
   font-size: 1.5rem;
+}
+
+.picking-actions {
+  display: flex;
+  align-items: center;
+}
+
+.picking-actions button {
+  width: 100%;
+  min-height: 48px;
+  border: 0;
+  border-radius: 8px;
+  background: #1d4f5d;
+  color: #ffffff;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.picking-actions button:disabled {
+  background: #c8d3d9;
+  color: #526570;
+  cursor: not-allowed;
+}
+
+.scanner-message {
+  border-radius: 8px;
+  margin-bottom: 16px;
+  padding: 14px 16px;
+  font-weight: 800;
+}
+
+.scanner-message--success {
+  border: 1px solid #9bd3b0;
+  background: #e6f5eb;
+  color: #17633a;
+}
+
+.scanner-message--error {
+  border: 1px solid #e3a0a0;
+  background: #fbeaea;
+  color: #8a1f1f;
 }
 
 .panel {

@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 
 import { apiClient, getHealth, getList } from "./client";
 import type {
@@ -93,5 +93,16 @@ export function useOrderLines(routeRunId?: string) {
     enabled: Boolean(routeRunId),
     queryKey: ["order-lines", routeRunId],
     queryFn: () => getList<OrderLine>(`/order-lines/?route_run=${routeRunId}`),
+  });
+}
+
+export function useCompletePickingTask() {
+  return useMutation({
+    mutationFn: async (taskId: number) => {
+      const response = await apiClient.post<{ message: string; task: PickingTask }>(
+        `/picking-tasks/${taskId}/complete/`,
+      );
+      return response.data;
+    },
   });
 }

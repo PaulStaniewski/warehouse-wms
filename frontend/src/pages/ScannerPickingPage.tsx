@@ -1,7 +1,10 @@
+import { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import axios from "axios";
 import { ArrowLeft } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
 
-import { usePickingTasks, useRouteRun } from "../api/queries";
+import { useCompletePickingTask, usePickingTasks, useRouteRun } from "../api/queries";
 import { DataState } from "../components/DataState";
 
 
@@ -33,14 +36,35 @@ function formatQuantity(value: number) {
 
 export function ScannerPickingPage() {
   const { id } = useParams();
+  const queryClient = useQueryClient();
+  const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const routeRun = useRouteRun(id);
   const pickingTasks = usePickingTasks(id);
+  const completePickingTask = useCompletePickingTask();
   const tasks = pickingTasks.data?.results ?? [];
   const totalToPick = tasks.reduce((sum, task) => sum + toNumber(task.quantity_to_pick), 0);
   const totalPicked = tasks.reduce((sum, task) => sum + toNumber(task.quantity_picked), 0);
   const totalRemaining = tasks.reduce((sum, task) => sum + toNumber(task.remaining_quantity), 0);
   const openTasksCount = tasks.filter((task) => task.status === "open" || task.status === "assigned").length;
   const completedTasksCount = tasks.filter((task) => task.status === "completed").length;
+
+  async function handleComplete(taskId: number) {
+    setMessage(null);
+
+    try {
+      const result = await completePickingTask.mutateAsync(taskId);
+      setMessage({ type: "success", text: result.message });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["picking-tasks", id] }),
+        queryClient.invalidateQueries({ queryKey: ["route-run", id] }),
+      ]);
+    } catch (error) {
+      const text = axios.isAxiosError(error)
+        ? error.response?.data?.detail || "Could not complete picking task."
+        : "Could not complete picking task.";
+      setMessage({ type: "error", text });
+    }
+  }
 
   return (
     <>
@@ -57,6 +81,8 @@ export function ScannerPickingPage() {
         isError={routeRun.isError || pickingTasks.isError}
         error={routeRun.error || pickingTasks.error}
       >
+        {message && <div className={`scanner-message scanner-message--${message.type}`}>{message.text}</div>}
+
         {routeRun.data && (
           <section className="scanner-header-panel">
             <div>
@@ -122,7 +148,7 @@ export function ScannerPickingPage() {
         ) : (
           <section className="picking-list">
             {tasks.map((task) => (
-              <article className="picking-row" key={task.id}>
+              <article className={`picking-row ${task.status === "completed" ? "picking-row--completed" : ""}`} key={task.id}>
                 <div className="picking-location">
                   <span>Location</span>
                   <strong>{task.source_location_code ?? "Not assigned"}</strong>
@@ -149,6 +175,20 @@ export function ScannerPickingPage() {
                     <span>Remaining</span>
                     <strong>{task.remaining_quantity}</strong>
                   </div>
+                </div>
+
+                <div className="picking-actions">
+                  <button
+                    disabled={
+                      task.status === "completed" ||
+                      task.status === "cancelled" ||
+                      completePickingTask.isPending
+                    }
+                    onClick={() => handleComplete(task.id)}
+                    type="button"
+                  >
+                    {task.status === "completed" ? "Completed" : "Complete"}
+                  </button>
                 </div>
               </article>
             ))}
