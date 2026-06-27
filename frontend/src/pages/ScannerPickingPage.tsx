@@ -95,7 +95,7 @@ export function ScannerPickingPage() {
           <ArrowLeft size={17} />
           Back to Scanner Routes
         </Link>
-        <Link to="/routes-monitor">Back to Route Monitor</Link>
+        <Link to="/wms/routes-monitor">Back to Route Monitor</Link>
       </div>
 
       <DataState

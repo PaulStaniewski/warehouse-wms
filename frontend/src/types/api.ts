@@ -125,3 +125,14 @@ export type ReturnBatch = {
   status: string;
   received_at: string | null;
 };
+
+export type AuditLog = {
+  id: number;
+  actor: number | null;
+  actor_username: string | null;
+  action_type: string;
+  entity_name: string;
+  entity_id: string;
+  message: string;
+  created_at: string;
+};

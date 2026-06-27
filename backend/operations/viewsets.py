@@ -2,6 +2,8 @@ import django_filters
 from django.shortcuts import get_object_or_404
 from django.db import transaction
 from django.db.models import F
+from django.utils import timezone
+from django.utils.dateparse import parse_date
 from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -251,3 +253,47 @@ class AuditLogViewSet(ReadOnlyModelViewSet):
     filterset_class = AuditLogFilter
     search_fields = ["entity_name", "entity_id", "message", "actor__username"]
     ordering_fields = ["action_type", "entity_name", "created_at"]
+
+    @action(detail=False, methods=["get"])
+    def current(self, request):
+        since = timezone.now() - timezone.timedelta(days=30)
+        queryset = self.filter_queryset(self.get_queryset().filter(created_at__gte=since).order_by("-created_at"))
+        page = self.paginate_queryset(queryset)
+
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=["get"])
+    def archive(self, request):
+        date_from = parse_date(request.query_params.get("date_from", ""))
+        date_to = parse_date(request.query_params.get("date_to", ""))
+
+        if date_from is None or date_to is None:
+            return Response(
+                {"detail": "date_from and date_to query parameters are required in YYYY-MM-DD format."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if date_from > date_to:
+            return Response(
+                {"detail": "date_from must be earlier than or equal to date_to."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        queryset = self.filter_queryset(
+            self.get_queryset()
+            .filter(created_at__date__gte=date_from, created_at__date__lte=date_to)
+            .order_by("-created_at")
+        )
+        page = self.paginate_queryset(queryset)
+
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)

@@ -1,24 +1,42 @@
-import { Barcode, Boxes, ClipboardList, LayoutDashboard, MapPin, PackageSearch, Route, Warehouse } from "lucide-react";
+import {
+  Archive,
+  Barcode,
+  Boxes,
+  ClipboardList,
+  History,
+  LayoutDashboard,
+  MapPin,
+  PackageSearch,
+  Route,
+  Warehouse,
+} from "lucide-react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 
 
-const navItems = [
-  { to: "/", label: "Dashboard", icon: LayoutDashboard },
-  { to: "/products", label: "Products", icon: PackageSearch },
-  { to: "/inventory", label: "Inventory", icon: Boxes },
-  { to: "/orders", label: "Orders", icon: ClipboardList },
-  { to: "/locations", label: "Locations", icon: MapPin },
-  { to: "/routes-monitor", label: "Route Monitor", icon: Route },
-  { to: "/scanner/routes", label: "Scanner", icon: Barcode },
+const wmsNavItems = [
+  { to: "/wms/dashboard", label: "Dashboard", icon: LayoutDashboard },
+  { to: "/wms/routes-monitor", label: "Routes Monitor", icon: Route },
+  { to: "/wms/orders", label: "Orders", icon: ClipboardList },
+  { to: "/wms/inventory", label: "Inventory", icon: Boxes },
+  { to: "/wms/products", label: "Products", icon: PackageSearch },
+  { to: "/wms/locations", label: "Locations", icon: MapPin },
+  { to: "/wms/events/current", label: "Current Events", icon: History },
+  { to: "/wms/events/archive", label: "Archive Events", icon: Archive },
+];
+
+const scannerNavItems = [
+  { to: "/scanner/routes", label: "Routes / Picking", icon: Barcode },
 ];
 
 const pageTitles: Record<string, string> = {
-  "/": "Dashboard",
-  "/products": "Products",
-  "/inventory": "Inventory",
-  "/orders": "Orders",
-  "/locations": "Locations",
-  "/routes-monitor": "Route Monitor",
+  "/wms/dashboard": "Dashboard",
+  "/wms/products": "Products",
+  "/wms/inventory": "Inventory",
+  "/wms/orders": "Orders",
+  "/wms/locations": "Locations",
+  "/wms/routes-monitor": "Route Monitor",
+  "/wms/events/current": "Current Events",
+  "/wms/events/archive": "Archive Events",
   "/scanner/routes": "Scanner",
 };
 
@@ -40,16 +58,33 @@ export function AppLayout() {
         </div>
 
         <nav className="sidebar-nav" aria-label="Main navigation">
-          {navItems.map((item) => {
-            const Icon = item.icon;
+          <div className="nav-section">
+            <span className="nav-section-title">WMS</span>
+            {wmsNavItems.map((item) => {
+              const Icon = item.icon;
 
-            return (
-              <NavLink className="nav-link" end={item.to === "/"} key={item.to} to={item.to}>
-                <Icon size={18} />
-                <span>{item.label}</span>
-              </NavLink>
-            );
-          })}
+              return (
+                <NavLink className="nav-link" key={item.to} to={item.to}>
+                  <Icon size={18} />
+                  <span>{item.label}</span>
+                </NavLink>
+              );
+            })}
+          </div>
+
+          <div className="nav-section">
+            <span className="nav-section-title">Scanner</span>
+            {scannerNavItems.map((item) => {
+              const Icon = item.icon;
+
+              return (
+                <NavLink className="nav-link" key={item.to} to={item.to}>
+                  <Icon size={18} />
+                  <span>{item.label}</span>
+                </NavLink>
+              );
+            })}
+          </div>
         </nav>
       </aside>
 

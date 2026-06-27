@@ -3,6 +3,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { apiClient, getHealth, getList } from "./client";
 import type {
   Branch,
+  AuditLog,
   InventoryItem,
   Location,
   Order,
@@ -116,5 +117,20 @@ export function useCompletePickingTask() {
       );
       return response.data;
     },
+  });
+}
+
+export function useCurrentAuditLogs() {
+  return useQuery({
+    queryKey: ["audit-logs", "current"],
+    queryFn: () => getList<AuditLog>("/audit-logs/current/"),
+  });
+}
+
+export function useArchiveAuditLogs(dateFrom: string, dateTo: string) {
+  return useQuery({
+    enabled: Boolean(dateFrom && dateTo),
+    queryKey: ["audit-logs", "archive", dateFrom, dateTo],
+    queryFn: () => getList<AuditLog>(`/audit-logs/archive/?date_from=${dateFrom}&date_to=${dateTo}`),
   });
 }
