@@ -136,3 +136,9 @@ export type AuditLog = {
   message: string;
   created_at: string;
 };
+
+export type ScannerPickingScanResponse = {
+  message: string;
+  task: PickingTask;
+  route_run: RouteRun;
+};

@@ -5,7 +5,7 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from operations.models import DeliveryRoute, Order, OrderLine, PickingTask, RouteRun, StockMovement
+from operations.models import AuditLog, DeliveryRoute, Order, OrderLine, PickingTask, RouteRun, StockMovement
 from warehouse.models import Branch, InventoryItem, Location, Product
 
 
@@ -138,3 +138,145 @@ class PickingTaskCompleteActionTests(APITestCase):
         self.assertEqual(movement.movement_type, StockMovement.MovementType.PICK)
         self.assertEqual(movement.quantity, Decimal("2.000"))
         self.assertEqual(movement.source_location, self.location)
+
+
+class ScannerPickingScanActionTests(APITestCase):
+    def setUp(self):
+        self.branch = Branch.objects.create(code="SCN", name="Scanner Branch", city="Gdynia", country="Poland")
+        self.location = Location.objects.create(
+            branch=self.branch,
+            code="S-01-01",
+            name="S-01-01",
+            location_type=Location.LocationType.PICKING,
+        )
+        self.product = Product.objects.create(
+            sku="SCAN-001",
+            name="Scanner Product",
+            barcode="880000000001",
+            unit_of_measure="pcs",
+        )
+        self.inventory_item = InventoryItem.objects.create(
+            branch=self.branch,
+            location=self.location,
+            product=self.product,
+            quantity_on_hand=Decimal("5"),
+            quantity_reserved=Decimal("0"),
+        )
+        self.route = DeliveryRoute.objects.create(branch=self.branch, code="ROUTE-S", name="Scanner Route")
+        self.route_run = RouteRun.objects.create(
+            route=self.route,
+            service_date=timezone.localdate(),
+            run_number=1,
+            order_cutoff_time=time(8, 50),
+            sync_time=time(8, 51),
+            departure_time=time(9, 0),
+            status=RouteRun.Status.OPEN,
+        )
+        self.order = Order.objects.create(
+            branch=self.branch,
+            route_run=self.route_run,
+            external_reference="SCAN-ORDER-001",
+            customer_name="Scanner Customer",
+            status=Order.Status.IMPORTED,
+        )
+        self.order_line = OrderLine.objects.create(
+            order=self.order,
+            product=self.product,
+            line_number=1,
+            quantity_ordered=Decimal("2"),
+            quantity_picked=Decimal("0"),
+        )
+        self.task = PickingTask.objects.create(
+            branch=self.branch,
+            order_line=self.order_line,
+            source_location=self.location,
+            status=PickingTask.Status.OPEN,
+            quantity_to_pick=Decimal("2"),
+            quantity_picked=Decimal("0"),
+        )
+
+    def scan(self, route_run_id=None, code="SCAN-001"):
+        return self.client.post(
+            "/api/scanner/picking/scan/",
+            {
+                "route_run_id": route_run_id if route_run_id is not None else self.route_run.id,
+                "code": code,
+            },
+            format="json",
+        )
+
+    def test_missing_route_run_id_returns_400(self):
+        response = self.client.post("/api/scanner/picking/scan/", {"code": "SCAN-001"}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("route_run_id", response.data["detail"])
+
+    def test_missing_code_returns_400(self):
+        response = self.client.post(
+            "/api/scanner/picking/scan/",
+            {"route_run_id": self.route_run.id},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("code", response.data["detail"])
+
+    def test_route_run_not_found_returns_404(self):
+        response = self.scan(route_run_id=999999)
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_no_matching_open_task_returns_400(self):
+        response = self.scan(code="UNKNOWN")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("No matching open picking task", response.data["detail"])
+
+    def test_scan_by_sku_marks_progress(self):
+        response = self.scan(code="SCAN-001")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.task.refresh_from_db()
+        self.order_line.refresh_from_db()
+        self.inventory_item.refresh_from_db()
+        self.assertEqual(self.task.status, PickingTask.Status.IN_PROGRESS)
+        self.assertEqual(self.task.quantity_picked, Decimal("1.000"))
+        self.assertEqual(self.order_line.quantity_picked, Decimal("1.000"))
+        self.assertEqual(self.inventory_item.quantity_on_hand, Decimal("4.000"))
+
+    def test_scan_by_barcode_completes_after_required_quantity(self):
+        first_response = self.scan(code="880000000001")
+        second_response = self.scan(code="880000000001")
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.task.refresh_from_db()
+        self.assertEqual(self.task.status, PickingTask.Status.COMPLETED)
+        self.assertEqual(self.task.quantity_picked, Decimal("2.000"))
+
+    def test_scan_by_order_reference_matches_task(self):
+        response = self.scan(code="SCAN-ORDER-001")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.task.refresh_from_db()
+        self.assertEqual(self.task.quantity_picked, Decimal("1.000"))
+
+    def test_completed_matching_task_returns_400(self):
+        self.scan()
+        self.scan()
+
+        response = self.scan()
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("already completed", response.data["detail"])
+
+    def test_scan_creates_audit_log(self):
+        self.scan()
+
+        self.assertTrue(
+            AuditLog.objects.filter(
+                entity_name="PickingTask",
+                entity_id=str(self.task.id),
+                message__icontains="Scanner picked",
+            ).exists()
+        )

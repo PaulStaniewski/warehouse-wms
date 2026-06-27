@@ -1,10 +1,10 @@
-import { useState } from "react";
+import { type FormEvent, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import axios from "axios";
 import { ArrowLeft } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
 
-import { useCompletePickingTask, usePickingTasks, useRouteRun } from "../api/queries";
+import { usePickingTasks, useRouteRun, useScannerPickingScan } from "../api/queries";
 import { DataState } from "../components/DataState";
 
 
@@ -38,10 +38,10 @@ export function ScannerPickingPage() {
   const { id } = useParams();
   const queryClient = useQueryClient();
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
-  const [scanValues, setScanValues] = useState<Record<number, { locationCode: string; productCode: string }>>({});
+  const [scanCode, setScanCode] = useState("");
   const routeRun = useRouteRun(id);
   const pickingTasks = usePickingTasks(id);
-  const completePickingTask = useCompletePickingTask();
+  const scannerPickingScan = useScannerPickingScan();
   const tasks = pickingTasks.data?.results ?? [];
   const totalToPick = tasks.reduce((sum, task) => sum + toNumber(task.quantity_to_pick), 0);
   const totalPicked = tasks.reduce((sum, task) => sum + toNumber(task.quantity_picked), 0);
@@ -49,36 +49,21 @@ export function ScannerPickingPage() {
   const openTasksCount = tasks.filter((task) => task.status === "open" || task.status === "assigned").length;
   const completedTasksCount = tasks.filter((task) => task.status === "completed").length;
 
-  function updateScanValue(taskId: number, field: "locationCode" | "productCode", value: string) {
-    setScanValues((current) => ({
-      ...current,
-      [taskId]: {
-        locationCode: current[taskId]?.locationCode ?? "",
-        productCode: current[taskId]?.productCode ?? "",
-        [field]: value,
-      },
-    }));
-  }
-
-  async function handleComplete(taskId: number) {
+  async function handleScan() {
     setMessage(null);
-    const values = scanValues[taskId] ?? { locationCode: "", productCode: "" };
+    const routeRunId = Number(id);
 
     try {
-      const result = await completePickingTask.mutateAsync({
-        locationCode: values.locationCode,
-        productCode: values.productCode,
-        taskId,
+      const result = await scannerPickingScan.mutateAsync({
+        code: scanCode,
+        routeRunId,
       });
       setMessage({ type: "success", text: result.message });
-      setScanValues((current) => {
-        const next = { ...current };
-        delete next[taskId];
-        return next;
-      });
+      setScanCode("");
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["picking-tasks", id] }),
         queryClient.invalidateQueries({ queryKey: ["route-run", id] }),
+        queryClient.invalidateQueries({ queryKey: ["audit-logs", "current"] }),
       ]);
     } catch (error) {
       const text = axios.isAxiosError(error)
@@ -86,6 +71,11 @@ export function ScannerPickingPage() {
         : "Could not complete picking task.";
       setMessage({ type: "error", text });
     }
+  }
+
+  function handleScanSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    handleScan();
   }
 
   return (
@@ -165,6 +155,23 @@ export function ScannerPickingPage() {
           </article>
         </section>
 
+        <form className="scanner-scan-panel" onSubmit={handleScanSubmit}>
+          <label htmlFor="scanner-code">
+            <span>Scan product SKU, barcode, or order reference</span>
+            <input
+              autoComplete="off"
+              autoFocus
+              id="scanner-code"
+              onChange={(event) => setScanCode(event.target.value)}
+              placeholder="Scan or type code and press Enter"
+              value={scanCode}
+            />
+          </label>
+          <button disabled={scannerPickingScan.isPending || !scanCode.trim()} type="submit">
+            {scannerPickingScan.isPending ? "Scanning..." : "Submit scan"}
+          </button>
+        </form>
+
         {tasks.length === 0 ? (
           <div className="state-box">No picking tasks found for this route run.</div>
         ) : (
@@ -199,40 +206,9 @@ export function ScannerPickingPage() {
                   </div>
                 </div>
 
-                <div className="picking-scan-fields">
-                  <label>
-                    <span>Scan location</span>
-                    <input
-                      disabled={task.status === "completed" || task.status === "cancelled"}
-                      onChange={(event) => updateScanValue(task.id, "locationCode", event.target.value)}
-                      placeholder={task.source_location_code}
-                      value={scanValues[task.id]?.locationCode ?? ""}
-                    />
-                  </label>
-                  <label>
-                    <span>Scan product barcode or SKU</span>
-                    <input
-                      disabled={task.status === "completed" || task.status === "cancelled"}
-                      onChange={(event) => updateScanValue(task.id, "productCode", event.target.value)}
-                      placeholder={task.product_sku}
-                      value={scanValues[task.id]?.productCode ?? ""}
-                    />
-                  </label>
-                </div>
-
-                <div className="picking-actions">
-                  <button
-                    disabled={
-                      task.status === "completed" ||
-                      task.status === "cancelled" ||
-                      completePickingTask.isPending
-                    }
-                    onClick={() => handleComplete(task.id)}
-                    type="button"
-                  >
-                    {task.status === "completed" ? "Completed" : "Complete"}
-                  </button>
-                </div>
+                <span className={`route-label route-label--${task.status === "completed" ? "selectable" : "neutral"}`}>
+                  {formatStatus(task.status)}
+                </span>
               </article>
             ))}
           </section>

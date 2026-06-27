@@ -619,6 +619,55 @@ a {
   margin-bottom: 20px;
 }
 
+.scanner-scan-panel {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) 180px;
+  gap: 12px;
+  border: 2px solid #1d4f5d;
+  border-radius: 8px;
+  margin-bottom: 20px;
+  background: #ffffff;
+  padding: 18px;
+}
+
+.scanner-scan-panel label {
+  display: grid;
+  gap: 8px;
+}
+
+.scanner-scan-panel span {
+  color: #153f4b;
+  font-size: 0.875rem;
+  font-weight: 900;
+}
+
+.scanner-scan-panel input {
+  min-height: 52px;
+  border: 1px solid #c8d3d9;
+  border-radius: 8px;
+  padding: 0 14px;
+  color: #172026;
+  font-size: 1.125rem;
+  font-weight: 900;
+}
+
+.scanner-scan-panel button {
+  align-self: end;
+  min-height: 52px;
+  border: 0;
+  border-radius: 8px;
+  background: #1d4f5d;
+  color: #ffffff;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.scanner-scan-panel button:disabled {
+  background: #c8d3d9;
+  color: #526570;
+  cursor: not-allowed;
+}
+
 .picking-list {
   display: grid;
   gap: 14px;
@@ -894,6 +943,10 @@ tr:last-child td {
 
   .scanner-header-panel,
   .picking-row {
+    grid-template-columns: 1fr;
+  }
+
+  .scanner-scan-panel {
     grid-template-columns: 1fr;
   }
 

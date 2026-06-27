@@ -12,6 +12,7 @@ import type {
   Product,
   ReturnBatch,
   RouteRun,
+  ScannerPickingScanResponse,
 } from "../types/api";
 
 
@@ -115,6 +116,18 @@ export function useCompletePickingTask() {
           product_code: productCode,
         },
       );
+      return response.data;
+    },
+  });
+}
+
+export function useScannerPickingScan() {
+  return useMutation({
+    mutationFn: async ({ code, routeRunId }: { code: string; routeRunId: number }) => {
+      const response = await apiClient.post<ScannerPickingScanResponse>("/scanner/picking/scan/", {
+        code,
+        route_run_id: routeRunId,
+      });
       return response.data;
     },
   });
