@@ -81,6 +81,12 @@ export type RouteRun = {
   has_pending_work: boolean;
   is_urgent: boolean;
   is_selectable: boolean;
+  total_picking_tasks: number;
+  open_picking_tasks: number;
+  in_progress_picking_tasks: number;
+  completed_picking_tasks: number;
+  progress_percent: number;
+  last_activity_at: string | null;
 };
 
 export type OrderLine = {

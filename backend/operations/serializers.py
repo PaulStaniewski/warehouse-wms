@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from rest_framework import serializers
 
 from operations.models import (
@@ -42,6 +44,62 @@ class RouteRunSerializer(serializers.ModelSerializer):
     has_pending_work = serializers.BooleanField(read_only=True)
     is_urgent = serializers.BooleanField(read_only=True)
     is_selectable = serializers.BooleanField(read_only=True)
+    total_picking_tasks = serializers.SerializerMethodField()
+    open_picking_tasks = serializers.SerializerMethodField()
+    in_progress_picking_tasks = serializers.SerializerMethodField()
+    completed_picking_tasks = serializers.SerializerMethodField()
+    progress_percent = serializers.SerializerMethodField()
+    last_activity_at = serializers.SerializerMethodField()
+
+    def _get_picking_tasks(self, obj: RouteRun):
+        cache_name = "_monitor_picking_tasks"
+        if not hasattr(obj, cache_name):
+            setattr(
+                obj,
+                cache_name,
+                list(PickingTask.objects.filter(order_line__order__route_run=obj)),
+            )
+        return getattr(obj, cache_name)
+
+    def get_total_picking_tasks(self, obj: RouteRun) -> int:
+        return len(self._get_picking_tasks(obj))
+
+    def get_open_picking_tasks(self, obj: RouteRun) -> int:
+        return sum(
+            task.status in {PickingTask.Status.OPEN, PickingTask.Status.ASSIGNED}
+            for task in self._get_picking_tasks(obj)
+        )
+
+    def get_in_progress_picking_tasks(self, obj: RouteRun) -> int:
+        return sum(task.status == PickingTask.Status.IN_PROGRESS for task in self._get_picking_tasks(obj))
+
+    def get_completed_picking_tasks(self, obj: RouteRun) -> int:
+        return sum(task.status == PickingTask.Status.COMPLETED for task in self._get_picking_tasks(obj))
+
+    def get_progress_percent(self, obj: RouteRun) -> float:
+        tasks = self._get_picking_tasks(obj)
+        total_quantity = sum((task.quantity_to_pick for task in tasks), Decimal("0"))
+        picked_quantity = sum((task.quantity_picked for task in tasks), Decimal("0"))
+
+        if total_quantity <= 0:
+            return 0
+
+        return round(float((picked_quantity / total_quantity) * 100), 1)
+
+    def get_last_activity_at(self, obj: RouteRun) -> str | None:
+        task_ids = [str(task.id) for task in self._get_picking_tasks(obj)]
+        if not task_ids:
+            return None
+
+        audit_log = (
+            AuditLog.objects.filter(entity_name="PickingTask", entity_id__in=task_ids)
+            .order_by("-created_at")
+            .first()
+        )
+        if audit_log is None:
+            return None
+
+        return audit_log.created_at.isoformat()
 
     class Meta:
         model = RouteRun
@@ -65,6 +123,12 @@ class RouteRunSerializer(serializers.ModelSerializer):
             "has_pending_work",
             "is_urgent",
             "is_selectable",
+            "total_picking_tasks",
+            "open_picking_tasks",
+            "in_progress_picking_tasks",
+            "completed_picking_tasks",
+            "progress_percent",
+            "last_activity_at",
             "created_at",
             "updated_at",
         ]
