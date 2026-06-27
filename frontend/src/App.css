@@ -1090,6 +1090,12 @@ tr:last-child td {
   font-weight: 900;
 }
 
+.monitor-progress-cell strong {
+  color: #ffffff;
+  font-size: 1rem;
+  font-weight: 900;
+}
+
 .monitor-progress-track {
   height: 8px;
   border-radius: 999px;
@@ -1207,6 +1213,126 @@ tr:last-child td {
   font-size: 0.8125rem;
 }
 
+.monitor-route-list {
+  display: grid;
+  gap: 8px;
+}
+
+.monitor-route-head,
+.monitor-route-row {
+  display: grid;
+  grid-template-columns: minmax(260px, 1.8fr) 72px 72px 84px 84px 92px minmax(150px, 0.8fr) 120px;
+  align-items: center;
+  gap: 8px;
+}
+
+.monitor-route-head {
+  border-bottom: 1px solid #324550;
+  padding: 0 12px 10px;
+  color: #9db2bb;
+  font-size: 0.6875rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.monitor-route-row {
+  min-height: 76px;
+  border: 1px solid #253640;
+  border-left-width: 6px;
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: #172229;
+}
+
+.monitor-route-row--normal {
+  border-left-color: #365567;
+}
+
+.monitor-route-row--attention {
+  border-left-color: #d8912d;
+  background: #2b230f;
+}
+
+.monitor-route-row--delayed {
+  border-left-color: #df4b55;
+  background: #2b1719;
+}
+
+.monitor-route-row--complete {
+  border-left-color: #3fb980;
+  background: #13251f;
+  color: #bfd0d4;
+}
+
+.monitor-route-name {
+  min-width: 0;
+}
+
+.monitor-route-name strong {
+  display: block;
+  color: #ffffff;
+  font-size: 1.35rem;
+  line-height: 1.1;
+}
+
+.monitor-route-name span {
+  display: block;
+  overflow: hidden;
+  margin-top: 3px;
+  color: #b4c5cb;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitor-route-name small {
+  display: inline-block;
+  margin-top: 5px;
+  color: #8fa5ae;
+  font-size: 0.6875rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.monitor-count {
+  color: #ffffff;
+  font-size: 1.45rem;
+  font-weight: 900;
+  text-align: center;
+}
+
+.monitor-count--active {
+  color: #ffd48a;
+}
+
+.monitor-departure {
+  color: #ffffff;
+  font-size: 1.8rem;
+  font-weight: 900;
+  text-align: right;
+}
+
+.monitor-side-section--primary {
+  border-color: #365567;
+}
+
+.monitor-big-number {
+  margin: 0;
+  color: #ffffff !important;
+  font-size: 3rem;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.monitor-activity-line {
+  border-top: 1px solid #2c3f4a;
+  margin-top: 12px;
+  padding-top: 12px;
+  color: #d1e2e7;
+  font-size: 0.875rem;
+  line-height: 1.35;
+}
+
 @media (max-width: 900px) {
   .app-shell {
     grid-template-columns: 1fr;
@@ -1266,6 +1392,16 @@ tr:last-child td {
   .monitor-board-header {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .monitor-route-head,
+  .monitor-route-row {
+    grid-template-columns: minmax(220px, 1fr) repeat(5, 70px) minmax(140px, 1fr) 110px;
+    min-width: 960px;
+  }
+
+  .monitor-main-panel {
+    overflow-x: auto;
   }
 }
 

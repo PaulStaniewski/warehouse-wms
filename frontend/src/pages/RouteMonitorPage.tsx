@@ -1,13 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, Clock3, RefreshCw, ShieldCheck } from "lucide-react";
+import { AlertTriangle, Clock3, RefreshCw } from "lucide-react";
 
-import {
-  useBranches,
-  useCurrentAuditLogs,
-  useInventoryItems,
-  useReturnBatches,
-  useRouteRuns,
-} from "../api/queries";
+import { useBranches, useCurrentAuditLogs, useRouteRuns } from "../api/queries";
 import { DataState } from "../components/DataState";
 import { PageHeader } from "../components/PageHeader";
 import type { AuditLog, Branch, RouteRun } from "../types/api";
@@ -15,28 +9,6 @@ import type { AuditLog, Branch, RouteRun } from "../types/api";
 
 function formatStatus(status: string) {
   return status.replaceAll("_", " ");
-}
-
-function formatDateTime(value: Date) {
-  return new Intl.DateTimeFormat("en-GB", {
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    month: "short",
-    second: "2-digit",
-  }).format(value);
-}
-
-function formatActivity(value: string | null) {
-  if (!value) {
-    return "No activity";
-  }
-
-  return new Intl.DateTimeFormat("en-GB", {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  }).format(new Date(value));
 }
 
 function formatTime(value: string) {
@@ -60,36 +32,42 @@ function isDelayed(run: RouteRun, now: Date) {
   return departureAt.getTime() < now.getTime();
 }
 
-function getStatusTone(run: RouteRun, now: Date) {
+function needsAttention(run: RouteRun, now: Date) {
+  if (isDelayed(run, now)) {
+    return false;
+  }
+
+  return run.is_urgent || (run.has_pending_work && ["syncing", "picking", "ready_to_close"].includes(run.status));
+}
+
+function getRowTone(run: RouteRun, now: Date) {
   if (isDelayed(run, now)) {
     return "delayed";
   }
 
-  if (run.is_urgent) {
-    return "urgent";
+  if (needsAttention(run, now)) {
+    return "attention";
   }
 
-  if (!run.is_selectable && run.has_pending_work) {
-    return "locked";
+  if (isClosed(run) || run.progress_percent >= 100) {
+    return "complete";
   }
 
-  if (["closed", "dispatched"].includes(run.status)) {
-    return "completed";
-  }
-
-  if (["picking", "syncing", "ready_to_close"].includes(run.status)) {
-    return "in-progress";
-  }
-
-  return "open";
+  return "normal";
 }
 
-function getLastAuditLabel(auditLog?: AuditLog) {
+function getLatestActivity(auditLog?: AuditLog) {
   if (!auditLog) {
-    return "No audit activity in the current register.";
+    return "No scanner activity yet.";
   }
 
-  return `${formatActivity(auditLog.created_at)} - ${auditLog.message}`;
+  const time = new Intl.DateTimeFormat("en-GB", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(new Date(auditLog.created_at));
+
+  return `${time} - ${auditLog.message}`;
 }
 
 function ProgressCell({ run }: { run: RouteRun }) {
@@ -97,7 +75,7 @@ function ProgressCell({ run }: { run: RouteRun }) {
 
   return (
     <div className="monitor-progress-cell">
-      <span>{progress}%</span>
+      <strong>{progress}%</strong>
       <div className="monitor-progress-track">
         <div className="monitor-progress-fill" style={{ width: `${progress}%` }} />
       </div>
@@ -105,60 +83,40 @@ function ProgressCell({ run }: { run: RouteRun }) {
   );
 }
 
-function RouteRunTable({ now, rows }: { now: Date; rows: RouteRun[] }) {
+function RouteList({ now, rows }: { now: Date; rows: RouteRun[] }) {
   return (
-    <div className="monitor-table-wrap">
-      <table className="monitor-table">
-        <thead>
-          <tr>
-            <th>Route</th>
-            <th>Run</th>
-            <th>Branch</th>
-            <th>Status</th>
-            <th>Cutoff</th>
-            <th>Sync</th>
-            <th>Departure</th>
-            <th>Orders</th>
-            <th>Lines</th>
-            <th>Open</th>
-            <th>In progress</th>
-            <th>Done</th>
-            <th>Progress</th>
-            <th>Last activity</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((run) => {
-            const tone = getStatusTone(run, now);
+    <div className="monitor-route-list">
+      <div className="monitor-route-head">
+        <span>Route</span>
+        <span>AKT</span>
+        <span>Lines</span>
+        <span>Started</span>
+        <span>Picked</span>
+        <span>Prepared</span>
+        <span>Progress</span>
+        <span>Departure</span>
+      </div>
 
-            return (
-              <tr className={`monitor-row monitor-row--${tone}`} key={run.id}>
-                <td>
-                  <strong>{run.route_code}</strong>
-                  <span>{run.route_name}</span>
-                </td>
-                <td>#{run.run_number}</td>
-                <td>{run.branch_code}</td>
-                <td>
-                  <span className={`monitor-status monitor-status--${tone}`}>{formatStatus(run.status)}</span>
-                </td>
-                <td>{formatTime(run.order_cutoff_time)}</td>
-                <td>{formatTime(run.sync_time)}</td>
-                <td>{formatTime(run.departure_time)}</td>
-                <td>{run.orders_count}</td>
-                <td>{run.order_lines_count}</td>
-                <td>{run.open_picking_tasks}</td>
-                <td>{run.in_progress_picking_tasks}</td>
-                <td>{run.completed_picking_tasks}</td>
-                <td>
-                  <ProgressCell run={run} />
-                </td>
-                <td className="monitor-last-activity">{formatActivity(run.last_activity_at)}</td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
+      {rows.map((run) => {
+        const tone = getRowTone(run, now);
+
+        return (
+          <article className={`monitor-route-row monitor-route-row--${tone}`} key={run.id}>
+            <div className="monitor-route-name">
+              <strong>{run.route_code}</strong>
+              <span>{run.route_name}</span>
+              <small>{formatStatus(run.status)}</small>
+            </div>
+            <div className="monitor-count monitor-count--active">{run.open_picking_tasks}</div>
+            <div className="monitor-count">{run.order_lines_count}</div>
+            <div className="monitor-count">{run.in_progress_picking_tasks}</div>
+            <div className="monitor-count">{run.picked_lines_count}</div>
+            <div className="monitor-count">{run.completed_picking_tasks}</div>
+            <ProgressCell run={run} />
+            <div className="monitor-departure">{formatTime(run.departure_time)}</div>
+          </article>
+        );
+      })}
     </div>
   );
 }
@@ -171,19 +129,17 @@ export function RouteMonitorPage() {
   const selectedBranch = branchRows.find((branch) => branch.id === selectedBranchId);
   const routeRuns = useRouteRuns(selectedBranchId);
   const auditLogs = useCurrentAuditLogs();
-  const inventoryItems = useInventoryItems();
-  const returnBatches = useReturnBatches();
   const rows = routeRuns.data?.results ?? [];
-  const branchReturns = (returnBatches.data?.results ?? []).filter(
-    (item) => item.branch === selectedBranchId && item.status === "verified",
-  );
-  const branchInventory = (inventoryItems.data?.results ?? []).filter((item) => item.branch === selectedBranchId);
-  const urgentRows = rows.filter((run) => run.is_urgent);
   const delayedRows = rows.filter((run) => isDelayed(run, now));
-  const hasPriorityMode = urgentRows.length > 0;
-  const pendingTasks = rows.reduce((total, run) => total + run.open_picking_tasks + run.in_progress_picking_tasks, 0);
-  const completedTasks = rows.reduce((total, run) => total + run.completed_picking_tasks, 0);
-  const totalTasks = rows.reduce((total, run) => total + run.total_picking_tasks, 0);
+  const attentionRows = rows.filter((run) => needsAttention(run, now));
+  const lowProgressRows = rows
+    .filter((run) => run.has_pending_work && run.progress_percent < 50)
+    .sort((left, right) => left.progress_percent - right.progress_percent)
+    .slice(0, 4);
+  const pendingPickingWork = rows.reduce(
+    (total, run) => total + run.open_picking_tasks + run.in_progress_picking_tasks,
+    0,
+  );
   const latestAuditLog = auditLogs.data?.results[0];
 
   useEffect(() => {
@@ -211,15 +167,13 @@ export function RouteMonitorPage() {
   function refreshMonitor() {
     routeRuns.refetch();
     auditLogs.refetch();
-    inventoryItems.refetch();
-    returnBatches.refetch();
   }
 
   return (
     <>
       <PageHeader
         title="Route Monitor"
-        description="Read-only dispatch board for route progress, picking pressure, and scanner activity."
+        description="Read-only dispatch wall for route picking progress and departure pressure."
         action={
           <div className="monitor-header-actions">
             <button className="monitor-refresh-button" onClick={refreshMonitor} type="button">
@@ -256,10 +210,10 @@ export function RouteMonitorPage() {
               <p>Viewing branch: {selectedBranch?.code ?? "..."}</p>
               <strong>{selectedBranch?.name ?? "No branch selected"}</strong>
             </div>
-            {hasPriorityMode && (
+            {(attentionRows.length > 0 || delayedRows.length > 0) && (
               <div className="monitor-priority-banner">
-                <ShieldCheck size={18} />
-                <span>Priority mode active - urgent route runs need attention first.</span>
+                <AlertTriangle size={18} />
+                <span>{delayedRows.length} delayed / {attentionRows.length} need attention</span>
               </div>
             )}
           </header>
@@ -269,49 +223,34 @@ export function RouteMonitorPage() {
               {rows.length === 0 ? (
                 <div className="state-box">No route runs found.</div>
               ) : (
-                <RouteRunTable now={now} rows={rows} />
+                <RouteList now={now} rows={rows} />
               )}
             </section>
 
             <aside className="monitor-side-panel">
-              <div className="monitor-clock">
-                <Clock3 size={24} />
+              <section className="monitor-clock">
+                <Clock3 size={26} />
                 <span>{now.toLocaleTimeString("en-GB")}</span>
-                <small>{formatDateTime(now)}</small>
-              </div>
+                <small>{now.toLocaleDateString("en-GB")}</small>
+              </section>
 
-              <div className="monitor-summary-grid">
-                <div>
-                  <span>Pending picking</span>
-                  <strong>{pendingTasks}</strong>
-                </div>
-                <div>
-                  <span>Completed tasks</span>
-                  <strong>{completedTasks}</strong>
-                </div>
-                <div>
-                  <span>Total tasks</span>
-                  <strong>{totalTasks}</strong>
-                </div>
-                <div>
-                  <span>Verified returns</span>
-                  <strong>{branchReturns.length}</strong>
-                </div>
-              </div>
+              <section className="monitor-side-section monitor-side-section--primary">
+                <h2>Employee tasks / Picking</h2>
+                <p className="monitor-big-number">{pendingPickingWork}</p>
+                <p>Pending picking work</p>
+                <div className="monitor-activity-line">{getLatestActivity(latestAuditLog)}</div>
+              </section>
 
               <section className="monitor-side-section">
-                <h2>
-                  <AlertTriangle size={16} />
-                  Urgent route runs
-                </h2>
-                {urgentRows.length === 0 ? (
-                  <p>No urgent route runs.</p>
+                <h2>Low progress routes</h2>
+                {lowProgressRows.length === 0 ? (
+                  <p>No low-progress active routes.</p>
                 ) : (
                   <ul className="monitor-alert-list">
-                    {urgentRows.map((run) => (
+                    {lowProgressRows.map((run) => (
                       <li key={run.id}>
                         <strong>{run.route_code}</strong>
-                        <span>Departure {formatTime(run.departure_time)} / {run.open_picking_tasks} open</span>
+                        <span>{run.progress_percent}% / departure {formatTime(run.departure_time)}</span>
                       </li>
                     ))}
                   </ul>
@@ -319,30 +258,13 @@ export function RouteMonitorPage() {
               </section>
 
               <section className="monitor-side-section">
-                <h2>Delayed runs</h2>
-                {delayedRows.length === 0 ? (
-                  <p>No delayed pending route runs.</p>
-                ) : (
-                  <ul className="monitor-alert-list">
-                    {delayedRows.map((run) => (
-                      <li key={run.id}>
-                        <strong>{run.route_code}</strong>
-                        <span>Departure passed at {formatTime(run.departure_time)}</span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
+                <h2>MM / Inter-branch transfers</h2>
+                <p>No MM tasks</p>
               </section>
 
               <section className="monitor-side-section">
-                <h2>Last activity</h2>
-                <p>{getLastAuditLabel(latestAuditLog)}</p>
-              </section>
-
-              <section className="monitor-side-section">
-                <h2>Inventory / returns</h2>
-                <p>{branchInventory.length} inventory positions visible for this branch.</p>
-                <p>{branchReturns.length} verified return batches waiting for put-away.</p>
+                <h2>Inventory tasks</h2>
+                <p>No inventory tasks</p>
               </section>
             </aside>
           </div>
