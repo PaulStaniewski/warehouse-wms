@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, Clock3, RefreshCw } from "lucide-react";
 
-import { useBranches, useCurrentAuditLogs, useRouteRuns } from "../api/queries";
+import { useBranches, useRouteRuns } from "../api/queries";
 import { DataState } from "../components/DataState";
 import { PageHeader } from "../components/PageHeader";
-import type { AuditLog, Branch, RouteRun } from "../types/api";
+import type { Branch, RouteRun } from "../types/api";
 
 
 function formatStatus(status: string) {
@@ -54,20 +54,6 @@ function getRowTone(run: RouteRun, now: Date) {
   }
 
   return "normal";
-}
-
-function getLatestActivity(auditLog?: AuditLog) {
-  if (!auditLog) {
-    return "No scanner activity yet.";
-  }
-
-  const time = new Intl.DateTimeFormat("en-GB", {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  }).format(new Date(auditLog.created_at));
-
-  return `${time} - ${auditLog.message}`;
 }
 
 function ProgressCell({ run }: { run: RouteRun }) {
@@ -128,19 +114,12 @@ export function RouteMonitorPage() {
   const branchRows = useMemo(() => branches.data?.results ?? [], [branches.data?.results]);
   const selectedBranch = branchRows.find((branch) => branch.id === selectedBranchId);
   const routeRuns = useRouteRuns(selectedBranchId);
-  const auditLogs = useCurrentAuditLogs();
   const rows = routeRuns.data?.results ?? [];
   const delayedRows = rows.filter((run) => isDelayed(run, now));
   const attentionRows = rows.filter((run) => needsAttention(run, now));
-  const lowProgressRows = rows
-    .filter((run) => run.has_pending_work && run.progress_percent < 50)
-    .sort((left, right) => left.progress_percent - right.progress_percent)
-    .slice(0, 4);
-  const pendingPickingWork = rows.reduce(
-    (total, run) => total + run.open_picking_tasks + run.in_progress_picking_tasks,
-    0,
-  );
-  const latestAuditLog = auditLogs.data?.results[0];
+  const routesToClose = [...delayedRows, ...attentionRows]
+    .filter((run, index, list) => list.findIndex((item) => item.id === run.id) === index)
+    .sort((left, right) => left.departure_time.localeCompare(right.departure_time));
 
   useEffect(() => {
     if (selectedBranchId || branchRows.length === 0) {
@@ -158,15 +137,13 @@ export function RouteMonitorPage() {
   useEffect(() => {
     const refresh = window.setInterval(() => {
       routeRuns.refetch();
-      auditLogs.refetch();
     }, 10000);
 
     return () => window.clearInterval(refresh);
-  }, [auditLogs, routeRuns]);
+  }, [routeRuns]);
 
   function refreshMonitor() {
     routeRuns.refetch();
-    auditLogs.refetch();
   }
 
   return (
@@ -234,23 +211,22 @@ export function RouteMonitorPage() {
                 <small>{now.toLocaleDateString("en-GB")}</small>
               </section>
 
-              <section className="monitor-side-section monitor-side-section--primary">
-                <h2>Employee tasks / Picking</h2>
-                <p className="monitor-big-number">{pendingPickingWork}</p>
-                <p>Pending picking work</p>
-                <div className="monitor-activity-line">{getLatestActivity(latestAuditLog)}</div>
-              </section>
-
               <section className="monitor-side-section">
-                <h2>Low progress routes</h2>
-                {lowProgressRows.length === 0 ? (
-                  <p>No low-progress active routes.</p>
+                <h2>Routes requiring attention / To close</h2>
+                {routesToClose.length === 0 ? (
+                  <p>No route runs require attention.</p>
                 ) : (
-                  <ul className="monitor-alert-list">
-                    {lowProgressRows.map((run) => (
+                  <ul className="monitor-attention-list">
+                    {routesToClose.map((run) => (
                       <li key={run.id}>
-                        <strong>{run.route_code}</strong>
-                        <span>{run.progress_percent}% / departure {formatTime(run.departure_time)}</span>
+                        <div>
+                          <strong>{run.route_code}</strong>
+                          <span>{formatTime(run.departure_time)}</span>
+                        </div>
+                        <small>
+                          AKT {run.open_picking_tasks} / {run.order_lines_count} lines
+                        </small>
+                        <ProgressCell run={run} />
                       </li>
                     ))}
                   </ul>

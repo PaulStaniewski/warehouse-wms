@@ -1213,6 +1213,52 @@ tr:last-child td {
   font-size: 0.8125rem;
 }
 
+.monitor-attention-list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.monitor-attention-list li {
+  display: grid;
+  gap: 8px;
+  border: 1px solid #3a4f5b;
+  border-left: 4px solid #d8912d;
+  border-radius: 8px;
+  padding: 10px;
+  background: #1b2830;
+}
+
+.monitor-attention-list div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+
+.monitor-attention-list strong {
+  color: #ffffff;
+  font-size: 1.05rem;
+}
+
+.monitor-attention-list span {
+  color: #ffd48a;
+  font-size: 1.15rem;
+  font-weight: 900;
+}
+
+.monitor-attention-list small {
+  color: #a9bbc2;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.monitor-attention-list .monitor-progress-cell {
+  grid-template-columns: 44px 1fr;
+}
+
 .monitor-route-list {
   display: grid;
   gap: 8px;
