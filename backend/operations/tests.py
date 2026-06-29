@@ -280,3 +280,93 @@ class ScannerPickingScanActionTests(APITestCase):
                 message__icontains="Scanner picked",
             ).exists()
         )
+
+
+class ScannerLookupAndQuickTransferTests(APITestCase):
+    def setUp(self):
+        self.branch = Branch.objects.create(code="LKP", name="Lookup Branch", city="Gdynia", country="Poland")
+        self.source_location = Location.objects.create(
+            branch=self.branch,
+            code="L-01-01",
+            name="Source shelf",
+            location_type=Location.LocationType.STORAGE,
+        )
+        self.target_location = Location.objects.create(
+            branch=self.branch,
+            code="L-02-01",
+            name="Target shelf",
+            location_type=Location.LocationType.PICKING,
+        )
+        self.product = Product.objects.create(
+            sku="LOOK-001",
+            name="Lookup Product",
+            barcode="770000000001",
+            unit_of_measure="pcs",
+        )
+        self.source_item = InventoryItem.objects.create(
+            branch=self.branch,
+            location=self.source_location,
+            product=self.product,
+            quantity_on_hand=Decimal("5"),
+            quantity_reserved=Decimal("0"),
+        )
+
+    def transfer(self, **overrides):
+        payload = {
+            "source_location_code": "L-01-01",
+            "product_code": "LOOK-001",
+            "target_location_code": "L-02-01",
+            "quantity": "1",
+        }
+        payload.update(overrides)
+        return self.client.post("/api/scanner/quick-transfer/", payload, format="json")
+
+    def test_product_lookup_returns_product_and_inventory_positions(self):
+        response = self.client.get("/api/scanner/products/lookup/", {"code": "770000000001"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["product"]["sku"], "LOOK-001")
+        self.assertEqual(len(response.data["inventory_positions"]), 1)
+        self.assertEqual(response.data["inventory_positions"][0]["location_code"], "L-01-01")
+
+    def test_product_lookup_not_found_returns_404(self):
+        response = self.client.get("/api/scanner/products/lookup/", {"code": "MISSING"})
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_location_contents_returns_inventory_items(self):
+        response = self.client.get("/api/scanner/locations/contents/", {"code": "L-01-01"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["location"]["code"], "L-01-01")
+        self.assertEqual(response.data["inventory_items"][0]["product_sku"], "LOOK-001")
+
+    def test_quick_transfer_moves_quantity_and_creates_history(self):
+        response = self.transfer(quantity="2")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.source_item.refresh_from_db()
+        target_item = InventoryItem.objects.get(location=self.target_location, product=self.product)
+        self.assertEqual(self.source_item.quantity_on_hand, Decimal("3.000"))
+        self.assertEqual(target_item.quantity_on_hand, Decimal("2.000"))
+        self.assertTrue(
+            StockMovement.objects.filter(
+                movement_type=StockMovement.MovementType.TRANSFER,
+                source_location=self.source_location,
+                destination_location=self.target_location,
+                quantity=Decimal("2.000"),
+            ).exists()
+        )
+        self.assertTrue(AuditLog.objects.filter(message__icontains="Scanner quick transfer").exists())
+
+    def test_quick_transfer_rejects_same_source_and_target(self):
+        response = self.transfer(target_location_code="L-01-01")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("same", response.data["detail"])
+
+    def test_quick_transfer_rejects_insufficient_quantity(self):
+        response = self.transfer(quantity="10")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Insufficient", response.data["detail"])

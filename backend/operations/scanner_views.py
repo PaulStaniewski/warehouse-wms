@@ -9,7 +9,32 @@ from rest_framework.views import APIView
 
 from operations.models import AuditLog, PickingTask, RouteRun, StockMovement
 from operations.serializers import PickingTaskSerializer, RouteRunSerializer
-from warehouse.models import InventoryItem
+from warehouse.models import InventoryItem, Location, Product
+
+
+def _find_product_by_code(code: str):
+    return Product.objects.filter(Q(sku__iexact=code) | Q(barcode__iexact=code)).first()
+
+
+def _find_location_by_code(code: str):
+    return Location.objects.select_related("branch").filter(code__iexact=code).order_by("branch__code").first()
+
+
+def _inventory_position_data(item: InventoryItem):
+    return {
+        "id": item.id,
+        "branch": item.branch_id,
+        "branch_code": item.branch.code,
+        "location": item.location_id,
+        "location_code": item.location.code,
+        "location_name": item.location.name,
+        "product": item.product_id,
+        "product_sku": item.product.sku,
+        "product_barcode": item.product.barcode,
+        "product_name": item.product.name,
+        "quantity_on_hand": str(item.quantity_on_hand),
+        "quantity_reserved": str(item.quantity_reserved),
+    }
 
 
 class ScannerPickingScanView(APIView):
@@ -121,6 +146,178 @@ class ScannerPickingScanView(APIView):
                 "message": "Scan accepted.",
                 "task": PickingTaskSerializer(task).data,
                 "route_run": RouteRunSerializer(route_run).data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class ScannerProductLookupView(APIView):
+    def get(self, request):
+        code = str(request.query_params.get("code", "")).strip()
+
+        if not code:
+            return Response({"detail": "code query parameter is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        product = _find_product_by_code(code)
+        if product is None:
+            return Response({"detail": "Product not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        inventory_items = (
+            InventoryItem.objects.select_related("branch", "location", "product")
+            .filter(product=product, quantity_on_hand__gt=0)
+            .order_by("branch__code", "location__code")
+        )
+
+        return Response(
+            {
+                "product": {
+                    "id": product.id,
+                    "sku": product.sku,
+                    "barcode": product.barcode,
+                    "name": product.name,
+                    "description": None,
+                    "image_url": None,
+                    "unit_of_measure": product.unit_of_measure,
+                },
+                "inventory_positions": [_inventory_position_data(item) for item in inventory_items],
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class ScannerLocationContentsView(APIView):
+    def get(self, request):
+        code = str(request.query_params.get("code", "")).strip()
+
+        if not code:
+            return Response({"detail": "code query parameter is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        location = _find_location_by_code(code)
+        if location is None:
+            return Response({"detail": "Location not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        inventory_items = (
+            InventoryItem.objects.select_related("branch", "location", "product")
+            .filter(location=location, quantity_on_hand__gt=0)
+            .order_by("product__sku")
+        )
+
+        return Response(
+            {
+                "location": {
+                    "id": location.id,
+                    "branch": location.branch_id,
+                    "branch_code": location.branch.code,
+                    "code": location.code,
+                    "name": location.name,
+                    "location_type": location.location_type,
+                },
+                "inventory_items": [_inventory_position_data(item) for item in inventory_items],
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class ScannerQuickTransferView(APIView):
+    def post(self, request):
+        source_location_code = str(request.data.get("source_location_code", "")).strip()
+        product_code = str(request.data.get("product_code", "")).strip()
+        target_location_code = str(request.data.get("target_location_code", "")).strip()
+        quantity_value = request.data.get("quantity", 1)
+
+        if not source_location_code:
+            return Response({"detail": "source_location_code is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not product_code:
+            return Response({"detail": "product_code is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not target_location_code:
+            return Response({"detail": "target_location_code is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            quantity = Decimal(str(quantity_value))
+        except Exception:
+            return Response({"detail": "quantity must be a valid number."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if quantity <= 0:
+            return Response({"detail": "quantity must be greater than zero."}, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            source_location = _find_location_by_code(source_location_code)
+            if source_location is None:
+                return Response({"detail": "Source location not found."}, status=status.HTTP_404_NOT_FOUND)
+
+            target_location = _find_location_by_code(target_location_code)
+            if target_location is None:
+                return Response({"detail": "Target location not found."}, status=status.HTTP_404_NOT_FOUND)
+
+            if source_location.id == target_location.id:
+                return Response(
+                    {"detail": "Source and target location cannot be the same."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            product = _find_product_by_code(product_code)
+            if product is None:
+                return Response({"detail": "Product not found."}, status=status.HTTP_404_NOT_FOUND)
+
+            source_item = (
+                InventoryItem.objects.select_for_update()
+                .filter(branch=source_location.branch, location=source_location, product=product)
+                .first()
+            )
+            if source_item is None:
+                return Response(
+                    {"detail": "Product is not available on the source location."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            if source_item.quantity_on_hand < quantity:
+                return Response({"detail": "Insufficient quantity on source location."}, status=status.HTTP_400_BAD_REQUEST)
+
+            target_item, _ = InventoryItem.objects.select_for_update().get_or_create(
+                branch=target_location.branch,
+                location=target_location,
+                product=product,
+                defaults={"quantity_on_hand": Decimal("0"), "quantity_reserved": Decimal("0")},
+            )
+
+            source_item.quantity_on_hand = F("quantity_on_hand") - quantity
+            source_item.save(update_fields=["quantity_on_hand", "updated_at"])
+
+            target_item.quantity_on_hand = F("quantity_on_hand") + quantity
+            target_item.save(update_fields=["quantity_on_hand", "updated_at"])
+
+            movement = StockMovement.objects.create(
+                branch=source_location.branch,
+                product=product,
+                inventory_item=source_item,
+                source_location=source_location,
+                destination_location=target_location,
+                movement_type=StockMovement.MovementType.TRANSFER,
+                quantity=quantity,
+                reference=f"SCANNER-TRANSFER-{source_location.code}-{target_location.code}",
+                performed_by=None,
+            )
+            AuditLog.objects.create(
+                action_type=AuditLog.ActionType.UPDATE,
+                entity_name="StockMovement",
+                entity_id=str(movement.id),
+                message=(
+                    f"Scanner quick transfer moved {quantity} {product.sku} "
+                    f"from {source_location.code} to {target_location.code}."
+                ),
+            )
+
+            source_item.refresh_from_db()
+            target_item.refresh_from_db()
+
+        return Response(
+            {
+                "message": "Quick transfer completed.",
+                "movement_id": movement.id,
+                "source_inventory": _inventory_position_data(source_item),
+                "target_inventory": _inventory_position_data(target_item),
             },
             status=status.HTTP_200_OK,
         )

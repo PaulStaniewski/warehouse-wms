@@ -810,6 +810,233 @@ a {
   color: #8a1f1f;
 }
 
+.scanner-home-header,
+.scanner-tool-panel,
+.scanner-result-card,
+.scanner-step-card {
+  border: 1px solid #dce3e8;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 20px;
+}
+
+.scanner-home-header {
+  margin-bottom: 20px;
+}
+
+.scanner-home-header p,
+.scanner-tool-panel p {
+  margin: 0 0 8px;
+  color: #647782;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.scanner-home-header h1,
+.scanner-tool-panel h1 {
+  margin: 0;
+  color: #172026;
+  font-size: 2rem;
+}
+
+.scanner-menu-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+}
+
+.scanner-menu-card {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) 28px;
+  align-items: center;
+  gap: 16px;
+  min-height: 110px;
+  border: 2px solid #dce3e8;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 20px;
+  color: #172026;
+}
+
+.scanner-menu-card:hover {
+  border-color: #1d4f5d;
+}
+
+.scanner-menu-card strong {
+  display: block;
+  color: #172026;
+  font-size: 1.35rem;
+}
+
+.scanner-menu-card span {
+  display: block;
+  margin-top: 6px;
+  color: #647782;
+  font-weight: 800;
+}
+
+.scanner-menu-card--disabled {
+  background: #f6f8f9;
+  color: #8a9aa3;
+  cursor: not-allowed;
+}
+
+.scanner-menu-card--disabled strong,
+.scanner-menu-card--disabled span {
+  color: #8a9aa3;
+}
+
+.scanner-tool-panel {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.6fr) minmax(260px, 1fr);
+  gap: 18px;
+  margin-bottom: 18px;
+}
+
+.scanner-tool-panel .scanner-scan-panel {
+  margin: 0;
+}
+
+.scanner-result-card {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.scanner-result-card div {
+  border: 1px solid #e8edf0;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.scanner-result-card span,
+.scanner-list-row span,
+.scanner-step-card header span,
+.scanner-quantity-field span {
+  color: #72838d;
+  font-size: 0.75rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.scanner-result-card strong {
+  display: block;
+  margin-top: 8px;
+  color: #172026;
+  font-size: 1.1rem;
+}
+
+.scanner-list {
+  display: grid;
+  gap: 12px;
+}
+
+.scanner-list-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) 160px;
+  gap: 16px;
+  border: 1px solid #dce3e8;
+  border-left: 5px solid #1d4f5d;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 16px;
+}
+
+.scanner-list-row strong {
+  display: block;
+  margin-top: 6px;
+  color: #172026;
+  font-size: 1.5rem;
+}
+
+.scanner-list-row small {
+  display: block;
+  margin-top: 4px;
+  color: #647782;
+  font-weight: 800;
+}
+
+.scanner-step-list {
+  display: grid;
+  gap: 16px;
+}
+
+.scanner-step-card header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.scanner-step-card header span {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border-radius: 8px;
+  background: #153f4b;
+  color: #ffffff;
+}
+
+.scanner-step-card header h2 {
+  flex: 1;
+  margin: 0;
+  color: #172026;
+  font-size: 1.35rem;
+}
+
+.scanner-inline-ok,
+.scanner-inline-error {
+  margin: 12px 0 0;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-weight: 900;
+}
+
+.scanner-inline-ok {
+  background: #e6f5eb;
+  color: #17633a;
+}
+
+.scanner-inline-error {
+  background: #fbeaea;
+  color: #8a1f1f;
+}
+
+.scanner-quantity-field {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.scanner-quantity-field input {
+  min-height: 52px;
+  border: 1px solid #c8d3d9;
+  border-radius: 8px;
+  padding: 0 14px;
+  color: #172026;
+  font-size: 1.1rem;
+  font-weight: 900;
+}
+
+.scanner-confirm-button {
+  width: 100%;
+  min-height: 54px;
+  border: 0;
+  border-radius: 8px;
+  background: #153f4b;
+  color: #ffffff;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.scanner-confirm-button:disabled {
+  background: #c8d3d9;
+  color: #526570;
+  cursor: not-allowed;
+}
+
 .panel {
   overflow: hidden;
   border: 1px solid #dce3e8;
@@ -1423,6 +1650,12 @@ tr:last-child td {
   }
 
   .scanner-scan-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .scanner-tool-panel,
+  .scanner-result-card,
+  .scanner-list-row {
     grid-template-columns: 1fr;
   }
 

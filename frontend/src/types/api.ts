@@ -148,3 +148,50 @@ export type ScannerPickingScanResponse = {
   task: PickingTask;
   route_run: RouteRun;
 };
+
+export type ScannerInventoryPosition = {
+  id: number;
+  branch: number;
+  branch_code: string;
+  location: number;
+  location_code: string;
+  location_name: string;
+  product: number;
+  product_sku: string;
+  product_barcode: string | null;
+  product_name: string;
+  quantity_on_hand: string;
+  quantity_reserved: string;
+};
+
+export type ScannerProductLookupResponse = {
+  product: {
+    id: number;
+    sku: string;
+    barcode: string | null;
+    name: string;
+    description: string | null;
+    image_url: string | null;
+    unit_of_measure: string;
+  };
+  inventory_positions: ScannerInventoryPosition[];
+};
+
+export type ScannerLocationContentsResponse = {
+  location: {
+    id: number;
+    branch: number;
+    branch_code: string;
+    code: string;
+    name: string;
+    location_type: string;
+  };
+  inventory_items: ScannerInventoryPosition[];
+};
+
+export type ScannerQuickTransferResponse = {
+  message: string;
+  movement_id: number;
+  source_inventory: ScannerInventoryPosition;
+  target_inventory: ScannerInventoryPosition;
+};

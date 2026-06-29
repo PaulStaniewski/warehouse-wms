@@ -3,10 +3,12 @@ import {
   Barcode,
   Boxes,
   ClipboardList,
+  Forklift,
   History,
   LayoutDashboard,
   MapPin,
   PackageSearch,
+  ScanLine,
   Route,
   Warehouse,
 } from "lucide-react";
@@ -25,7 +27,11 @@ const wmsNavItems = [
 ];
 
 const scannerNavItems = [
+  { to: "/scanner", label: "Scanner Menu", icon: ScanLine },
   { to: "/scanner/routes", label: "Routes / Picking", icon: Barcode },
+  { to: "/scanner/product", label: "Product", icon: PackageSearch },
+  { to: "/scanner/location", label: "Location", icon: MapPin },
+  { to: "/scanner/quick-transfer", label: "Quick Transfer", icon: Forklift },
 ];
 
 const pageTitles: Record<string, string> = {
@@ -37,7 +43,11 @@ const pageTitles: Record<string, string> = {
   "/wms/routes-monitor": "Route Monitor",
   "/wms/events/current": "Current Events",
   "/wms/events/archive": "Archive Events",
+  "/scanner": "Scanner",
   "/scanner/routes": "Scanner",
+  "/scanner/product": "Product Lookup",
+  "/scanner/location": "Location Lookup",
+  "/scanner/quick-transfer": "Quick Transfer",
 };
 
 export function AppLayout() {

@@ -12,7 +12,10 @@ import type {
   Product,
   ReturnBatch,
   RouteRun,
+  ScannerLocationContentsResponse,
   ScannerPickingScanResponse,
+  ScannerProductLookupResponse,
+  ScannerQuickTransferResponse,
 } from "../types/api";
 
 
@@ -127,6 +130,56 @@ export function useScannerPickingScan() {
       const response = await apiClient.post<ScannerPickingScanResponse>("/scanner/picking/scan/", {
         code,
         route_run_id: routeRunId,
+      });
+      return response.data;
+    },
+  });
+}
+
+export function useScannerProductLookup(code: string) {
+  return useQuery({
+    enabled: Boolean(code),
+    queryKey: ["scanner-product-lookup", code],
+    queryFn: async () => {
+      const response = await apiClient.get<ScannerProductLookupResponse>(
+        `/scanner/products/lookup/?code=${encodeURIComponent(code)}`,
+      );
+      return response.data;
+    },
+  });
+}
+
+export function useScannerLocationContents(code: string) {
+  return useQuery({
+    enabled: Boolean(code),
+    queryKey: ["scanner-location-contents", code],
+    queryFn: async () => {
+      const response = await apiClient.get<ScannerLocationContentsResponse>(
+        `/scanner/locations/contents/?code=${encodeURIComponent(code)}`,
+      );
+      return response.data;
+    },
+  });
+}
+
+export function useScannerQuickTransfer() {
+  return useMutation({
+    mutationFn: async ({
+      productCode,
+      quantity,
+      sourceLocationCode,
+      targetLocationCode,
+    }: {
+      productCode: string;
+      quantity: string;
+      sourceLocationCode: string;
+      targetLocationCode: string;
+    }) => {
+      const response = await apiClient.post<ScannerQuickTransferResponse>("/scanner/quick-transfer/", {
+        product_code: productCode,
+        quantity,
+        source_location_code: sourceLocationCode,
+        target_location_code: targetLocationCode,
       });
       return response.data;
     },
