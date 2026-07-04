@@ -4,7 +4,8 @@ import axios from "axios";
 import { ArrowLeft } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
 
-import { usePickingTasks, useRouteRun, useScannerPickingScan } from "../api/queries";
+import { usePickingTasks, useRouteRun, useScannerPickingPick } from "../api/queries";
+import { useStoredScannerSession } from "../api/scannerSession";
 import { DataState } from "../components/DataState";
 
 
@@ -38,54 +39,67 @@ export function ScannerPickingPage() {
   const { id } = useParams();
   const queryClient = useQueryClient();
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
-  const [scanCode, setScanCode] = useState("");
+  const [pickCode, setPickCode] = useState("");
+  const [pickQuantity, setPickQuantity] = useState("1");
+  const activeSession = useStoredScannerSession();
   const routeRun = useRouteRun(id);
   const pickingTasks = usePickingTasks(id);
-  const scannerPickingScan = useScannerPickingScan();
+  const scannerPickingPick = useScannerPickingPick();
   const tasks = pickingTasks.data?.results ?? [];
   const totalToPick = tasks.reduce((sum, task) => sum + toNumber(task.quantity_to_pick), 0);
   const totalPicked = tasks.reduce((sum, task) => sum + toNumber(task.quantity_picked), 0);
+  const totalPrepared = tasks.reduce((sum, task) => sum + toNumber(task.quantity_prepared), 0);
   const totalRemaining = tasks.reduce((sum, task) => sum + toNumber(task.remaining_quantity), 0);
   const openTasksCount = tasks.filter((task) => task.status === "open" || task.status === "assigned").length;
+  const pickedTasksCount = tasks.filter((task) => task.status === "picked").length;
   const completedTasksCount = tasks.filter((task) => task.status === "completed").length;
 
-  async function handleScan() {
+  async function refreshPickingData() {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["picking-tasks", id] }),
+      queryClient.invalidateQueries({ queryKey: ["route-run", id] }),
+      queryClient.invalidateQueries({ queryKey: ["route-runs"] }),
+      queryClient.invalidateQueries({ queryKey: ["scanner-control-cart-items", activeSession?.id] }),
+      queryClient.invalidateQueries({ queryKey: ["audit-logs", "current"] }),
+    ]);
+  }
+
+  async function handlePick() {
     setMessage(null);
     const routeRunId = Number(id);
 
     try {
-      const result = await scannerPickingScan.mutateAsync({
-        code: scanCode,
+      const result = await scannerPickingPick.mutateAsync({
+        code: pickCode,
+        quantity: pickQuantity,
         routeRunId,
+        sessionId: activeSession?.id ?? 0,
       });
       setMessage({ type: "success", text: result.message });
-      setScanCode("");
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["picking-tasks", id] }),
-        queryClient.invalidateQueries({ queryKey: ["route-run", id] }),
-        queryClient.invalidateQueries({ queryKey: ["audit-logs", "current"] }),
-      ]);
+      setPickCode("");
+      await refreshPickingData();
     } catch (error) {
       const text = axios.isAxiosError(error)
-        ? error.response?.data?.detail || "Could not complete picking task."
-        : "Could not complete picking task.";
+        ? error.response?.data?.detail || "Could not pick from shelf."
+        : "Could not pick from shelf.";
       setMessage({ type: "error", text });
     }
   }
 
-  function handleScanSubmit(event: FormEvent<HTMLFormElement>) {
+  function handlePickSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    handleScan();
+    handlePick();
   }
 
   return (
     <>
       <div className="scanner-links">
-        <Link to="/scanner/routes">
+        <Link to="/scanner/picking">
           <ArrowLeft size={17} />
-          Back to Scanner Routes
+          Pobranie
         </Link>
-        <Link to="/wms/routes-monitor">Back to Route Monitor</Link>
+        <Link to="/scanner/control">Kontrola</Link>
+        <Link to="/wms/routes-monitor">Route Monitor</Link>
       </div>
 
       <DataState
@@ -93,6 +107,12 @@ export function ScannerPickingPage() {
         isError={routeRun.isError || pickingTasks.isError}
         error={routeRun.error || pickingTasks.error}
       >
+        {!activeSession && (
+          <div className="scanner-message scanner-message--error">
+            Brak aktywnego wózka. <Link to="/scanner">Zeskanuj wózek</Link> przed pobraniem.
+          </div>
+        )}
+
         {message && <div className={`scanner-message scanner-message--${message.type}`}>{message.text}</div>}
 
         {routeRun.data && (
@@ -142,6 +162,10 @@ export function ScannerPickingPage() {
             <strong>{formatQuantity(totalPicked)}</strong>
           </article>
           <article>
+            <span>Prepared</span>
+            <strong>{formatQuantity(totalPrepared)}</strong>
+          </article>
+          <article>
             <span>Remaining</span>
             <strong>{formatQuantity(totalRemaining)}</strong>
           </article>
@@ -153,22 +177,41 @@ export function ScannerPickingPage() {
             <span>Completed tasks</span>
             <strong>{completedTasksCount}</strong>
           </article>
+          <article>
+            <span>Picked tasks</span>
+            <strong>{pickedTasksCount}</strong>
+          </article>
         </section>
 
-        <form className="scanner-scan-panel" onSubmit={handleScanSubmit}>
-          <label htmlFor="scanner-code">
-            <span>Scan product SKU, barcode, or order reference</span>
+        <form className="scanner-workflow-panel" onSubmit={handlePickSubmit}>
+          <header>
+            <span>A</span>
+            <h2>Pobranie</h2>
+          </header>
+          <label htmlFor="pick-code">
+            <span>Zeskanuj produkt</span>
             <input
               autoComplete="off"
               autoFocus
-              id="scanner-code"
-              onChange={(event) => setScanCode(event.target.value)}
-              placeholder="Scan or type code and press Enter"
-              value={scanCode}
+              id="pick-code"
+              onChange={(event) => setPickCode(event.target.value)}
+              placeholder="SKU, kod kreskowy lub numer zamówienia"
+              value={pickCode}
             />
           </label>
-          <button disabled={scannerPickingScan.isPending || !scanCode.trim()} type="submit">
-            {scannerPickingScan.isPending ? "Scanning..." : "Submit scan"}
+          <label htmlFor="pick-quantity">
+            <span>Ilość</span>
+            <input
+              id="pick-quantity"
+              min="0.001"
+              onChange={(event) => setPickQuantity(event.target.value)}
+              step="0.001"
+              type="number"
+              value={pickQuantity}
+            />
+          </label>
+          <button disabled={!activeSession || scannerPickingPick.isPending || !pickCode.trim() || !pickQuantity} type="submit">
+            {scannerPickingPick.isPending ? "Pobieranie..." : "Zatwierdź pobranie"}
           </button>
         </form>
 
@@ -201,8 +244,12 @@ export function ScannerPickingPage() {
                     <strong>{task.quantity_picked}</strong>
                   </div>
                   <div>
-                    <span>Remaining</span>
-                    <strong>{task.remaining_quantity}</strong>
+                    <span>Prepared</span>
+                    <strong>{task.quantity_prepared}</strong>
+                  </div>
+                  <div>
+                    <span>To prepare</span>
+                    <strong>{task.remaining_to_prepare}</strong>
                   </div>
                 </div>
 

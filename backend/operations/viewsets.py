@@ -194,8 +194,9 @@ class PickingTaskViewSet(ReadOnlyModelViewSet):
                 return Response({"detail": "Not enough stock at the source location."}, status=status.HTTP_400_BAD_REQUEST)
 
             task.quantity_picked = task.quantity_to_pick
+            task.quantity_prepared = task.quantity_to_pick
             task.status = PickingTask.Status.COMPLETED
-            task.save(update_fields=["quantity_picked", "status", "updated_at"])
+            task.save(update_fields=["quantity_picked", "quantity_prepared", "status", "updated_at"])
 
             order_line.quantity_picked = F("quantity_picked") + quantity_to_pick
             order_line.save(update_fields=["quantity_picked", "updated_at"])

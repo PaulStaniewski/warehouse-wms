@@ -84,6 +84,7 @@ export type RouteRun = {
   total_picking_tasks: number;
   open_picking_tasks: number;
   in_progress_picking_tasks: number;
+  picked_picking_tasks: number;
   completed_picking_tasks: number;
   progress_percent: number;
   last_activity_at: string | null;
@@ -120,7 +121,9 @@ export type PickingTask = {
   status: string;
   quantity_to_pick: string;
   quantity_picked: string;
+  quantity_prepared: string;
   remaining_quantity: string;
+  remaining_to_prepare: string;
 };
 
 export type ReturnBatch = {
@@ -147,6 +150,61 @@ export type ScannerPickingScanResponse = {
   message: string;
   task: PickingTask;
   route_run: RouteRun;
+  cart_item?: ScannerCartItem;
+};
+
+export type ScannerSession = {
+  id: number;
+  cart: number;
+  cart_code: string;
+  cart_name: string;
+  worker_code: string;
+  status: string;
+  started_at: string;
+  ended_at: string | null;
+};
+
+export type ScannerSessionResponse = {
+  message?: string;
+  session: ScannerSession;
+};
+
+export type ScannerCartItem = {
+  id: number;
+  session: number;
+  cart_code: string;
+  route_run: number;
+  route_code: string;
+  picking_task: number;
+  product: number;
+  product_sku: string;
+  product_barcode: string | null;
+  product_name: string;
+  order_reference: string;
+  customer_name: string;
+  quantity_picked: string;
+  quantity_prepared: string;
+  remaining_quantity: string;
+};
+
+export type ScannerCartItemsResponse = {
+  session: ScannerSession;
+  items: ScannerCartItem[];
+};
+
+export type ScannerControlTargetResponse = {
+  product_sku: string;
+  candidates: ScannerCartItem[];
+};
+
+export type ScannerPrintLabelResponse = {
+  message: string;
+  label: {
+    id: number;
+    order_reference: string;
+    printer_code: string;
+    printed_at: string;
+  };
 };
 
 export type ScannerInventoryPosition = {

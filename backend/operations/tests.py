@@ -5,7 +5,19 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from operations.models import AuditLog, DeliveryRoute, Order, OrderLine, PickingTask, RouteRun, StockMovement
+from operations.models import (
+    AuditLog,
+    CartPickedItem,
+    DeliveryRoute,
+    Order,
+    OrderLine,
+    PickingTask,
+    RouteRun,
+    ScannerCart,
+    ScannerCustomerLabel,
+    ScannerSession,
+    StockMovement,
+)
 from warehouse.models import Branch, InventoryItem, Location, Product
 
 
@@ -63,7 +75,6 @@ class PickingTaskCompleteActionTests(APITestCase):
             quantity_to_pick=Decimal("2"),
             quantity_picked=Decimal("0"),
         )
-
     def complete_task(self, task=None, location_code="A-01-01", product_code="990000000001"):
         task = task or self.task
         return self.client.post(
@@ -82,6 +93,7 @@ class PickingTaskCompleteActionTests(APITestCase):
         self.task.refresh_from_db()
         self.assertEqual(self.task.status, PickingTask.Status.COMPLETED)
         self.assertEqual(self.task.quantity_picked, Decimal("2.000"))
+        self.assertEqual(self.task.quantity_prepared, Decimal("2.000"))
 
     def test_wrong_location_code_fails(self):
         response = self.complete_task(location_code="WRONG-01")
@@ -194,6 +206,8 @@ class ScannerPickingScanActionTests(APITestCase):
             quantity_to_pick=Decimal("2"),
             quantity_picked=Decimal("0"),
         )
+        self.cart = ScannerCart.objects.create(code="CART-01", name="Cart 01", status=ScannerCart.Status.IN_USE)
+        self.session = ScannerSession.objects.create(cart=self.cart, worker_code="DEMO")
 
     def scan(self, route_run_id=None, code="SCAN-001"):
         return self.client.post(
@@ -201,6 +215,18 @@ class ScannerPickingScanActionTests(APITestCase):
             {
                 "route_run_id": route_run_id if route_run_id is not None else self.route_run.id,
                 "code": code,
+            },
+            format="json",
+        )
+
+    def pick_to_cart(self, code="SCAN-001", quantity="1"):
+        return self.client.post(
+            "/api/scanner/picking/pick/",
+            {
+                "route_run_id": self.route_run.id,
+                "code": code,
+                "quantity": quantity,
+                "session_id": self.session.id,
             },
             format="json",
         )
@@ -244,15 +270,16 @@ class ScannerPickingScanActionTests(APITestCase):
         self.assertEqual(self.order_line.quantity_picked, Decimal("1.000"))
         self.assertEqual(self.inventory_item.quantity_on_hand, Decimal("4.000"))
 
-    def test_scan_by_barcode_completes_after_required_quantity(self):
+    def test_scan_by_barcode_marks_picked_after_required_quantity(self):
         first_response = self.scan(code="880000000001")
         second_response = self.scan(code="880000000001")
 
         self.assertEqual(first_response.status_code, status.HTTP_200_OK)
         self.assertEqual(second_response.status_code, status.HTTP_200_OK)
         self.task.refresh_from_db()
-        self.assertEqual(self.task.status, PickingTask.Status.COMPLETED)
+        self.assertEqual(self.task.status, PickingTask.Status.PICKED)
         self.assertEqual(self.task.quantity_picked, Decimal("2.000"))
+        self.assertEqual(self.task.quantity_prepared, Decimal("0.000"))
 
     def test_scan_by_order_reference_matches_task(self):
         response = self.scan(code="SCAN-ORDER-001")
@@ -262,13 +289,15 @@ class ScannerPickingScanActionTests(APITestCase):
         self.assertEqual(self.task.quantity_picked, Decimal("1.000"))
 
     def test_completed_matching_task_returns_400(self):
-        self.scan()
-        self.scan()
+        self.task.status = PickingTask.Status.COMPLETED
+        self.task.quantity_picked = Decimal("2")
+        self.task.quantity_prepared = Decimal("2")
+        self.task.save(update_fields=["status", "quantity_picked", "quantity_prepared", "updated_at"])
 
         response = self.scan()
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("already completed", response.data["detail"])
+        self.assertIn("already prepared", response.data["detail"])
 
     def test_scan_creates_audit_log(self):
         self.scan()
@@ -277,9 +306,202 @@ class ScannerPickingScanActionTests(APITestCase):
             AuditLog.objects.filter(
                 entity_name="PickingTask",
                 entity_id=str(self.task.id),
-                message__icontains="Scanner picked",
+                message__icontains="Scanner picking picked",
             ).exists()
         )
+
+    def prepare(self, route_run_id=None, code="SCAN-ORDER-001", product_code="SCAN-001", quantity="1"):
+        return self.client.post(
+            "/api/scanner/picking/prepare/",
+            {
+                "session_id": self.session.id,
+                "route_run_id": route_run_id if route_run_id is not None else self.route_run.id,
+                "order_reference": code,
+                "product_code": product_code,
+                "quantity": quantity,
+            },
+            format="json",
+        )
+
+    def test_pick_endpoint_accepts_valid_product_scan(self):
+        response = self.client.post(
+            "/api/scanner/picking/pick/",
+            {"route_run_id": self.route_run.id, "code": "SCAN-001", "quantity": "1", "session_id": self.session.id},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.task.refresh_from_db()
+        self.assertEqual(self.task.quantity_picked, Decimal("1.000"))
+        self.assertTrue(CartPickedItem.objects.filter(session=self.session, picking_task=self.task).exists())
+
+    def test_prepare_requires_picked_quantity_first(self):
+        self.print_label()
+        response = self.prepare()
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("active cart", response.data["detail"])
+
+    def test_prepare_endpoint_increments_prepared_quantity(self):
+        self.pick_to_cart()
+        self.print_label()
+
+        response = self.prepare()
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.task.refresh_from_db()
+        self.assertEqual(self.task.quantity_prepared, Decimal("1.000"))
+        self.assertEqual(self.task.status, PickingTask.Status.IN_PROGRESS)
+
+    def test_task_becomes_completed_when_prepared_quantity_reaches_required_quantity(self):
+        self.pick_to_cart()
+        self.pick_to_cart()
+        self.print_label()
+        first_response = self.prepare(quantity="1")
+        second_response = self.prepare(quantity="1")
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.task.refresh_from_db()
+        self.assertEqual(self.task.status, PickingTask.Status.COMPLETED)
+        self.assertEqual(self.task.quantity_prepared, Decimal("2.000"))
+
+    def test_prepare_creates_audit_log(self):
+        self.pick_to_cart()
+        self.print_label()
+        self.prepare()
+
+        self.assertTrue(
+            AuditLog.objects.filter(
+                entity_name="PickingTask",
+                entity_id=str(self.task.id),
+                message__icontains="Scanner picking prepared",
+            ).exists()
+        )
+
+    def test_prepare_invalid_session_returns_clear_error(self):
+        response = self.client.post(
+            "/api/scanner/picking/prepare/",
+            {
+                "session_id": 999999,
+                "order_reference": "SCAN-ORDER-001",
+                "product_code": "SCAN-001",
+                "quantity": "1",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertIn("session", response.data["detail"])
+
+    def test_pick_invalid_product_code_returns_clear_error(self):
+        response = self.scan(code="WRONG")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("No matching open", response.data["detail"])
+
+    def test_prepare_invalid_order_code_returns_clear_error(self):
+        self.pick_to_cart()
+        self.print_label()
+
+        response = self.prepare(code="WRONG-ORDER")
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertIn("not found", response.data["detail"])
+
+    def test_preparing_more_than_picked_quantity_returns_clear_error(self):
+        self.pick_to_cart()
+        self.print_label()
+
+        response = self.prepare(quantity="2")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("picked quantity", response.data["detail"])
+
+    def print_label(self, order_reference="SCAN-ORDER-001", printer_code="ZEBRA-01"):
+        return self.client.post(
+            "/api/scanner/control/print-label/",
+            {
+                "session_id": self.session.id,
+                "order_reference": order_reference,
+                "printer_code": printer_code,
+            },
+            format="json",
+        )
+
+    def test_start_session_creates_or_reuses_cart(self):
+        response = self.client.post(
+            "/api/scanner/session/start/",
+            {"cart_code": "WOZEK-99", "worker_code": "DEMO"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["session"]["cart_code"], "WOZEK-99")
+        self.assertTrue(ScannerCart.objects.filter(code="WOZEK-99", status=ScannerCart.Status.IN_USE).exists())
+
+    def test_control_cart_items_returns_active_cart_contents(self):
+        self.client.post(
+            "/api/scanner/picking/pick/",
+            {"route_run_id": self.route_run.id, "code": "SCAN-001", "quantity": "1", "session_id": self.session.id},
+            format="json",
+        )
+
+        response = self.client.get("/api/scanner/control/cart-items/", {"session_id": self.session.id})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["items"][0]["product_sku"], "SCAN-001")
+
+    def test_control_target_returns_candidates_for_scanned_product(self):
+        self.client.post(
+            "/api/scanner/picking/pick/",
+            {"route_run_id": self.route_run.id, "code": "SCAN-001", "quantity": "1", "session_id": self.session.id},
+            format="json",
+        )
+
+        response = self.client.get(
+            "/api/scanner/control/target/",
+            {"session_id": self.session.id, "product_code": "SCAN-001"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["candidates"][0]["order_reference"], "SCAN-ORDER-001")
+
+    def test_print_label_creates_audit_log_and_label(self):
+        response = self.print_label()
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(ScannerCustomerLabel.objects.filter(session=self.session, order=self.order).exists())
+        self.assertTrue(AuditLog.objects.filter(message__icontains="Customer label printed").exists())
+
+    def test_finish_control_rejects_unprepared_items(self):
+        self.client.post(
+            "/api/scanner/picking/pick/",
+            {"route_run_id": self.route_run.id, "code": "SCAN-001", "quantity": "1", "session_id": self.session.id},
+            format="json",
+        )
+
+        response = self.client.post("/api/scanner/control/finish/", {"session_id": self.session.id}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("unprepared", response.data["detail"])
+
+    def test_finish_control_releases_cart_when_all_items_prepared(self):
+        self.client.post(
+            "/api/scanner/picking/pick/",
+            {"route_run_id": self.route_run.id, "code": "SCAN-001", "quantity": "1", "session_id": self.session.id},
+            format="json",
+        )
+        self.print_label()
+        self.prepare()
+
+        response = self.client.post("/api/scanner/control/finish/", {"session_id": self.session.id}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.session.refresh_from_db()
+        self.cart.refresh_from_db()
+        self.assertEqual(self.session.status, ScannerSession.Status.CLOSED)
+        self.assertEqual(self.cart.status, ScannerCart.Status.AVAILABLE)
 
 
 class ScannerLookupAndQuickTransferTests(APITestCase):

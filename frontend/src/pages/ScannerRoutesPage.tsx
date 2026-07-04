@@ -8,6 +8,8 @@ import { PageHeader } from "../components/PageHeader";
 import type { Branch, RouteRun } from "../types/api";
 
 
+type ScannerRouteMode = "picking" | "control";
+
 function getDefaultBranch(branches: Branch[]) {
   return branches.find((branch) => branch.code === "GDY") ?? branches[0];
 }
@@ -48,9 +50,39 @@ function getRunLabel(run: RouteRun, hasPriorityMode: boolean) {
   return { label: "Locked", tone: "locked" };
 }
 
-function ScannerRouteCard({ hasPriorityMode, run }: { hasPriorityMode: boolean; run: RouteRun }) {
+function getModeCopy(mode: ScannerRouteMode) {
+  if (mode === "control") {
+    return {
+      action: "Kontrola",
+      description: "Wybierz trasę lub proformę do kontroli pobranych pozycji.",
+      target: "control",
+      title: "Kontrola",
+    };
+  }
+
+  return {
+    action: "Pobranie",
+    description: "Wybierz trasę lub proformę do pobierania produktów z półek.",
+    target: "picking",
+    title: "Pobranie",
+  };
+}
+
+function ScannerRouteCard({
+  hasPriorityMode,
+  mode,
+  run,
+}: {
+  hasPriorityMode: boolean;
+  mode: ScannerRouteMode;
+  run: RouteRun;
+}) {
   const label = getRunLabel(run, hasPriorityMode);
   const canOpen = isLocallySelectable(run, hasPriorityMode);
+  const isTerminal = isTerminalStatus(run.status);
+  const modeCopy = getModeCopy(mode);
+  const targetPath = `/scanner/route-runs/${run.id}/${modeCopy.target}`;
+
   const content = (
     <>
       <header className="scanner-card-header">
@@ -90,21 +122,22 @@ function ScannerRouteCard({ hasPriorityMode, run }: { hasPriorityMode: boolean; 
       </div>
 
       <span className={`route-label route-label--${label.tone}`}>{label.label}</span>
+      <span className="scanner-route-single-action">{modeCopy.action}</span>
     </>
   );
 
-  if (!canOpen) {
+  if (isTerminal || !canOpen) {
     return <article className="scanner-route-card scanner-route-card--disabled">{content}</article>;
   }
 
   return (
-    <Link className="scanner-route-card" to={`/scanner/route-runs/${run.id}/picking`}>
+    <Link className="scanner-route-card" to={targetPath}>
       {content}
     </Link>
   );
 }
 
-export function ScannerRoutesPage() {
+function ScannerRouteSelectionPage({ mode }: { mode: ScannerRouteMode }) {
   const branches = useBranches();
   const [selectedBranchId, setSelectedBranchId] = useState<number | undefined>();
   const branchRows = useMemo(() => branches.data?.results ?? [], [branches.data?.results]);
@@ -112,6 +145,7 @@ export function ScannerRoutesPage() {
   const routeRuns = useRouteRuns(selectedBranchId);
   const rows = routeRuns.data?.results ?? [];
   const hasPriorityMode = rows.some((run) => run.is_urgent);
+  const modeCopy = getModeCopy(mode);
 
   useEffect(() => {
     if (selectedBranchId || branchRows.length === 0) {
@@ -124,14 +158,14 @@ export function ScannerRoutesPage() {
   return (
     <>
       <PageHeader
-        title="Scanner route selection"
-        description="Choose a selectable route run before opening the read-only picking list."
+        title={modeCopy.title}
+        description={modeCopy.description}
         action={
           <div className="branch-selector">
-            <label htmlFor="scanner-branch-select">Branch</label>
+            <label htmlFor={`scanner-${mode}-branch-select`}>Branch</label>
             <select
               disabled={branches.isLoading || branchRows.length === 0}
-              id="scanner-branch-select"
+              id={`scanner-${mode}-branch-select`}
               onChange={(event) => setSelectedBranchId(Number(event.target.value))}
               value={selectedBranchId ?? ""}
             >
@@ -164,11 +198,19 @@ export function ScannerRoutesPage() {
         ) : (
           <section className="scanner-routes-grid">
             {rows.map((run) => (
-              <ScannerRouteCard hasPriorityMode={hasPriorityMode} key={run.id} run={run} />
+              <ScannerRouteCard hasPriorityMode={hasPriorityMode} key={run.id} mode={mode} run={run} />
             ))}
           </section>
         )}
       </DataState>
     </>
   );
+}
+
+export function ScannerPickingRoutesPage() {
+  return <ScannerRouteSelectionPage mode="picking" />;
+}
+
+export function ScannerControlRoutesPage() {
+  return <ScannerRouteSelectionPage mode="control" />;
 }

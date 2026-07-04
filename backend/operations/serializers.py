@@ -47,6 +47,7 @@ class RouteRunSerializer(serializers.ModelSerializer):
     total_picking_tasks = serializers.SerializerMethodField()
     open_picking_tasks = serializers.SerializerMethodField()
     in_progress_picking_tasks = serializers.SerializerMethodField()
+    picked_picking_tasks = serializers.SerializerMethodField()
     completed_picking_tasks = serializers.SerializerMethodField()
     progress_percent = serializers.SerializerMethodField()
     last_activity_at = serializers.SerializerMethodField()
@@ -72,6 +73,9 @@ class RouteRunSerializer(serializers.ModelSerializer):
 
     def get_in_progress_picking_tasks(self, obj: RouteRun) -> int:
         return sum(task.status == PickingTask.Status.IN_PROGRESS for task in self._get_picking_tasks(obj))
+
+    def get_picked_picking_tasks(self, obj: RouteRun) -> int:
+        return sum(task.status == PickingTask.Status.PICKED for task in self._get_picking_tasks(obj))
 
     def get_completed_picking_tasks(self, obj: RouteRun) -> int:
         return sum(task.status == PickingTask.Status.COMPLETED for task in self._get_picking_tasks(obj))
@@ -126,6 +130,7 @@ class RouteRunSerializer(serializers.ModelSerializer):
             "total_picking_tasks",
             "open_picking_tasks",
             "in_progress_picking_tasks",
+            "picked_picking_tasks",
             "completed_picking_tasks",
             "progress_percent",
             "last_activity_at",
@@ -249,9 +254,13 @@ class PickingTaskSerializer(serializers.ModelSerializer):
     source_location_name = serializers.CharField(source="source_location.name", read_only=True)
     assigned_to_username = serializers.CharField(source="assigned_to.username", read_only=True)
     remaining_quantity = serializers.SerializerMethodField()
+    remaining_to_prepare = serializers.SerializerMethodField()
 
     def get_remaining_quantity(self, obj: PickingTask) -> str:
         return str(obj.quantity_to_pick - obj.quantity_picked)
+
+    def get_remaining_to_prepare(self, obj: PickingTask) -> str:
+        return str(obj.quantity_to_pick - obj.quantity_prepared)
 
     class Meta:
         model = PickingTask
@@ -271,7 +280,9 @@ class PickingTaskSerializer(serializers.ModelSerializer):
             "status",
             "quantity_to_pick",
             "quantity_picked",
+            "quantity_prepared",
             "remaining_quantity",
+            "remaining_to_prepare",
             "created_at",
             "updated_at",
         ]

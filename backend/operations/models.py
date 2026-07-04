@@ -248,6 +248,7 @@ class PickingTask(TimestampedModel):
         OPEN = "open", "Open"
         ASSIGNED = "assigned", "Assigned"
         IN_PROGRESS = "in_progress", "In progress"
+        PICKED = "picked", "Picked"
         COMPLETED = "completed", "Completed"
         CANCELLED = "cancelled", "Cancelled"
 
@@ -264,6 +265,7 @@ class PickingTask(TimestampedModel):
     status = models.CharField(max_length=32, choices=Status.choices, default=Status.OPEN)
     quantity_to_pick = models.DecimalField(max_digits=12, decimal_places=3)
     quantity_picked = models.DecimalField(max_digits=12, decimal_places=3, default=0)
+    quantity_prepared = models.DecimalField(max_digits=12, decimal_places=3, default=0)
 
     class Meta:
         ordering = ["status", "created_at"]
@@ -275,10 +277,99 @@ class PickingTask(TimestampedModel):
         constraints = [
             models.CheckConstraint(check=models.Q(quantity_to_pick__gt=0), name="picking_quantity_positive"),
             models.CheckConstraint(check=models.Q(quantity_picked__gte=0), name="picking_picked_non_negative"),
+            models.CheckConstraint(check=models.Q(quantity_prepared__gte=0), name="picking_prepared_non_negative"),
         ]
 
     def __str__(self) -> str:
         return f"Pick {self.order_line.product.sku} for {self.order_line.order.external_reference}"
+
+
+class ScannerCart(TimestampedModel):
+    class Status(models.TextChoices):
+        AVAILABLE = "available", "Available"
+        IN_USE = "in_use", "In use"
+
+    code = models.CharField(max_length=64, unique=True)
+    name = models.CharField(max_length=255, blank=True)
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.AVAILABLE)
+
+    class Meta:
+        ordering = ["code"]
+        indexes = [
+            models.Index(fields=["code"]),
+            models.Index(fields=["status"]),
+        ]
+
+    def __str__(self) -> str:
+        return self.code
+
+
+class ScannerSession(TimestampedModel):
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        CLOSED = "closed", "Closed"
+
+    cart = models.ForeignKey(ScannerCart, on_delete=models.PROTECT, related_name="sessions")
+    worker_code = models.CharField(max_length=64, blank=True)
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.ACTIVE)
+    started_at = models.DateTimeField(default=timezone.now)
+    ended_at = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        ordering = ["-started_at"]
+        indexes = [
+            models.Index(fields=["status"]),
+            models.Index(fields=["worker_code"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.cart.code} / {self.status}"
+
+
+class CartPickedItem(TimestampedModel):
+    session = models.ForeignKey(ScannerSession, on_delete=models.CASCADE, related_name="picked_items")
+    cart = models.ForeignKey(ScannerCart, on_delete=models.PROTECT, related_name="picked_items")
+    route_run = models.ForeignKey(RouteRun, on_delete=models.PROTECT, related_name="cart_items")
+    picking_task = models.ForeignKey(PickingTask, on_delete=models.CASCADE, related_name="cart_items")
+    product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name="cart_items")
+    quantity_picked = models.DecimalField(max_digits=12, decimal_places=3, default=0)
+    quantity_prepared = models.DecimalField(max_digits=12, decimal_places=3, default=0)
+
+    class Meta:
+        ordering = ["created_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["session", "picking_task"], name="unique_cart_item_per_session_task"),
+            models.CheckConstraint(check=models.Q(quantity_picked__gte=0), name="cart_item_picked_non_negative"),
+            models.CheckConstraint(check=models.Q(quantity_prepared__gte=0), name="cart_item_prepared_non_negative"),
+        ]
+        indexes = [
+            models.Index(fields=["session", "product"]),
+            models.Index(fields=["cart"]),
+            models.Index(fields=["route_run"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.cart.code} / {self.product.sku}"
+
+
+class ScannerCustomerLabel(TimestampedModel):
+    session = models.ForeignKey(ScannerSession, on_delete=models.CASCADE, related_name="customer_labels")
+    order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name="scanner_labels")
+    printer_code = models.CharField(max_length=64)
+    printed_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["-printed_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["session", "order"], name="unique_scanner_label_per_session_order"),
+        ]
+        indexes = [
+            models.Index(fields=["printer_code"]),
+            models.Index(fields=["printed_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.order.external_reference} / {self.printer_code}"
 
 
 class StockMovement(TimestampedModel):

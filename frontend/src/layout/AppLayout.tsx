@@ -2,6 +2,7 @@ import {
   Archive,
   Barcode,
   Boxes,
+  ClipboardCheck,
   ClipboardList,
   Forklift,
   History,
@@ -13,6 +14,8 @@ import {
   Warehouse,
 } from "lucide-react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
+
+import { useStoredScannerSession } from "../api/scannerSession";
 
 
 const wmsNavItems = [
@@ -28,7 +31,8 @@ const wmsNavItems = [
 
 const scannerNavItems = [
   { to: "/scanner", label: "Scanner Menu", icon: ScanLine },
-  { to: "/scanner/routes", label: "Routes / Picking", icon: Barcode },
+  { to: "/scanner/picking", label: "Pobranie", icon: Barcode },
+  { to: "/scanner/control", label: "Kontrola", icon: ClipboardCheck },
   { to: "/scanner/product", label: "Product", icon: PackageSearch },
   { to: "/scanner/location", label: "Location", icon: MapPin },
   { to: "/scanner/quick-transfer", label: "Quick Transfer", icon: Forklift },
@@ -44,7 +48,10 @@ const pageTitles: Record<string, string> = {
   "/wms/events/current": "Current Events",
   "/wms/events/archive": "Archive Events",
   "/scanner": "Scanner",
-  "/scanner/routes": "Scanner",
+  "/scanner/picking": "Pobranie",
+  "/scanner/control": "Kontrola",
+  "/scanner/routes": "Pobranie",
+  "/scanner/route-runs": "Scanner",
   "/scanner/product": "Product Lookup",
   "/scanner/location": "Location Lookup",
   "/scanner/quick-transfer": "Quick Transfer",
@@ -52,6 +59,7 @@ const pageTitles: Record<string, string> = {
 
 export function AppLayout() {
   const location = useLocation();
+  const scannerSession = useStoredScannerSession();
   const title = pageTitles[location.pathname] ?? (location.pathname.startsWith("/scanner") ? "Scanner" : "Warehouse WMS");
 
   return (
@@ -101,7 +109,11 @@ export function AppLayout() {
       <div className="main-panel">
         <header className="topbar">
           <h2 className="topbar-title">{title}</h2>
-          <span className="topbar-meta">API: /api</span>
+          <span className="topbar-meta">
+            {location.pathname.startsWith("/scanner") && scannerSession
+              ? `Wózek: ${scannerSession.cart_code}`
+              : "API: /api"}
+          </span>
         </header>
         <main className="content">
           <Outlet />

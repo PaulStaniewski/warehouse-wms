@@ -16,6 +16,10 @@ import type {
   ScannerPickingScanResponse,
   ScannerProductLookupResponse,
   ScannerQuickTransferResponse,
+  ScannerCartItemsResponse,
+  ScannerControlTargetResponse,
+  ScannerPrintLabelResponse,
+  ScannerSessionResponse,
 } from "../types/api";
 
 
@@ -130,6 +134,138 @@ export function useScannerPickingScan() {
       const response = await apiClient.post<ScannerPickingScanResponse>("/scanner/picking/scan/", {
         code,
         route_run_id: routeRunId,
+      });
+      return response.data;
+    },
+  });
+}
+
+export function useScannerPickingPick() {
+  return useMutation({
+    mutationFn: async ({
+      code,
+      quantity,
+      routeRunId,
+      sessionId,
+    }: {
+      code: string;
+      quantity: string;
+      routeRunId: number;
+      sessionId: number;
+    }) => {
+      const response = await apiClient.post<ScannerPickingScanResponse>("/scanner/picking/pick/", {
+        code,
+        quantity,
+        route_run_id: routeRunId,
+        session_id: sessionId,
+      });
+      return response.data;
+    },
+  });
+}
+
+export function useScannerPickingPrepare() {
+  return useMutation({
+    mutationFn: async ({
+      code,
+      productCode,
+      quantity,
+      routeRunId,
+      sessionId,
+    }: {
+      code: string;
+      productCode: string;
+      quantity: string;
+      routeRunId: number;
+      sessionId: number;
+    }) => {
+      const response = await apiClient.post<ScannerPickingScanResponse>("/scanner/picking/prepare/", {
+        order_reference: code,
+        product_code: productCode,
+        quantity,
+        route_run_id: routeRunId,
+        session_id: sessionId,
+      });
+      return response.data;
+    },
+  });
+}
+
+export function useScannerSessionStart() {
+  return useMutation({
+    mutationFn: async ({ cartCode, workerCode }: { cartCode: string; workerCode: string }) => {
+      const response = await apiClient.post<ScannerSessionResponse>("/scanner/session/start/", {
+        cart_code: cartCode,
+        worker_code: workerCode,
+      });
+      return response.data;
+    },
+  });
+}
+
+export function useScannerSessionEnd() {
+  return useMutation({
+    mutationFn: async ({ sessionId }: { sessionId: number }) => {
+      const response = await apiClient.post<ScannerSessionResponse>("/scanner/session/end/", {
+        session_id: sessionId,
+      });
+      return response.data;
+    },
+  });
+}
+
+export function useScannerCartItems(sessionId?: number) {
+  return useQuery({
+    enabled: Boolean(sessionId),
+    queryKey: ["scanner-control-cart-items", sessionId],
+    queryFn: async () => {
+      const response = await apiClient.get<ScannerCartItemsResponse>(
+        `/scanner/control/cart-items/?session_id=${sessionId}`,
+      );
+      return response.data;
+    },
+  });
+}
+
+export function useScannerControlTarget(sessionId?: number, productCode?: string) {
+  return useQuery({
+    enabled: Boolean(sessionId && productCode),
+    queryKey: ["scanner-control-target", sessionId, productCode],
+    queryFn: async () => {
+      const response = await apiClient.get<ScannerControlTargetResponse>(
+        `/scanner/control/target/?session_id=${sessionId}&product_code=${encodeURIComponent(productCode ?? "")}`,
+      );
+      return response.data;
+    },
+  });
+}
+
+export function useScannerPrintLabel() {
+  return useMutation({
+    mutationFn: async ({
+      orderReference,
+      printerCode,
+      sessionId,
+    }: {
+      orderReference: string;
+      printerCode: string;
+      sessionId: number;
+    }) => {
+      const response = await apiClient.post<ScannerPrintLabelResponse>("/scanner/control/print-label/", {
+        order_reference: orderReference,
+        printer_code: printerCode,
+        session_id: sessionId,
+      });
+      return response.data;
+    },
+  });
+}
+
+export function useScannerControlFinish() {
+  return useMutation({
+    mutationFn: async ({ sessionId }: { sessionId: number }) => {
+      const response = await apiClient.post<ScannerSessionResponse>("/scanner/control/finish/", {
+        session_id: sessionId,
       });
       return response.data;
     },

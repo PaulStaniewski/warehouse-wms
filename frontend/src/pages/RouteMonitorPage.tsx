@@ -96,7 +96,7 @@ function RouteList({ now, rows }: { now: Date; rows: RouteRun[] }) {
             <div className="monitor-count monitor-count--active">{run.open_picking_tasks}</div>
             <div className="monitor-count">{run.order_lines_count}</div>
             <div className="monitor-count">{run.in_progress_picking_tasks}</div>
-            <div className="monitor-count">{run.picked_lines_count}</div>
+            <div className="monitor-count">{run.picked_picking_tasks}</div>
             <div className="monitor-count">{run.completed_picking_tasks}</div>
             <ProgressCell run={run} />
             <div className="monitor-departure">{formatTime(run.departure_time)}</div>

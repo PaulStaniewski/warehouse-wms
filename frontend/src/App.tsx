@@ -10,12 +10,13 @@ import { LocationsPage } from "./pages/LocationsPage";
 import { OrdersPage } from "./pages/OrdersPage";
 import { ProductsPage } from "./pages/ProductsPage";
 import { RouteMonitorPage } from "./pages/RouteMonitorPage";
+import { ScannerControlPage } from "./pages/ScannerControlPage";
 import { ScannerHomePage } from "./pages/ScannerHomePage";
 import { ScannerLocationLookupPage } from "./pages/ScannerLocationLookupPage";
 import { ScannerPickingPage } from "./pages/ScannerPickingPage";
 import { ScannerProductLookupPage } from "./pages/ScannerProductLookupPage";
 import { ScannerQuickTransferPage } from "./pages/ScannerQuickTransferPage";
-import { ScannerRoutesPage } from "./pages/ScannerRoutesPage";
+import { ScannerPickingRoutesPage } from "./pages/ScannerRoutesPage";
 
 function App() {
   return (
@@ -31,8 +32,11 @@ function App() {
         <Route path="wms/events/current" element={<CurrentEventsPage />} />
         <Route path="wms/events/archive" element={<ArchiveEventsPage />} />
         <Route path="scanner" element={<ScannerHomePage />} />
-        <Route path="scanner/routes" element={<ScannerRoutesPage />} />
+        <Route path="scanner/picking" element={<ScannerPickingRoutesPage />} />
+        <Route path="scanner/control" element={<ScannerControlPage />} />
+        <Route path="scanner/routes" element={<Navigate to="/scanner/picking" replace />} />
         <Route path="scanner/route-runs/:id/picking" element={<ScannerPickingPage />} />
+        <Route path="scanner/route-runs/:id/control" element={<Navigate to="/scanner/control" replace />} />
         <Route path="scanner/product" element={<ScannerProductLookupPage />} />
         <Route path="scanner/location" element={<ScannerLocationLookupPage />} />
         <Route path="scanner/quick-transfer" element={<ScannerQuickTransferPage />} />

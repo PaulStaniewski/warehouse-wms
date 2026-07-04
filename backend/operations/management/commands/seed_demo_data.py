@@ -14,6 +14,7 @@ from operations.models import (
     ReturnBatch,
     ReturnLine,
     RouteRun,
+    ScannerCart,
     StockMovement,
 )
 from warehouse.models import Branch, InventoryItem, Location, Product
@@ -33,6 +34,7 @@ class Command(BaseCommand):
         orders, order_lines = self.create_orders(branches, products, route_runs)
         return_batch, return_lines = self.create_returns(branches, products)
         picking_tasks = self.create_picking_tasks(branches, locations, order_lines)
+        scanner_carts = self.create_scanner_carts()
         stock_movements = self.create_stock_movements(branches, locations, products, inventory_items)
         audit_logs = self.create_audit_logs(orders, return_batch)
 
@@ -47,6 +49,7 @@ class Command(BaseCommand):
         self.stdout.write(f"Order lines: {len(order_lines)}")
         self.stdout.write(f"Returns: 1 batch, {len(return_lines)} lines")
         self.stdout.write(f"Picking tasks: {len(picking_tasks)}")
+        self.stdout.write(f"Scanner carts: {len(scanner_carts)}")
         self.stdout.write(f"Stock movements: {len(stock_movements)}")
         self.stdout.write(f"Audit logs: {len(audit_logs)}")
 
@@ -334,10 +337,24 @@ class Command(BaseCommand):
                     "status": status,
                     "quantity_to_pick": order_line.quantity_ordered,
                     "quantity_picked": Decimal("0"),
+                    "quantity_prepared": Decimal("0"),
                 },
             )
             picking_tasks[order_line_key] = task
         return picking_tasks
+
+    def create_scanner_carts(self):
+        carts = {}
+        for code in ["WOZEK-01", "WOZEK-02", "WOZEK-03"]:
+            cart, _ = ScannerCart.objects.update_or_create(
+                code=code,
+                defaults={
+                    "name": code,
+                    "status": ScannerCart.Status.AVAILABLE,
+                },
+            )
+            carts[code] = cart
+        return carts
 
     def create_stock_movements(self, branches, locations, products, inventory_items):
         movement_data = [
