@@ -9,6 +9,7 @@ import {
   LayoutDashboard,
   MapPin,
   PackageSearch,
+  ArchiveRestore,
   ScanLine,
   Route,
   Warehouse,
@@ -21,6 +22,7 @@ import { useStoredScannerSession } from "../api/scannerSession";
 const wmsNavItems = [
   { to: "/wms/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { to: "/wms/routes-monitor", label: "Routes Monitor", icon: Route },
+  { to: "/wms/routes/archive", label: "Routes Archive", icon: ArchiveRestore },
   { to: "/wms/orders", label: "Orders", icon: ClipboardList },
   { to: "/wms/inventory", label: "Inventory", icon: Boxes },
   { to: "/wms/products", label: "Products", icon: PackageSearch },
@@ -45,6 +47,7 @@ const pageTitles: Record<string, string> = {
   "/wms/orders": "Orders",
   "/wms/locations": "Locations",
   "/wms/routes-monitor": "Route Monitor",
+  "/wms/routes/archive": "Routes Archive",
   "/wms/events/current": "Current Events",
   "/wms/events/archive": "Archive Events",
   "/scanner": "Scanner",

@@ -1,4 +1,4 @@
-from datetime import time
+from datetime import datetime, time
 from decimal import Decimal
 
 from django.utils import timezone
@@ -18,6 +18,7 @@ from operations.models import (
     ScannerSession,
     StockMovement,
 )
+from operations.services import recalculate_route_readiness, route_close_result
 from warehouse.models import Branch, InventoryItem, Location, Product
 
 
@@ -310,6 +311,15 @@ class ScannerPickingScanActionTests(APITestCase):
             ).exists()
         )
 
+    def test_pick_rejects_closed_route(self):
+        self.route_run.status = RouteRun.Status.CLOSED
+        self.route_run.save(update_fields=["status", "updated_at"])
+
+        response = self.pick_to_cart()
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("not open", response.data["detail"])
+
     def prepare(self, route_run_id=None, code="SCAN-ORDER-001", product_code="SCAN-001", quantity="1"):
         return self.client.post(
             "/api/scanner/picking/prepare/",
@@ -378,6 +388,17 @@ class ScannerPickingScanActionTests(APITestCase):
                 message__icontains="Scanner picking prepared",
             ).exists()
         )
+
+    def test_prepare_rejects_closed_route(self):
+        self.pick_to_cart()
+        self.print_label()
+        self.route_run.status = RouteRun.Status.CLOSED
+        self.route_run.save(update_fields=["status", "updated_at"])
+
+        response = self.prepare()
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("closed", response.data["detail"])
 
     def test_prepare_invalid_session_returns_clear_error(self):
         response = self.client.post(
@@ -592,3 +613,215 @@ class ScannerLookupAndQuickTransferTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("Insufficient", response.data["detail"])
+
+
+class RouteRunLifecycleTests(APITestCase):
+    def setUp(self):
+        self.branch = Branch.objects.create(code="LFC", name="Lifecycle Branch", city="Gdynia", country="Poland")
+        self.location = Location.objects.create(
+            branch=self.branch,
+            code="R-01-01",
+            name="R-01-01",
+            location_type=Location.LocationType.PICKING,
+        )
+        self.product = Product.objects.create(
+            sku="LIFE-001",
+            name="Lifecycle Product",
+            barcode="660000000001",
+            unit_of_measure="pcs",
+        )
+        self.route = DeliveryRoute.objects.create(branch=self.branch, code="ROUTE-L", name="Lifecycle Route")
+        self.route_run = RouteRun.objects.create(
+            route=self.route,
+            service_date=timezone.localdate(),
+            run_number=1,
+            order_cutoff_time=time(8, 50),
+            sync_time=time(8, 51),
+            departure_time=(timezone.localtime() + timezone.timedelta(hours=2)).time(),
+            status=RouteRun.Status.OPEN,
+        )
+        self.order = Order.objects.create(
+            branch=self.branch,
+            route_run=self.route_run,
+            external_reference="LIFE-ORDER-001",
+            customer_name="Lifecycle Customer",
+            status=Order.Status.IMPORTED,
+        )
+        self.order_line = OrderLine.objects.create(
+            order=self.order,
+            product=self.product,
+            line_number=1,
+            quantity_ordered=Decimal("1"),
+            quantity_picked=Decimal("0"),
+        )
+        self.task = PickingTask.objects.create(
+            branch=self.branch,
+            order_line=self.order_line,
+            source_location=self.location,
+            status=PickingTask.Status.OPEN,
+            quantity_to_pick=Decimal("1"),
+            quantity_picked=Decimal("0"),
+            quantity_prepared=Decimal("0"),
+        )
+
+    def mark_prepared(self):
+        self.order_line.quantity_picked = Decimal("1")
+        self.order_line.save(update_fields=["quantity_picked", "updated_at"])
+        self.task.quantity_picked = Decimal("1")
+        self.task.quantity_prepared = Decimal("1")
+        self.task.status = PickingTask.Status.COMPLETED
+        self.task.save(update_fields=["quantity_picked", "quantity_prepared", "status", "updated_at"])
+        return recalculate_route_readiness(self.route_run)
+
+    def print_documents(self):
+        return self.client.post(f"/api/route-runs/{self.route_run.id}/print-documents/", {}, format="json")
+
+    def close_route(self):
+        return self.client.post(f"/api/route-runs/{self.route_run.id}/close/", {}, format="json")
+
+    def test_route_does_not_become_ready_while_work_is_incomplete(self):
+        is_ready = recalculate_route_readiness(self.route_run)
+
+        self.route_run.refresh_from_db()
+        self.assertFalse(is_ready)
+        self.assertEqual(self.route_run.status, RouteRun.Status.OPEN)
+        self.assertIsNone(self.route_run.ready_at)
+
+    def test_route_becomes_ready_when_final_required_work_is_prepared(self):
+        is_ready = self.mark_prepared()
+
+        self.route_run.refresh_from_db()
+        self.assertTrue(is_ready)
+        self.assertEqual(self.route_run.status, RouteRun.Status.READY_TO_CLOSE)
+        self.assertIsNotNone(self.route_run.ready_at)
+        self.assertTrue(AuditLog.objects.filter(message__icontains="ready to close").exists())
+
+    def test_ready_route_is_on_time_when_before_departure(self):
+        self.mark_prepared()
+
+        response = self.client.get(f"/api/route-runs/{self.route_run.id}/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["is_ready_to_close"])
+        self.assertFalse(response.data["is_late"])
+
+    def test_ready_route_is_late_after_departure(self):
+        self.route_run.departure_time = (timezone.localtime() - timezone.timedelta(hours=1)).time()
+        self.route_run.save(update_fields=["departure_time", "updated_at"])
+        self.mark_prepared()
+
+        response = self.client.get(f"/api/route-runs/{self.route_run.id}/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["is_late"])
+
+    def test_print_documents_rejects_unfinished_route(self):
+        response = self.print_documents()
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("not ready", response.data["detail"])
+
+    def test_print_documents_succeeds_for_ready_route(self):
+        self.mark_prepared()
+
+        response = self.print_documents()
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.route_run.refresh_from_db()
+        self.assertIsNotNone(self.route_run.documents_printed_at)
+        self.assertTrue(AuditLog.objects.filter(message__icontains="documents printed").exists())
+
+    def test_close_rejects_unfinished_route(self):
+        response = self.close_route()
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("not ready", response.data["detail"])
+
+    def test_close_rejects_route_without_printed_documents(self):
+        self.mark_prepared()
+
+        response = self.close_route()
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("printed", response.data["detail"])
+
+    def test_close_succeeds_after_documents_are_printed(self):
+        self.mark_prepared()
+        self.print_documents()
+
+        response = self.close_route()
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.route_run.refresh_from_db()
+        self.assertEqual(self.route_run.status, RouteRun.Status.CLOSED)
+        self.assertIsNotNone(self.route_run.closed_at)
+        self.assertTrue(AuditLog.objects.filter(message__icontains="closed").exists())
+
+    def test_closed_route_is_excluded_from_active_monitor(self):
+        self.mark_prepared()
+        self.print_documents()
+        self.close_route()
+
+        response = self.client.get("/api/route-runs/", {"branch": self.branch.id})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        ids = [item["id"] for item in response.data["results"]]
+        self.assertNotIn(self.route_run.id, ids)
+
+    def test_closed_route_appears_in_route_archive(self):
+        self.mark_prepared()
+        self.print_documents()
+        self.close_route()
+
+        response = self.client.get("/api/route-runs/archive/", {"branch": self.branch.id})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        ids = [item["id"] for item in response.data["results"]]
+        self.assertIn(self.route_run.id, ids)
+
+    def test_closed_route_before_departure_is_on_time(self):
+        departure_at = timezone.make_aware(
+            datetime.combine(self.route_run.service_date, time(12, 0)),
+            timezone.get_current_timezone(),
+        )
+        self.route_run.departure_time = departure_at.time()
+        self.route_run.status = RouteRun.Status.CLOSED
+        self.route_run.closed_at = departure_at - timezone.timedelta(minutes=5)
+        self.route_run.save(update_fields=["departure_time", "status", "closed_at", "updated_at"])
+
+        response = self.client.get(f"/api/route-runs/{self.route_run.id}/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data["is_late"])
+        self.assertEqual(response.data["close_result"], "on_time")
+        self.assertEqual(route_close_result(self.route_run), "on_time")
+
+    def test_closed_route_after_departure_is_late(self):
+        departure_at = timezone.make_aware(
+            datetime.combine(self.route_run.service_date, time(12, 0)),
+            timezone.get_current_timezone(),
+        )
+        self.route_run.departure_time = departure_at.time()
+        self.route_run.status = RouteRun.Status.CLOSED
+        self.route_run.closed_at = departure_at + timezone.timedelta(minutes=5)
+        self.route_run.save(update_fields=["departure_time", "status", "closed_at", "updated_at"])
+
+        response = self.client.get(f"/api/route-runs/{self.route_run.id}/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["is_late"])
+        self.assertEqual(response.data["close_result"], "late")
+        self.assertEqual(route_close_result(self.route_run), "late")
+
+    def test_legacy_closed_route_without_closed_at_has_unknown_result(self):
+        self.route_run.departure_time = time(12, 0)
+        self.route_run.status = RouteRun.Status.CLOSED
+        self.route_run.closed_at = None
+        self.route_run.save(update_fields=["departure_time", "status", "closed_at", "updated_at"])
+
+        response = self.client.get(f"/api/route-runs/{self.route_run.id}/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data["is_late"])
+        self.assertEqual(response.data["close_result"], "unknown")
+        self.assertEqual(route_close_result(self.route_run), "unknown")

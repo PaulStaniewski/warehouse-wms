@@ -31,6 +31,7 @@ from operations.serializers import (
     RouteRunSerializer,
     StockMovementSerializer,
 )
+from operations.services import is_route_late, is_route_work_fully_prepared, recalculate_route_readiness
 from warehouse.models import InventoryItem
 
 
@@ -81,6 +82,92 @@ class RouteRunViewSet(ReadOnlyModelViewSet):
     filterset_class = RouteRunFilter
     search_fields = ["route__code", "route__name", "route__branch__code"]
     ordering_fields = ["service_date", "departure_time", "run_number", "status", "created_at", "updated_at"]
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        if self.action == "list":
+            return queryset.exclude(status=RouteRun.Status.CLOSED)
+        return queryset
+
+    @action(detail=False, methods=["get"])
+    def archive(self, request):
+        queryset = self.filter_queryset(
+            self.get_queryset()
+            .filter(status=RouteRun.Status.CLOSED)
+            .order_by("-closed_at", "-updated_at")
+        )
+        date_from = parse_date(request.query_params.get("date_from", ""))
+        date_to = parse_date(request.query_params.get("date_to", ""))
+
+        if date_from is not None:
+            queryset = queryset.filter(closed_at__date__gte=date_from)
+        if date_to is not None:
+            queryset = queryset.filter(closed_at__date__lte=date_to)
+
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=["post"], url_path="print-documents")
+    def print_documents(self, request, pk=None):
+        route_run = self.get_object()
+        recalculate_route_readiness(route_run)
+        route_run.refresh_from_db()
+
+        if route_run.status == RouteRun.Status.CLOSED:
+            return Response({"detail": "Route run is already closed."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not is_route_work_fully_prepared(route_run):
+            return Response({"detail": "Route run is not ready to close."}, status=status.HTTP_400_BAD_REQUEST)
+
+        was_printed = route_run.documents_printed_at is not None
+        route_run.documents_printed_at = timezone.now()
+        route_run.save(update_fields=["documents_printed_at", "updated_at"])
+        AuditLog.objects.create(
+            action_type=AuditLog.ActionType.UPDATE,
+            entity_name="RouteRun",
+            entity_id=str(route_run.id),
+            message=(
+                f"Route documents {'reprinted' if was_printed else 'printed'} "
+                f"for route run {route_run.id}."
+            ),
+        )
+
+        serializer = self.get_serializer(route_run)
+        return Response({"message": "Route documents printed.", "route_run": serializer.data})
+
+    @action(detail=True, methods=["post"])
+    def close(self, request, pk=None):
+        route_run = self.get_object()
+        recalculate_route_readiness(route_run)
+        route_run.refresh_from_db()
+
+        if route_run.status == RouteRun.Status.CLOSED:
+            return Response({"detail": "Route run is already closed."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not is_route_work_fully_prepared(route_run):
+            return Response({"detail": "Route run is not ready to close."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if route_run.documents_printed_at is None:
+            return Response({"detail": "Route documents must be printed before closing."}, status=status.HTTP_400_BAD_REQUEST)
+
+        closed_late = is_route_late(route_run)
+        route_run.status = RouteRun.Status.CLOSED
+        route_run.closed_at = timezone.now()
+        route_run.save(update_fields=["status", "closed_at", "updated_at"])
+        AuditLog.objects.create(
+            action_type=AuditLog.ActionType.STATUS_CHANGE,
+            entity_name="RouteRun",
+            entity_id=str(route_run.id),
+            message=f"Route run {route_run.id} closed {'late' if closed_late else 'on time'}.",
+        )
+
+        serializer = self.get_serializer(route_run)
+        return Response({"message": "Route run closed.", "route_run": serializer.data})
 
 
 class OrderViewSet(ReadOnlyModelViewSet):
@@ -222,6 +309,7 @@ class PickingTaskViewSet(ReadOnlyModelViewSet):
             )
 
             task.refresh_from_db()
+            recalculate_route_readiness(task.order_line.order.route_run)
 
         serializer = self.get_serializer(task)
         return Response(

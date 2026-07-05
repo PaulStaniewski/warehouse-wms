@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, Clock3, RefreshCw } from "lucide-react";
 
-import { useBranches, useRouteRuns } from "../api/queries";
+import { useBranches, useCloseRouteRun, usePrintRouteDocuments, useRouteRuns } from "../api/queries";
 import { DataState } from "../components/DataState";
 import { PageHeader } from "../components/PageHeader";
 import type { Branch, RouteRun } from "../types/api";
@@ -24,7 +24,7 @@ function isClosed(run: RouteRun) {
 }
 
 function isDelayed(run: RouteRun, now: Date) {
-  if (isClosed(run) || !run.has_pending_work) {
+  if (isClosed(run) || run.is_ready_to_close || !run.has_pending_work) {
     return false;
   }
 
@@ -41,6 +41,10 @@ function needsAttention(run: RouteRun, now: Date) {
 }
 
 function getRowTone(run: RouteRun, now: Date) {
+  if (run.is_ready_to_close) {
+    return run.is_late || isDelayed(run, now) ? "delayed" : "complete";
+  }
+
   if (isDelayed(run, now)) {
     return "delayed";
   }
@@ -69,7 +73,17 @@ function ProgressCell({ run }: { run: RouteRun }) {
   );
 }
 
-function RouteList({ now, rows }: { now: Date; rows: RouteRun[] }) {
+function RouteList({
+  now,
+  onSelect,
+  rows,
+  selectedRouteRunId,
+}: {
+  now: Date;
+  onSelect: (run: RouteRun) => void;
+  rows: RouteRun[];
+  selectedRouteRunId?: number;
+}) {
   return (
     <div className="monitor-route-list">
       <div className="monitor-route-head">
@@ -87,7 +101,14 @@ function RouteList({ now, rows }: { now: Date; rows: RouteRun[] }) {
         const tone = getRowTone(run, now);
 
         return (
-          <article className={`monitor-route-row monitor-route-row--${tone}`} key={run.id}>
+          <button
+            className={`monitor-route-row monitor-route-row--${tone} ${
+              selectedRouteRunId === run.id ? "monitor-route-row--selected" : ""
+            }`}
+            key={run.id}
+            onClick={() => onSelect(run)}
+            type="button"
+          >
             <div className="monitor-route-name">
               <strong>{run.route_code}</strong>
               <span>{run.route_name}</span>
@@ -100,7 +121,7 @@ function RouteList({ now, rows }: { now: Date; rows: RouteRun[] }) {
             <div className="monitor-count">{run.completed_picking_tasks}</div>
             <ProgressCell run={run} />
             <div className="monitor-departure">{formatTime(run.departure_time)}</div>
-          </article>
+          </button>
         );
       })}
     </div>
@@ -110,10 +131,14 @@ function RouteList({ now, rows }: { now: Date; rows: RouteRun[] }) {
 export function RouteMonitorPage() {
   const branches = useBranches();
   const [selectedBranchId, setSelectedBranchId] = useState<number | undefined>();
+  const [selectedRouteRun, setSelectedRouteRun] = useState<RouteRun | null>(null);
+  const [actionMessage, setActionMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [now, setNow] = useState(() => new Date());
   const branchRows = useMemo(() => branches.data?.results ?? [], [branches.data?.results]);
   const selectedBranch = branchRows.find((branch) => branch.id === selectedBranchId);
   const routeRuns = useRouteRuns(selectedBranchId);
+  const printDocuments = usePrintRouteDocuments();
+  const closeRouteRun = useCloseRouteRun();
   const rows = routeRuns.data?.results ?? [];
   const delayedRows = rows.filter((run) => isDelayed(run, now));
   const attentionRows = rows.filter((run) => needsAttention(run, now));
@@ -144,6 +169,37 @@ export function RouteMonitorPage() {
 
   function refreshMonitor() {
     routeRuns.refetch();
+  }
+
+  async function handlePrintDocuments() {
+    if (!selectedRouteRun) {
+      return;
+    }
+
+    try {
+      const result = await printDocuments.mutateAsync({ routeRunId: selectedRouteRun.id });
+      setSelectedRouteRun(result.route_run);
+      setActionMessage({ type: "success", text: result.message });
+      await routeRuns.refetch();
+      window.open(`/wms/route-runs/${selectedRouteRun.id}/documents`, "_blank");
+    } catch (error) {
+      setActionMessage({ type: "error", text: "Could not print route documents." });
+    }
+  }
+
+  async function handleCloseRoute() {
+    if (!selectedRouteRun) {
+      return;
+    }
+
+    try {
+      const result = await closeRouteRun.mutateAsync({ routeRunId: selectedRouteRun.id });
+      setActionMessage({ type: "success", text: result.message });
+      setSelectedRouteRun(null);
+      await routeRuns.refetch();
+    } catch (error) {
+      setActionMessage({ type: "error", text: "Could not close route." });
+    }
   }
 
   return (
@@ -200,7 +256,12 @@ export function RouteMonitorPage() {
               {rows.length === 0 ? (
                 <div className="state-box">No route runs found.</div>
               ) : (
-                <RouteList now={now} rows={rows} />
+                <RouteList
+                  now={now}
+                  onSelect={setSelectedRouteRun}
+                  rows={rows}
+                  selectedRouteRunId={selectedRouteRun?.id}
+                />
               )}
             </section>
 
@@ -230,6 +291,41 @@ export function RouteMonitorPage() {
                       </li>
                     ))}
                   </ul>
+                )}
+              </section>
+
+              <section className="monitor-side-section">
+                <h2>Route actions</h2>
+                {actionMessage && <p className={`monitor-action-message monitor-action-message--${actionMessage.type}`}>{actionMessage.text}</p>}
+                {!selectedRouteRun ? (
+                  <p>Select a ready route.</p>
+                ) : (
+                  <>
+                    <p>
+                      {selectedRouteRun.route_code} / run {selectedRouteRun.run_number}
+                    </p>
+                    <p>{selectedRouteRun.is_ready_to_close ? "Ready to close" : "Route is not ready yet."}</p>
+                    <div className="monitor-action-buttons">
+                      <button
+                        disabled={!selectedRouteRun.is_ready_to_close || printDocuments.isPending}
+                        onClick={handlePrintDocuments}
+                        type="button"
+                      >
+                        Drukuj dokumenty trasy
+                      </button>
+                      <button
+                        disabled={
+                          !selectedRouteRun.is_ready_to_close ||
+                          !selectedRouteRun.documents_printed_at ||
+                          closeRouteRun.isPending
+                        }
+                        onClick={handleCloseRoute}
+                        type="button"
+                      >
+                        Zamknij trasę
+                      </button>
+                    </div>
+                  </>
                 )}
               </section>
 

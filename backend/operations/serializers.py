@@ -13,6 +13,7 @@ from operations.models import (
     RouteRun,
     StockMovement,
 )
+from operations.services import is_route_late, is_route_work_fully_prepared, route_close_result
 
 
 class DeliveryRouteSerializer(serializers.ModelSerializer):
@@ -51,6 +52,9 @@ class RouteRunSerializer(serializers.ModelSerializer):
     completed_picking_tasks = serializers.SerializerMethodField()
     progress_percent = serializers.SerializerMethodField()
     last_activity_at = serializers.SerializerMethodField()
+    is_ready_to_close = serializers.SerializerMethodField()
+    is_late = serializers.SerializerMethodField()
+    close_result = serializers.SerializerMethodField()
 
     def _get_picking_tasks(self, obj: RouteRun):
         cache_name = "_monitor_picking_tasks"
@@ -105,6 +109,17 @@ class RouteRunSerializer(serializers.ModelSerializer):
 
         return audit_log.created_at.isoformat()
 
+    def get_is_ready_to_close(self, obj: RouteRun) -> bool:
+        return obj.status == RouteRun.Status.READY_TO_CLOSE or is_route_work_fully_prepared(obj)
+
+    def get_is_late(self, obj: RouteRun) -> bool:
+        if obj.status == RouteRun.Status.CLOSED:
+            return obj.closed_at is not None and is_route_late(obj, obj.closed_at)
+        return is_route_late(obj)
+
+    def get_close_result(self, obj: RouteRun) -> str:
+        return route_close_result(obj)
+
     class Meta:
         model = RouteRun
         fields = [
@@ -134,6 +149,12 @@ class RouteRunSerializer(serializers.ModelSerializer):
             "completed_picking_tasks",
             "progress_percent",
             "last_activity_at",
+            "is_ready_to_close",
+            "is_late",
+            "close_result",
+            "ready_at",
+            "documents_printed_at",
+            "closed_at",
             "created_at",
             "updated_at",
         ]

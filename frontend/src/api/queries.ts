@@ -97,6 +97,35 @@ export function useRouteRun(routeRunId?: string) {
   });
 }
 
+export function useRouteRunArchive() {
+  return useQuery({
+    queryKey: ["route-runs", "archive"],
+    queryFn: () => getList<RouteRun>("/route-runs/archive/"),
+  });
+}
+
+export function usePrintRouteDocuments() {
+  return useMutation({
+    mutationFn: async ({ routeRunId }: { routeRunId: number }) => {
+      const response = await apiClient.post<{ message: string; route_run: RouteRun }>(
+        `/route-runs/${routeRunId}/print-documents/`,
+      );
+      return response.data;
+    },
+  });
+}
+
+export function useCloseRouteRun() {
+  return useMutation({
+    mutationFn: async ({ routeRunId }: { routeRunId: number }) => {
+      const response = await apiClient.post<{ message: string; route_run: RouteRun }>(
+        `/route-runs/${routeRunId}/close/`,
+      );
+      return response.data;
+    },
+  });
+}
+
 export function useOrderLines(routeRunId?: string) {
   return useQuery({
     enabled: Boolean(routeRunId),

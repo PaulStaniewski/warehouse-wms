@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from django.core.management.base import BaseCommand
@@ -7,6 +7,7 @@ from django.utils import timezone
 
 from operations.models import (
     AuditLog,
+    CartPickedItem,
     DeliveryRoute,
     Order,
     OrderLine,
@@ -15,6 +16,8 @@ from operations.models import (
     ReturnLine,
     RouteRun,
     ScannerCart,
+    ScannerCustomerLabel,
+    ScannerSession,
     StockMovement,
 )
 from warehouse.models import Branch, InventoryItem, Location, Product
@@ -171,6 +174,9 @@ class Command(BaseCommand):
         def as_time(delta: timedelta):
             return (now + delta).time().replace(microsecond=0)
 
+        def as_datetime(value):
+            return timezone.make_aware(datetime.combine(today, value), timezone.get_current_timezone())
+
         run_data = [
             (
                 "GDY",
@@ -231,6 +237,15 @@ class Command(BaseCommand):
         route_runs = {}
         for branch_code, route_code, run_number, cutoff_time, sync_time, departure_time, status in run_data:
             route = delivery_routes[(branch_code, route_code)]
+            departure_at = as_datetime(departure_time)
+            ready_at = None
+            documents_printed_at = None
+            closed_at = None
+            if status == RouteRun.Status.CLOSED:
+                ready_at = departure_at - timedelta(minutes=25)
+                documents_printed_at = departure_at - timedelta(minutes=15)
+                closed_at = departure_at - timedelta(minutes=5)
+
             route_run, _ = RouteRun.objects.update_or_create(
                 route=route,
                 service_date=today,
@@ -240,6 +255,9 @@ class Command(BaseCommand):
                     "sync_time": sync_time,
                     "departure_time": departure_time,
                     "status": status,
+                    "ready_at": ready_at,
+                    "documents_printed_at": documents_printed_at,
+                    "closed_at": closed_at,
                 },
             )
             route_runs[(branch_code, route_code, run_number)] = route_run
@@ -354,6 +372,11 @@ class Command(BaseCommand):
                 },
             )
             carts[code] = cart
+        sessions = ScannerSession.objects.filter(cart__code__in=carts.keys())
+        ScannerCustomerLabel.objects.filter(session__in=sessions).delete()
+        CartPickedItem.objects.filter(session__in=sessions).delete()
+        sessions.update(status=ScannerSession.Status.CLOSED, ended_at=timezone.now())
+        ScannerCart.objects.filter(code__in=carts.keys()).update(status=ScannerCart.Status.AVAILABLE)
         return carts
 
     def create_stock_movements(self, branches, locations, products, inventory_items):

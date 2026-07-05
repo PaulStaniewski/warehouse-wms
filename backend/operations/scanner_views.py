@@ -20,6 +20,7 @@ from operations.models import (
     StockMovement,
 )
 from operations.serializers import PickingTaskSerializer, RouteRunSerializer
+from operations.services import TERMINAL_ROUTE_STATUSES, recalculate_route_readiness
 from warehouse.models import InventoryItem, Location, Product
 
 
@@ -124,6 +125,8 @@ def _pick_from_shelf(request, allow_legacy_without_session=False):
     route_run, error = _get_route_run_or_response(request.data.get("route_run_id"))
     if error is not None:
         return error
+    if route_run.status in TERMINAL_ROUTE_STATUSES or route_run.status == RouteRun.Status.READY_TO_CLOSE:
+        return Response({"detail": "Route run is not open for picking."}, status=status.HTTP_400_BAD_REQUEST)
 
     session, error = _get_active_session_or_response(request.data.get("session_id"))
     if error is not None and not allow_legacy_without_session:
@@ -306,6 +309,8 @@ def _prepare_for_order(request):
                 {"detail": "Product is not available on the active cart for this order."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        if cart_item.route_run.status in TERMINAL_ROUTE_STATUSES:
+            return Response({"detail": "Route run is closed and cannot be controlled."}, status=status.HTTP_400_BAD_REQUEST)
 
         available_to_prepare = cart_item.quantity_picked - cart_item.quantity_prepared
         if quantity > available_to_prepare:
@@ -342,6 +347,7 @@ def _prepare_for_order(request):
             ),
         )
 
+    recalculate_route_readiness(cart_item.route_run)
     cart_item.route_run.refresh_from_db()
     return Response(
         {

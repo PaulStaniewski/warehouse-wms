@@ -55,6 +55,9 @@ class RouteRun(TimestampedModel):
     sync_time = models.TimeField()
     departure_time = models.TimeField()
     status = models.CharField(max_length=32, choices=Status.choices, default=Status.OPEN)
+    ready_at = models.DateTimeField(blank=True, null=True)
+    documents_printed_at = models.DateTimeField(blank=True, null=True)
+    closed_at = models.DateTimeField(blank=True, null=True)
 
     class Meta:
         ordering = ["service_date", "route__code", "run_number"]
@@ -68,6 +71,7 @@ class RouteRun(TimestampedModel):
             models.Index(fields=["route", "service_date"]),
             models.Index(fields=["status"]),
             models.Index(fields=["service_date", "departure_time"]),
+            models.Index(fields=["closed_at"]),
         ]
 
     def __str__(self) -> str:

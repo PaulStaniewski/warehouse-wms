@@ -88,6 +88,12 @@ export type RouteRun = {
   completed_picking_tasks: number;
   progress_percent: number;
   last_activity_at: string | null;
+  is_ready_to_close: boolean;
+  is_late: boolean;
+  close_result: "on_time" | "late" | "unknown";
+  ready_at: string | null;
+  documents_printed_at: string | null;
+  closed_at: string | null;
 };
 
 export type OrderLine = {

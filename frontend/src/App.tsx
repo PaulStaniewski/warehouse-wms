@@ -10,6 +10,8 @@ import { LocationsPage } from "./pages/LocationsPage";
 import { OrdersPage } from "./pages/OrdersPage";
 import { ProductsPage } from "./pages/ProductsPage";
 import { RouteMonitorPage } from "./pages/RouteMonitorPage";
+import { RouteArchivePage } from "./pages/RouteArchivePage";
+import { RouteDocumentsPage } from "./pages/RouteDocumentsPage";
 import { ScannerControlPage } from "./pages/ScannerControlPage";
 import { ScannerHomePage } from "./pages/ScannerHomePage";
 import { ScannerLocationLookupPage } from "./pages/ScannerLocationLookupPage";
@@ -29,6 +31,8 @@ function App() {
         <Route path="wms/orders" element={<OrdersPage />} />
         <Route path="wms/locations" element={<LocationsPage />} />
         <Route path="wms/routes-monitor" element={<RouteMonitorPage />} />
+        <Route path="wms/routes/archive" element={<RouteArchivePage />} />
+        <Route path="wms/route-runs/:id/documents" element={<RouteDocumentsPage />} />
         <Route path="wms/events/current" element={<CurrentEventsPage />} />
         <Route path="wms/events/archive" element={<ArchiveEventsPage />} />
         <Route path="scanner" element={<ScannerHomePage />} />
