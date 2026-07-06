@@ -120,6 +120,7 @@ def _get_active_session_or_response(session_id):
 def _cart_item_data(item: CartPickedItem):
     order = item.picking_task.order_line.order
     remaining = item.quantity_picked - item.quantity_prepared
+    label_ready = ScannerCustomerLabel.objects.filter(session=item.session, order=order).exists()
     return {
         "id": item.id,
         "session": item.session_id,
@@ -137,6 +138,7 @@ def _cart_item_data(item: CartPickedItem):
         "quantity_picked": str(item.quantity_picked),
         "quantity_prepared": str(item.quantity_prepared),
         "remaining_quantity": str(remaining),
+        "customer_label_ready": label_ready,
     }
 
 
@@ -447,7 +449,7 @@ def _pick_from_shelf(request, allow_legacy_without_session=False):
     if not code:
         return Response({"detail": "Scan code is required."}, status=status.HTTP_400_BAD_REQUEST)
 
-    quantity, error = _parse_positive_quantity(request.data.get("quantity", 1))
+    quantity, error = _parse_positive_piece_quantity(request.data.get("quantity", 1))
     if error is not None:
         return error
 
@@ -581,7 +583,7 @@ def _prepare_for_order(request):
     if not product_code:
         return Response({"detail": "product_code is required."}, status=status.HTTP_400_BAD_REQUEST)
 
-    quantity, error = _parse_positive_quantity(request.data.get("quantity", 1))
+    quantity, error = _parse_positive_piece_quantity(request.data.get("quantity", 1))
     if error is not None:
         return error
 
@@ -950,7 +952,7 @@ class ScannerTaskStartView(APIView):
                 cart=cart,
                 status__in=[CartWorkSession.Status.ACTIVE, CartWorkSession.Status.CONTROL],
             ).exists():
-                return Response({"detail": "Cart already has active work. Join the cart instead."}, status=status.HTTP_409_CONFLICT)
+                return Response({"detail": "Cart already has active work."}, status=status.HTTP_409_CONFLICT)
 
             if CartWorkSession.objects.filter(
                 picking_job=picking_job,
@@ -1031,7 +1033,7 @@ class ScannerControlCartItemsView(APIView):
                 "route_run__route",
                 "picking_task__order_line__order",
             )
-            .filter(session=session, quantity_picked__gt=F("quantity_prepared"))
+            .filter(session=session, quantity_picked__gt=0)
             .order_by("created_at", "id")
         )
         return Response({"session": _session_data(session), "items": [_cart_item_data(item) for item in items]})
@@ -1058,7 +1060,7 @@ class ScannerControlCartView(APIView):
                 "route_run__route",
                 "picking_task__order_line__order",
             )
-            .filter(cart_work_session=cart_work_session, quantity_picked__gt=F("quantity_prepared"))
+            .filter(cart_work_session=cart_work_session, quantity_picked__gt=0)
             .order_by("created_at", "id")
         )
         return Response(

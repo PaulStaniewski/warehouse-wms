@@ -196,6 +196,7 @@ export type ScannerCartItem = {
   quantity_picked: string;
   quantity_prepared: string;
   remaining_quantity: string;
+  customer_label_ready: boolean;
 };
 
 export type ScannerCartItemsResponse = {

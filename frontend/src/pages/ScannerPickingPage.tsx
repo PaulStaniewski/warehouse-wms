@@ -1,12 +1,13 @@
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import axios from "axios";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, Camera } from "lucide-react";
 import { Link } from "react-router-dom";
 
 import { useScannerCartWork, useScannerConfirmLocation, useScannerPickingPick } from "../api/queries";
 import { useStoredScannerSession } from "../api/scannerSession";
 import { DataState } from "../components/DataState";
+import { CameraBarcodeScanner } from "../components/scanner/CameraBarcodeScanner";
 
 
 function getErrorMessage(error: unknown, fallback: string) {
@@ -40,7 +41,10 @@ export function ScannerPickingPage() {
   const [locationCode, setLocationCode] = useState("");
   const [productCode, setProductCode] = useState("");
   const [pickQuantity, setPickQuantity] = useState("1");
+  const [cameraMode, setCameraMode] = useState<"location" | "product" | null>(null);
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const locationInputRef = useRef<HTMLInputElement | null>(null);
+  const productInputRef = useRef<HTMLInputElement | null>(null);
   const tasks = cartWork.data?.tasks ?? [];
   const work = cartWork.data?.cart_work_session;
   const instruction = cartWork.data?.current_instruction ?? null;
@@ -50,7 +54,7 @@ export function ScannerPickingPage() {
   const totalPrepared = tasks.reduce((sum, task) => sum + toNumber(task.quantity_prepared), 0);
   const totalRemaining = tasks.reduce((sum, task) => sum + toNumber(task.remaining_quantity), 0);
 
-  async function refreshPickingData() {
+  const refreshPickingData = useCallback(async () => {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ["scanner-cart-work"] }),
       queryClient.invalidateQueries({ queryKey: ["scanner-control-cart-items", activeSession?.id] }),
@@ -58,27 +62,26 @@ export function ScannerPickingPage() {
       queryClient.invalidateQueries({ queryKey: ["route-runs"] }),
       queryClient.invalidateQueries({ queryKey: ["audit-logs", "current"] }),
     ]);
-  }
+  }, [activeSession?.id, queryClient]);
 
-  async function handleConfirmLocation(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  const submitLocation = useCallback(async (code: string) => {
     if (!work || !instruction) {
       return;
     }
 
     setMessage(null);
     try {
-      const result = await confirmLocation.mutateAsync({ cartWorkSessionId: work.id, locationCode });
+      const result = await confirmLocation.mutateAsync({ cartWorkSessionId: work.id, locationCode: code });
       setMessage({ type: "success", text: result.message || "Location confirmed." });
       setLocationCode("");
       await refreshPickingData();
     } catch (error) {
       setMessage({ type: "error", text: getErrorMessage(error, "Could not confirm the location.") });
+      locationInputRef.current?.focus();
     }
-  }
+  }, [confirmLocation, instruction, refreshPickingData, work]);
 
-  async function handlePick(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  const submitProduct = useCallback(async (code: string) => {
     if (!work || !instruction || pickingState !== "waiting_for_product") {
       setMessage({ type: "error", text: "Scan the expected location before scanning the product." });
       return;
@@ -88,7 +91,7 @@ export function ScannerPickingPage() {
     try {
       const result = await scannerPick.mutateAsync({
         cartWorkSessionId: work.id,
-        code: productCode,
+        code,
         quantity: pickQuantity,
         workerCode,
       });
@@ -98,7 +101,47 @@ export function ScannerPickingPage() {
       await refreshPickingData();
     } catch (error) {
       setMessage({ type: "error", text: getErrorMessage(error, "Could not pick the product.") });
+      productInputRef.current?.focus();
     }
+  }, [instruction, pickQuantity, pickingState, refreshPickingData, scannerPick, work, workerCode]);
+
+  function handleConfirmLocation(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    void submitLocation(locationCode);
+  }
+
+  function handlePick(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    void submitProduct(productCode);
+  }
+
+  const handleCameraDetected = useCallback(async (code: string) => {
+    const mode = cameraMode;
+    setCameraMode(null);
+
+    if (mode === "location") {
+      setLocationCode(code);
+      await submitLocation(code);
+      return;
+    }
+
+    if (mode === "product") {
+      setProductCode(code);
+      await submitProduct(code);
+    }
+  }, [cameraMode, submitLocation, submitProduct]);
+
+  function handleCameraClose() {
+    const mode = cameraMode;
+    setCameraMode(null);
+    window.setTimeout(() => {
+      if (mode === "location") {
+        locationInputRef.current?.focus();
+      }
+      if (mode === "product") {
+        productInputRef.current?.focus();
+      }
+    }, 0);
   }
 
   useEffect(() => {
@@ -118,6 +161,12 @@ export function ScannerPickingPage() {
       </div>
 
       {message && <div className={`scanner-message scanner-message--${message.type}`}>{message.text}</div>}
+
+      <CameraBarcodeScanner
+        isOpen={cameraMode !== null}
+        onClose={handleCameraClose}
+        onDetected={handleCameraDetected}
+      />
 
       {!activeSession && (
         <section className="scanner-workflow-panel">
@@ -218,6 +267,7 @@ export function ScannerPickingPage() {
                       id="pick-product-code"
                       onChange={(event) => setProductCode(event.target.value)}
                       placeholder="Barcode, SKU, or product code"
+                      ref={productInputRef}
                       value={productCode}
                     />
                   </label>
@@ -235,6 +285,10 @@ export function ScannerPickingPage() {
                   </label>
                   <button className="sr-only" disabled={scannerPick.isPending || !productCode.trim() || !pickQuantity.trim()} type="submit">
                     Submit product scan
+                  </button>
+                  <button className="scanner-camera-button" disabled={scannerPick.isPending} onClick={() => setCameraMode("product")} type="button">
+                    <Camera size={19} />
+                    Scan with camera
                   </button>
                 </form>
               </section>
@@ -271,11 +325,16 @@ export function ScannerPickingPage() {
                     id="pick-location-code"
                     onChange={(event) => setLocationCode(event.target.value)}
                     placeholder="Location barcode"
+                    ref={locationInputRef}
                     value={locationCode}
                   />
                 </label>
                 <button className="sr-only" disabled={confirmLocation.isPending || !locationCode.trim()} type="submit">
                   Submit location scan
+                </button>
+                <button className="scanner-camera-button" disabled={confirmLocation.isPending} onClick={() => setCameraMode("location")} type="button">
+                  <Camera size={19} />
+                  Scan with camera
                 </button>
               </form>
             )}

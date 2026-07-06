@@ -443,6 +443,15 @@ class ScannerPickingScanActionTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("picked quantity", response.data["detail"])
 
+    def test_prepare_rejects_decimal_quantity(self):
+        self.pick_to_cart()
+        self.print_label()
+
+        response = self.prepare(quantity="1.000")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("whole number", response.data["detail"])
+
     def print_label(self, order_reference="SCAN-ORDER-001", printer_code="ZEBRA-01"):
         return self.client.post(
             "/api/scanner/control/print-label/",
@@ -476,6 +485,19 @@ class ScannerPickingScanActionTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["items"][0]["product_sku"], "SCAN-001")
+        self.assertEqual(response.data["items"][0]["customer_label_ready"], False)
+
+    def test_control_cart_items_keeps_completed_lines_visible(self):
+        self.pick_to_cart()
+        self.print_label()
+        self.prepare()
+
+        response = self.client.get("/api/scanner/control/cart-items/", {"session_id": self.session.id})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data["items"]), 1)
+        self.assertEqual(response.data["items"][0]["remaining_quantity"], "0.000")
+        self.assertEqual(response.data["items"][0]["customer_label_ready"], True)
 
     def test_control_target_returns_candidates_for_scanned_product(self):
         self.client.post(
@@ -498,6 +520,15 @@ class ScannerPickingScanActionTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(ScannerCustomerLabel.objects.filter(session=self.session, order=self.order).exists())
         self.assertTrue(AuditLog.objects.filter(message__icontains="Customer label printed").exists())
+
+    def test_print_label_reuses_existing_customer_label(self):
+        first = self.print_label()
+        second = self.print_label(printer_code="ZEBRA-02")
+
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(first.data["label"]["id"], second.data["label"]["id"])
+        self.assertEqual(ScannerCustomerLabel.objects.filter(session=self.session, order=self.order).count(), 1)
 
     def test_finish_control_rejects_unprepared_items(self):
         self.client.post(
@@ -805,6 +836,35 @@ class ScannerPickingJobWorkflowTests(APITestCase):
         job.refresh_from_db()
         self.assertEqual(job.status, PickingJob.Status.IN_PROGRESS)
         self.assertTrue(CartWorkSession.objects.filter(picking_job=job, cart__code="WOZEK-01").exists())
+        self.assertEqual(response.data["session"]["cart_work_session"], response.data["cart_work_session"]["id"])
+        self.assertEqual(response.data["session"]["picking_job"], job.id)
+
+    def test_started_job_remains_visible_in_tasks_with_assigned_cart(self):
+        self.create_jobs(route_run_ids=[self.run_1.id])
+        job = PickingJob.objects.get()
+        self.start_job(job, cart_code="WOZEK-01")
+
+        response = self.client.get("/api/scanner/tasks/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        row = next(item for item in response.data["results"] if item["id"] == job.id)
+        self.assertEqual(row["status"], PickingJob.Status.IN_PROGRESS)
+        self.assertEqual(row["assigned_cart_code"], "WOZEK-01")
+
+    def test_active_cart_work_can_be_recovered_without_creating_second_session(self):
+        self.create_jobs(route_run_ids=[self.run_1.id])
+        job = PickingJob.objects.get()
+        start = self.start_job(job, cart_code="WOZEK-01")
+
+        response = self.client.get(
+            "/api/scanner/cart-work/current/",
+            {"cart_work_session_id": start.data["cart_work_session"]["id"]},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["cart_work_session"]["picking_job"]["id"], job.id)
+        self.assertEqual(response.data["cart_work_session"]["cart_code"], "WOZEK-01")
+        self.assertEqual(CartWorkSession.objects.filter(picking_job=job).count(), 1)
 
     def test_cart_work_returns_current_location_instruction(self):
         self.create_jobs(route_run_ids=[self.run_1.id])
@@ -1035,6 +1095,7 @@ class ScannerPickingJobWorkflowTests(APITestCase):
         response = self.start_job(job, cart_code="WOZEK-02")
 
         self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(CartWorkSession.objects.filter(picking_job=job).count(), 1)
 
     def test_same_cart_cannot_start_two_active_jobs(self):
         self.create_jobs(mode="separate")
@@ -1044,6 +1105,8 @@ class ScannerPickingJobWorkflowTests(APITestCase):
         response = self.start_job(jobs[1], cart_code="WOZEK-01")
 
         self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertNotIn("Join", response.data["detail"])
+        self.assertEqual(CartWorkSession.objects.filter(cart__code="WOZEK-01").count(), 1)
 
     def test_control_worker_can_open_cart_picked_by_another_worker(self):
         self.create_jobs(route_run_ids=[self.run_1.id])
