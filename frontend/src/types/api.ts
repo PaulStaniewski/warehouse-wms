@@ -155,7 +155,10 @@ export type AuditLog = {
 export type ScannerPickingScanResponse = {
   message: string;
   task: PickingTask;
-  route_run: RouteRun;
+  route_run?: RouteRun;
+  state?: "waiting_for_location" | "waiting_for_product" | "completed";
+  confirmed_location_code?: string | null;
+  current_instruction?: PickInstruction | null;
   cart_item?: ScannerCartItem;
 };
 
@@ -164,6 +167,8 @@ export type ScannerSession = {
   cart: number;
   cart_code: string;
   cart_name: string;
+  cart_work_session: number | null;
+  picking_job: number | null;
   worker_code: string;
   status: string;
   started_at: string;
@@ -258,4 +263,115 @@ export type ScannerQuickTransferResponse = {
   movement_id: number;
   source_inventory: ScannerInventoryPosition;
   target_inventory: ScannerInventoryPosition;
+};
+
+export type ScannerProforma = {
+  id: number;
+  route_code: string;
+  route_name: string;
+  branch: number;
+  branch_code: string;
+  run_number: number;
+  status: string;
+  departure_time: string;
+  akt: number;
+  lines: number;
+  started: number;
+  picked: number;
+  prepared: number;
+  is_selectable: boolean;
+};
+
+export type PickingJobRoute = {
+  id: number;
+  route_code: string;
+  route_name: string;
+  branch_code: string;
+  run_number: number;
+  departure_time: string;
+};
+
+export type PickingJob = {
+  id: number;
+  status: string;
+  mode: string;
+  routes: PickingJobRoute[];
+  total_lines: number;
+  remaining_lines: number;
+  total_quantity: string;
+  picked_quantity: string;
+  prepared_quantity: string;
+  progress_percent: number;
+  assigned_cart_code: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+};
+
+export type CartWorkSession = {
+  id: number;
+  cart: number;
+  cart_code: string;
+  confirmed_location: number | null;
+  confirmed_location_code: string | null;
+  picking_job: PickingJob;
+  scanner_session: ScannerSession | null;
+  status: string;
+  started_at: string;
+  finished_at: string | null;
+};
+
+export type PickInstruction = {
+  picking_task_id: number;
+  route_run_id: number;
+  location: {
+    id: number;
+    code: string;
+    name: string;
+  };
+  product: {
+    id: number;
+    sku: string;
+    barcode: string | null;
+    name: string;
+  };
+  required_quantity: string;
+  picked_quantity: string;
+  remaining_quantity: string;
+};
+
+export type ScannerProformasResponse = {
+  results: ScannerProforma[];
+};
+
+export type ScannerJobsResponse = {
+  results: PickingJob[];
+};
+
+export type ScannerCreateJobsResponse = {
+  message: string;
+  jobs: PickingJob[];
+};
+
+export type ScannerTaskStartResponse = {
+  message: string;
+  job: PickingJob;
+  cart_work_session: CartWorkSession;
+  session: ScannerSession;
+};
+
+export type ScannerCartWorkResponse = {
+  message?: string;
+  state?: "waiting_for_location" | "waiting_for_product" | "completed";
+  confirmed_location_code?: string | null;
+  cart_work_session: CartWorkSession;
+  current_instruction?: PickInstruction | null;
+  session?: ScannerSession;
+  tasks?: PickingTask[];
+};
+
+export type ScannerControlCartResponse = {
+  session: ScannerSession;
+  cart_work_session: CartWorkSession;
+  items: ScannerCartItem[];
 };

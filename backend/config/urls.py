@@ -5,19 +5,26 @@ from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 from config.api import router
 from config.views import health_check
 from operations.scanner_views import (
+    ScannerCartWorkCurrentView,
+    ScannerControlCartView,
     ScannerControlCartItemsView,
     ScannerControlFinishView,
     ScannerControlPrintLabelView,
     ScannerControlTargetView,
     ScannerLocationContentsView,
     ScannerPickingPickView,
+    ScannerPickingConfirmLocationView,
     ScannerPickingPrepareView,
     ScannerPickingScanView,
+    ScannerProformasCreateJobsView,
+    ScannerProformasView,
     ScannerProductLookupView,
     ScannerQuickTransferView,
     ScannerSessionCurrentView,
     ScannerSessionEndView,
     ScannerSessionStartView,
+    ScannerTaskStartView,
+    ScannerTasksView,
 )
 
 
@@ -28,7 +35,14 @@ urlpatterns = [
     path("api/scanner/session/start/", ScannerSessionStartView.as_view(), name="scanner-session-start"),
     path("api/scanner/session/current/", ScannerSessionCurrentView.as_view(), name="scanner-session-current"),
     path("api/scanner/session/end/", ScannerSessionEndView.as_view(), name="scanner-session-end"),
+    path("api/scanner/proformas/", ScannerProformasView.as_view(), name="scanner-proformas"),
+    path("api/scanner/proformas/create-jobs/", ScannerProformasCreateJobsView.as_view(), name="scanner-proformas-create-jobs"),
+    path("api/scanner/tasks/", ScannerTasksView.as_view(), name="scanner-tasks"),
+    path("api/scanner/tasks/<int:job_id>/start/", ScannerTaskStartView.as_view(), name="scanner-task-start"),
+    path("api/scanner/cart-work/current/", ScannerCartWorkCurrentView.as_view(), name="scanner-cart-work-current"),
+    path("api/scanner/control/cart/", ScannerControlCartView.as_view(), name="scanner-control-cart"),
     path("api/scanner/picking/scan/", ScannerPickingScanView.as_view(), name="scanner-picking-scan"),
+    path("api/scanner/picking/confirm-location/", ScannerPickingConfirmLocationView.as_view(), name="scanner-picking-confirm-location"),
     path("api/scanner/picking/pick/", ScannerPickingPickView.as_view(), name="scanner-picking-pick"),
     path("api/scanner/picking/prepare/", ScannerPickingPrepareView.as_view(), name="scanner-picking-prepare"),
     path("api/scanner/control/cart-items/", ScannerControlCartItemsView.as_view(), name="scanner-control-cart-items"),

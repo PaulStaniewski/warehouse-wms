@@ -27,6 +27,15 @@ a {
   text-decoration: none;
 }
 
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
 .app-shell {
   display: grid;
   grid-template-columns: 260px minmax(0, 1fr);
@@ -772,6 +781,12 @@ a {
   font-weight: 900;
 }
 
+.scanner-scan-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(140px, 180px);
+  gap: 12px;
+}
+
 .scanner-workflow-panel input {
   min-height: 52px;
   border: 1px solid #c8d3d9;
@@ -1094,6 +1109,123 @@ a {
   margin-top: 16px;
 }
 
+.scanner-cart-panel--compact {
+  grid-template-columns: 1fr;
+}
+
+.scanner-action-strip {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) 160px 160px;
+  gap: 12px;
+  align-items: end;
+  margin-bottom: 18px;
+}
+
+.scanner-action-strip label {
+  display: grid;
+  gap: 6px;
+}
+
+.scanner-action-strip span {
+  color: #153f4b;
+  font-size: 0.75rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.scanner-action-strip input,
+.scanner-action-strip button {
+  min-height: 48px;
+  border-radius: 8px;
+  font-weight: 900;
+}
+
+.scanner-action-strip input {
+  border: 1px solid #c8d3d9;
+  padding: 0 12px;
+}
+
+.scanner-action-strip button {
+  border: 0;
+  background: #153f4b;
+  color: #ffffff;
+  cursor: pointer;
+}
+
+.scanner-action-strip button:disabled {
+  background: #c8d3d9;
+  color: #526570;
+  cursor: not-allowed;
+}
+
+.scanner-table-panel {
+  overflow: auto;
+  border: 1px solid #dce3e8;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.scanner-table-panel table {
+  width: 100%;
+  min-width: 760px;
+  border-collapse: collapse;
+}
+
+.scanner-table-panel th,
+.scanner-table-panel td {
+  border-bottom: 1px solid #eef2f4;
+  padding: 12px;
+  text-align: left;
+}
+
+.scanner-table-panel th {
+  background: #f7fbfc;
+  color: #526570;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+}
+
+.scanner-muted-row {
+  color: #8a9aa3;
+}
+
+.scanner-job-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.scanner-job-card {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) 160px 120px;
+  gap: 16px;
+  align-items: center;
+  border: 2px solid #dce3e8;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 16px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.scanner-job-card--selected {
+  border-color: #1d4f5d;
+  background: #f7fbfc;
+}
+
+.scanner-job-card span,
+.scanner-job-card small {
+  display: block;
+  color: #647782;
+  font-weight: 800;
+}
+
+.scanner-job-card strong {
+  display: block;
+  margin: 4px 0;
+  color: #172026;
+  font-size: 1.25rem;
+}
+
 .scanner-tool-panel {
   display: grid;
   grid-template-columns: minmax(220px, 0.6fr) minmax(260px, 1fr);
@@ -1133,6 +1265,40 @@ a {
   margin-top: 8px;
   color: #172026;
   font-size: 1.1rem;
+}
+
+.scanner-instruction-card {
+  border: 2px solid #1d4f5d;
+  border-radius: 8px;
+  background: #f7fbfc;
+  padding: 18px;
+}
+
+.scanner-instruction-card span {
+  color: #526570;
+  font-size: 0.75rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.scanner-instruction-card strong {
+  display: block;
+  margin-top: 6px;
+  color: #172026;
+  font-size: 2.4rem;
+  line-height: 1;
+}
+
+.scanner-instruction-card small {
+  display: block;
+  margin-top: 8px;
+  color: #647782;
+  font-weight: 800;
+}
+
+.scanner-instruction-card--primary {
+  border-color: #f1a208;
+  background: #fff8e6;
 }
 
 .scanner-list {
@@ -2007,6 +2173,10 @@ tr:last-child td {
   }
 
   .scanner-workflow-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .scanner-scan-form {
     grid-template-columns: 1fr;
   }
 

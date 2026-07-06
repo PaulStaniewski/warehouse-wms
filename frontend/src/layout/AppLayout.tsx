@@ -10,6 +10,7 @@ import {
   MapPin,
   PackageSearch,
   ArchiveRestore,
+  Layers,
   ScanLine,
   Route,
   Warehouse,
@@ -33,8 +34,10 @@ const wmsNavItems = [
 
 const scannerNavItems = [
   { to: "/scanner", label: "Scanner Menu", icon: ScanLine },
-  { to: "/scanner/picking", label: "Pobranie", icon: Barcode },
-  { to: "/scanner/control", label: "Kontrola", icon: ClipboardCheck },
+  { to: "/scanner/proformas", label: "Proformas", icon: Layers },
+  { to: "/scanner/tasks", label: "Tasks", icon: ClipboardList },
+  { to: "/scanner/picking", label: "Picking", icon: Barcode },
+  { to: "/scanner/control", label: "Control", icon: ClipboardCheck },
   { to: "/scanner/product", label: "Product", icon: PackageSearch },
   { to: "/scanner/location", label: "Location", icon: MapPin },
   { to: "/scanner/quick-transfer", label: "Quick Transfer", icon: Forklift },
@@ -51,9 +54,11 @@ const pageTitles: Record<string, string> = {
   "/wms/events/current": "Current Events",
   "/wms/events/archive": "Archive Events",
   "/scanner": "Scanner",
-  "/scanner/picking": "Pobranie",
-  "/scanner/control": "Kontrola",
-  "/scanner/routes": "Pobranie",
+  "/scanner/proformas": "Proformas",
+  "/scanner/tasks": "Tasks",
+  "/scanner/picking": "Picking",
+  "/scanner/control": "Control",
+  "/scanner/routes": "Picking",
   "/scanner/route-runs": "Scanner",
   "/scanner/product": "Product Lookup",
   "/scanner/location": "Location Lookup",
@@ -114,7 +119,7 @@ export function AppLayout() {
           <h2 className="topbar-title">{title}</h2>
           <span className="topbar-meta">
             {location.pathname.startsWith("/scanner") && scannerSession
-              ? `Wózek: ${scannerSession.cart_code}`
+              ? `Cart: ${scannerSession.cart_code}`
               : "API: /api"}
           </span>
         </header>

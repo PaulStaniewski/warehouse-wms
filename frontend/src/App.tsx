@@ -16,9 +16,10 @@ import { ScannerControlPage } from "./pages/ScannerControlPage";
 import { ScannerHomePage } from "./pages/ScannerHomePage";
 import { ScannerLocationLookupPage } from "./pages/ScannerLocationLookupPage";
 import { ScannerPickingPage } from "./pages/ScannerPickingPage";
+import { ScannerProformasPage } from "./pages/ScannerProformasPage";
 import { ScannerProductLookupPage } from "./pages/ScannerProductLookupPage";
 import { ScannerQuickTransferPage } from "./pages/ScannerQuickTransferPage";
-import { ScannerPickingRoutesPage } from "./pages/ScannerRoutesPage";
+import { ScannerTasksPage } from "./pages/ScannerTasksPage";
 
 function App() {
   return (
@@ -36,10 +37,12 @@ function App() {
         <Route path="wms/events/current" element={<CurrentEventsPage />} />
         <Route path="wms/events/archive" element={<ArchiveEventsPage />} />
         <Route path="scanner" element={<ScannerHomePage />} />
-        <Route path="scanner/picking" element={<ScannerPickingRoutesPage />} />
+        <Route path="scanner/proformas" element={<ScannerProformasPage />} />
+        <Route path="scanner/tasks" element={<ScannerTasksPage />} />
+        <Route path="scanner/picking" element={<ScannerPickingPage />} />
         <Route path="scanner/control" element={<ScannerControlPage />} />
-        <Route path="scanner/routes" element={<Navigate to="/scanner/picking" replace />} />
-        <Route path="scanner/route-runs/:id/picking" element={<ScannerPickingPage />} />
+        <Route path="scanner/routes" element={<Navigate to="/scanner/proformas" replace />} />
+        <Route path="scanner/route-runs/:id/picking" element={<Navigate to="/scanner/picking" replace />} />
         <Route path="scanner/route-runs/:id/control" element={<Navigate to="/scanner/control" replace />} />
         <Route path="scanner/product" element={<ScannerProductLookupPage />} />
         <Route path="scanner/location" element={<ScannerLocationLookupPage />} />

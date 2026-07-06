@@ -288,6 +288,54 @@ class PickingTask(TimestampedModel):
         return f"Pick {self.order_line.product.sku} for {self.order_line.order.external_reference}"
 
 
+class PickingJob(TimestampedModel):
+    class Status(models.TextChoices):
+        AVAILABLE = "available", "Available"
+        IN_PROGRESS = "in_progress", "In progress"
+        PICKED = "picked", "Picked"
+        COMPLETED = "completed", "Completed"
+        CANCELLED = "cancelled", "Cancelled"
+
+    class Mode(models.TextChoices):
+        MERGED = "merged", "Merged"
+        SEPARATE = "separate", "Separate"
+
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.AVAILABLE)
+    mode = models.CharField(max_length=32, choices=Mode.choices)
+    route_runs = models.ManyToManyField(RouteRun, related_name="picking_jobs")
+    tasks = models.ManyToManyField(PickingTask, through="PickingJobTask", related_name="picking_jobs")
+    started_at = models.DateTimeField(blank=True, null=True)
+    completed_at = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        ordering = ["status", "created_at"]
+        indexes = [
+            models.Index(fields=["status"]),
+            models.Index(fields=["mode"]),
+            models.Index(fields=["started_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"Picking job {self.id} / {self.mode} / {self.status}"
+
+
+class PickingJobTask(TimestampedModel):
+    picking_job = models.ForeignKey(PickingJob, on_delete=models.CASCADE, related_name="job_tasks")
+    picking_task = models.OneToOneField(PickingTask, on_delete=models.PROTECT, related_name="job_task")
+
+    class Meta:
+        ordering = ["created_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["picking_job", "picking_task"], name="unique_task_per_picking_job"),
+        ]
+        indexes = [
+            models.Index(fields=["picking_job"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"Job {self.picking_job_id} / task {self.picking_task_id}"
+
+
 class ScannerCart(TimestampedModel):
     class Status(models.TextChoices):
         AVAILABLE = "available", "Available"
@@ -330,8 +378,65 @@ class ScannerSession(TimestampedModel):
         return f"{self.cart.code} / {self.status}"
 
 
+class CartWorkSession(TimestampedModel):
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        CONTROL = "control", "Control"
+        COMPLETED = "completed", "Completed"
+        CANCELLED = "cancelled", "Cancelled"
+
+    cart = models.ForeignKey(ScannerCart, on_delete=models.PROTECT, related_name="work_sessions")
+    picking_job = models.ForeignKey(PickingJob, on_delete=models.PROTECT, related_name="cart_work_sessions")
+    confirmed_location = models.ForeignKey(
+        Location,
+        on_delete=models.PROTECT,
+        related_name="confirmed_cart_work_sessions",
+        blank=True,
+        null=True,
+    )
+    scanner_session = models.OneToOneField(
+        ScannerSession,
+        on_delete=models.PROTECT,
+        related_name="cart_work_session",
+        blank=True,
+        null=True,
+    )
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.ACTIVE)
+    started_at = models.DateTimeField(default=timezone.now)
+    finished_at = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        ordering = ["-started_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["cart"],
+                condition=models.Q(status__in=["active", "control"]),
+                name="unique_active_cart_work_per_cart",
+            ),
+            models.UniqueConstraint(
+                fields=["picking_job"],
+                condition=models.Q(status__in=["active", "control"]),
+                name="unique_active_cart_work_per_job",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["status"]),
+            models.Index(fields=["started_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.cart.code} / job {self.picking_job_id} / {self.status}"
+
+
 class CartPickedItem(TimestampedModel):
     session = models.ForeignKey(ScannerSession, on_delete=models.CASCADE, related_name="picked_items")
+    cart_work_session = models.ForeignKey(
+        CartWorkSession,
+        on_delete=models.CASCADE,
+        related_name="picked_items",
+        blank=True,
+        null=True,
+    )
     cart = models.ForeignKey(ScannerCart, on_delete=models.PROTECT, related_name="picked_items")
     route_run = models.ForeignKey(RouteRun, on_delete=models.PROTECT, related_name="cart_items")
     picking_task = models.ForeignKey(PickingTask, on_delete=models.CASCADE, related_name="cart_items")
@@ -348,6 +453,7 @@ class CartPickedItem(TimestampedModel):
         ]
         indexes = [
             models.Index(fields=["session", "product"]),
+            models.Index(fields=["cart_work_session", "product"]),
             models.Index(fields=["cart"]),
             models.Index(fields=["route_run"]),
         ]

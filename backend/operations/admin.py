@@ -2,13 +2,20 @@ from django.contrib import admin
 
 from operations.models import (
     AuditLog,
+    CartPickedItem,
+    CartWorkSession,
     DeliveryRoute,
     Order,
     OrderLine,
+    PickingJob,
+    PickingJobTask,
     PickingTask,
     ReturnBatch,
     ReturnLine,
     RouteRun,
+    ScannerCart,
+    ScannerCustomerLabel,
+    ScannerSession,
     StockMovement,
 )
 
@@ -102,6 +109,61 @@ class PickingTaskAdmin(admin.ModelAdmin):
         "order_line__product__sku",
         "source_location__code",
     ]
+
+
+class PickingJobTaskInline(admin.TabularInline):
+    model = PickingJobTask
+    extra = 0
+
+
+@admin.register(PickingJob)
+class PickingJobAdmin(admin.ModelAdmin):
+    list_display = ["id", "mode", "status", "started_at", "completed_at", "created_at"]
+    list_filter = ["mode", "status"]
+    search_fields = ["id", "route_runs__route__code"]
+    filter_horizontal = ["route_runs"]
+    inlines = [PickingJobTaskInline]
+
+
+@admin.register(PickingJobTask)
+class PickingJobTaskAdmin(admin.ModelAdmin):
+    list_display = ["picking_job", "picking_task", "created_at"]
+    search_fields = ["picking_job__id", "picking_task__order_line__order__external_reference"]
+
+
+@admin.register(ScannerCart)
+class ScannerCartAdmin(admin.ModelAdmin):
+    list_display = ["code", "name", "status", "updated_at"]
+    list_filter = ["status"]
+    search_fields = ["code", "name"]
+
+
+@admin.register(ScannerSession)
+class ScannerSessionAdmin(admin.ModelAdmin):
+    list_display = ["cart", "worker_code", "status", "started_at", "ended_at"]
+    list_filter = ["status", "cart"]
+    search_fields = ["cart__code", "worker_code"]
+
+
+@admin.register(CartWorkSession)
+class CartWorkSessionAdmin(admin.ModelAdmin):
+    list_display = ["id", "cart", "picking_job", "status", "started_at", "finished_at"]
+    list_filter = ["status", "cart"]
+    search_fields = ["cart__code", "picking_job__id"]
+
+
+@admin.register(CartPickedItem)
+class CartPickedItemAdmin(admin.ModelAdmin):
+    list_display = ["cart", "picking_task", "product", "quantity_picked", "quantity_prepared", "created_at"]
+    list_filter = ["cart", "route_run"]
+    search_fields = ["cart__code", "product__sku", "picking_task__order_line__order__external_reference"]
+
+
+@admin.register(ScannerCustomerLabel)
+class ScannerCustomerLabelAdmin(admin.ModelAdmin):
+    list_display = ["session", "order", "printer_code", "printed_at"]
+    list_filter = ["printer_code"]
+    search_fields = ["order__external_reference", "session__cart__code"]
 
 
 @admin.register(StockMovement)

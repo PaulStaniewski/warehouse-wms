@@ -1,4 +1,4 @@
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import axios from "axios";
 import { ArrowLeft } from "lucide-react";
@@ -6,6 +6,7 @@ import { Link } from "react-router-dom";
 
 import {
   useScannerCartItems,
+  useScannerControlCart,
   useScannerControlFinish,
   useScannerControlTarget,
   useScannerPickingPrepare,
@@ -22,24 +23,42 @@ export function ScannerControlPage() {
   const queryClient = useQueryClient();
   const activeSession = useStoredScannerSession();
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [cartInput, setCartInput] = useState("");
+  const [controlCartCode, setControlCartCode] = useState(activeSession?.cart_code ?? "");
   const [productInput, setProductInput] = useState("");
   const [productCode, setProductCode] = useState("");
   const [printerCode, setPrinterCode] = useState("ZEBRA-01");
   const [quantity, setQuantity] = useState("1");
-  const cartItems = useScannerCartItems(activeSession?.id);
-  const target = useScannerControlTarget(activeSession?.id, productCode);
+  const controlCart = useScannerControlCart(controlCartCode);
+  const controlSession = controlCart.data?.session ?? activeSession;
+  const fallbackCartItems = useScannerCartItems(controlCart.data ? undefined : activeSession?.id);
+  const items = controlCart.data?.items ?? fallbackCartItems.data?.items ?? [];
+  const target = useScannerControlTarget(controlSession?.id, productCode);
   const printLabel = useScannerPrintLabel();
   const prepare = useScannerPickingPrepare();
   const finish = useScannerControlFinish();
   const selectedTarget = target.data?.candidates[0];
 
+  useEffect(() => {
+    if (controlCart.data?.session) {
+      storeScannerSession(controlCart.data.session);
+    }
+  }, [controlCart.data?.session]);
+
   async function refreshCart() {
     await Promise.all([
-      queryClient.invalidateQueries({ queryKey: ["scanner-control-cart-items", activeSession?.id] }),
-      queryClient.invalidateQueries({ queryKey: ["scanner-control-target", activeSession?.id, productCode] }),
+      queryClient.invalidateQueries({ queryKey: ["scanner-control-cart", controlCartCode] }),
+      queryClient.invalidateQueries({ queryKey: ["scanner-control-cart-items", controlSession?.id] }),
+      queryClient.invalidateQueries({ queryKey: ["scanner-control-target", controlSession?.id, productCode] }),
       queryClient.invalidateQueries({ queryKey: ["route-runs"] }),
       queryClient.invalidateQueries({ queryKey: ["audit-logs", "current"] }),
     ]);
+  }
+
+  function handleCartSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setMessage(null);
+    setControlCartCode(cartInput.trim());
   }
 
   function handleProductSubmit(event: FormEvent<HTMLFormElement>) {
@@ -49,7 +68,7 @@ export function ScannerControlPage() {
   }
 
   async function handlePrintLabel() {
-    if (!activeSession || !selectedTarget) {
+    if (!controlSession || !selectedTarget) {
       return;
     }
 
@@ -57,17 +76,17 @@ export function ScannerControlPage() {
       const result = await printLabel.mutateAsync({
         orderReference: selectedTarget.order_reference,
         printerCode,
-        sessionId: activeSession.id,
+        sessionId: controlSession.id,
       });
       setMessage({ type: "success", text: result.message });
       await refreshCart();
     } catch (error) {
-      setMessage({ type: "error", text: getErrorMessage(error, "Nie można wydrukować etykiety.") });
+      setMessage({ type: "error", text: getErrorMessage(error, "Could not print the label.") });
     }
   }
 
   async function handlePrepare() {
-    if (!activeSession || !selectedTarget) {
+    if (!controlSession || !selectedTarget) {
       return;
     }
 
@@ -77,27 +96,27 @@ export function ScannerControlPage() {
         productCode,
         quantity,
         routeRunId: selectedTarget.route_run,
-        sessionId: activeSession.id,
+        sessionId: controlSession.id,
       });
       setMessage({ type: "success", text: result.message });
       await refreshCart();
     } catch (error) {
-      setMessage({ type: "error", text: getErrorMessage(error, "Nie można zatwierdzić kontroli.") });
+      setMessage({ type: "error", text: getErrorMessage(error, "Could not prepare the item.") });
     }
   }
 
   async function handleFinish() {
-    if (!activeSession) {
+    if (!controlSession) {
       return;
     }
 
     try {
-      const result = await finish.mutateAsync({ sessionId: activeSession.id });
+      const result = await finish.mutateAsync({ sessionId: controlSession.id });
       storeScannerSession(null);
-      setMessage({ type: "success", text: result.message || "Kontrola zakończona." });
+      setMessage({ type: "success", text: result.message || "Control finished." });
       await refreshCart();
     } catch (error) {
-      setMessage({ type: "error", text: getErrorMessage(error, "Nie można zakończyć kontroli.") });
+      setMessage({ type: "error", text: getErrorMessage(error, "Could not finish control.") });
     }
   }
 
@@ -108,59 +127,84 @@ export function ScannerControlPage() {
           <ArrowLeft size={17} />
           Scanner menu
         </Link>
-        <Link to="/scanner/picking">Pobranie</Link>
+        <Link to="/scanner/picking">Picking</Link>
       </div>
-
-      {!activeSession && (
-        <div className="scanner-message scanner-message--error">
-          Brak aktywnego wózka. <Link to="/scanner">Zeskanuj wózek</Link> przed kontrolą.
-        </div>
-      )}
 
       {message && <div className={`scanner-message scanner-message--${message.type}`}>{message.text}</div>}
 
+      <form className="scanner-workflow-panel scanner-workflow-panel--prepare" onSubmit={handleCartSubmit}>
+        <header>
+          <span>1</span>
+          <h2>Control</h2>
+        </header>
+        <label htmlFor="control-cart-code">
+          <span>Scan cart</span>
+          <input
+            autoComplete="off"
+            autoFocus={!controlSession}
+            id="control-cart-code"
+            onChange={(event) => setCartInput(event.target.value)}
+            placeholder="WOZEK-01"
+            value={cartInput}
+          />
+        </label>
+        <button disabled={!cartInput.trim()} type="submit">
+          Show cart
+        </button>
+      </form>
+
+      {controlCart.isError && (
+        <div className="scanner-message scanner-message--error">
+          {getErrorMessage(controlCart.error, "This cart has no active work for control.")}
+        </div>
+      )}
+
       <section className="scanner-header-panel">
         <div>
-          <p>Kontrola</p>
+          <p>Control</p>
           <h1>
-            Wózek <span>{activeSession?.cart_code ?? "brak"}</span>
+            Cart <span>{controlSession?.cart_code ?? "none"}</span>
           </h1>
         </div>
         <dl>
           <div>
             <dt>Items</dt>
-            <dd>{cartItems.data?.items.length ?? 0}</dd>
+            <dd>{items.length}</dd>
           </div>
           <div>
             <dt>Worker</dt>
-            <dd>{activeSession?.worker_code || "-"}</dd>
+            <dd>{controlSession?.worker_code || "-"}</dd>
           </div>
         </dl>
       </section>
 
       <form className="scanner-workflow-panel scanner-workflow-panel--prepare" onSubmit={handleProductSubmit}>
         <header>
-          <span>B</span>
-          <h2>Kontrola</h2>
+          <span>2</span>
+          <h2>Produkt</h2>
         </header>
         <label htmlFor="control-product-code">
-          <span>Zeskanuj produkt</span>
+          <span>Scan product</span>
           <input
             autoComplete="off"
-            autoFocus={Boolean(activeSession)}
-            disabled={!activeSession}
+            autoFocus={Boolean(controlSession)}
+            disabled={!controlSession}
             id="control-product-code"
             onChange={(event) => setProductInput(event.target.value)}
-            placeholder="SKU lub kod kreskowy"
+            placeholder="SKU or barcode"
             value={productInput}
           />
         </label>
-        <button disabled={!activeSession || !productInput.trim()} type="submit">
-          Pokaż cel
+        <button disabled={!controlSession || !productInput.trim()} type="submit">
+          Show target
         </button>
       </form>
 
-      {target.isError && <div className="scanner-message scanner-message--error">{getErrorMessage(target.error, "Brak produktu na wózku.")}</div>}
+      {target.isError && (
+        <div className="scanner-message scanner-message--error">
+          {getErrorMessage(target.error, "Product is not available on this cart.")}
+        </div>
+      )}
 
       {selectedTarget && (
         <section className="scanner-result-card">
@@ -169,7 +213,7 @@ export function ScannerControlPage() {
             <strong>{selectedTarget.product_sku}</strong>
           </div>
           <div>
-            <span>Zamówienie</span>
+            <span>Order</span>
             <strong>{selectedTarget.order_reference}</strong>
           </div>
           <div>
@@ -177,7 +221,7 @@ export function ScannerControlPage() {
             <strong>{selectedTarget.customer_name || "-"}</strong>
           </div>
           <div>
-            <span>Pozostało</span>
+            <span>Remaining</span>
             <strong>{selectedTarget.remaining_quantity}</strong>
           </div>
         </section>
@@ -185,7 +229,7 @@ export function ScannerControlPage() {
 
       <section className="scanner-control-actions">
         <label htmlFor="printer-code">
-          <span>Zeskanuj Zebrę / drukarkę</span>
+          <span>Scan Zebra / printer</span>
           <input
             disabled={!selectedTarget}
             id="printer-code"
@@ -194,7 +238,7 @@ export function ScannerControlPage() {
           />
         </label>
         <label htmlFor="control-quantity">
-          <span>Ilość</span>
+          <span>Quantity</span>
           <input
             disabled={!selectedTarget}
             id="control-quantity"
@@ -206,18 +250,18 @@ export function ScannerControlPage() {
           />
         </label>
         <button disabled={!selectedTarget || !printerCode.trim() || printLabel.isPending} onClick={handlePrintLabel} type="button">
-          Drukuj etykietę
+          Print label
         </button>
         <button disabled={!selectedTarget || !quantity || prepare.isPending} onClick={handlePrepare} type="button">
-          Zatwierdź kontrolę
+          Prepare item
         </button>
       </section>
 
       <section className="scanner-list">
-        {(cartItems.data?.items ?? []).length === 0 ? (
-          <div className="state-box">Brak pobranych pozycji na aktywnym wózku.</div>
+        {items.length === 0 ? (
+          <div className="state-box">No picked items on this cart.</div>
         ) : (
-          cartItems.data?.items.map((item) => (
+          items.map((item) => (
             <article className="scanner-list-row" key={item.id}>
               <div>
                 <span>{item.product_sku}</span>
@@ -227,15 +271,15 @@ export function ScannerControlPage() {
               <div>
                 <span>Pobrane / przygotowane</span>
                 <strong>{item.quantity_picked} / {item.quantity_prepared}</strong>
-                <small>Pozostało {item.remaining_quantity}</small>
+                <small>Remaining {item.remaining_quantity}</small>
               </div>
             </article>
           ))
         )}
       </section>
 
-      <button className="scanner-confirm-button scanner-finish-button" disabled={!activeSession || finish.isPending} onClick={handleFinish} type="button">
-        Zakończ kontrolę
+      <button className="scanner-confirm-button scanner-finish-button" disabled={!controlSession || finish.isPending} onClick={handleFinish} type="button">
+        Finish control
       </button>
     </>
   );

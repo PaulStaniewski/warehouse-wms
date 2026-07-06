@@ -2,15 +2,17 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 
 from django.core.management.base import BaseCommand
-from django.db import transaction
+from django.db import models, transaction
 from django.utils import timezone
 
 from operations.models import (
     AuditLog,
     CartPickedItem,
+    CartWorkSession,
     DeliveryRoute,
     Order,
     OrderLine,
+    PickingJob,
     PickingTask,
     ReturnBatch,
     ReturnLine,
@@ -26,20 +28,21 @@ from warehouse.models import Branch, InventoryItem, Location, Product
 class Command(BaseCommand):
     help = "Seed realistic demo data for the warehouse portfolio application."
 
-    @transaction.atomic
     def handle(self, *args, **options):
-        branches = self.create_branches()
-        locations = self.create_locations(branches)
-        products = self.create_products()
-        inventory_items = self.create_inventory_items(branches, locations, products)
-        delivery_routes = self.create_delivery_routes(branches)
-        route_runs = self.create_route_runs(delivery_routes)
-        orders, order_lines = self.create_orders(branches, products, route_runs)
-        return_batch, return_lines = self.create_returns(branches, products)
-        picking_tasks = self.create_picking_tasks(branches, locations, order_lines)
-        scanner_carts = self.create_scanner_carts()
-        stock_movements = self.create_stock_movements(branches, locations, products, inventory_items)
-        audit_logs = self.create_audit_logs(orders, return_batch)
+        with transaction.atomic():
+            self.cleanup_demo_workflow()
+            branches = self.create_branches()
+            locations = self.create_locations(branches)
+            products = self.create_products()
+            inventory_items = self.create_inventory_items(branches, locations, products)
+            delivery_routes = self.create_delivery_routes(branches)
+            route_runs = self.create_route_runs(delivery_routes)
+            orders, order_lines = self.create_orders(branches, products, route_runs)
+            return_batch, return_lines = self.create_returns(branches, products)
+            picking_tasks = self.create_picking_tasks(branches, locations, order_lines)
+            scanner_carts = self.create_scanner_carts()
+            stock_movements = self.create_stock_movements(branches, locations, products, inventory_items)
+            audit_logs = self.create_audit_logs(orders, return_batch)
 
         self.stdout.write(self.style.SUCCESS("Demo warehouse data seeded successfully."))
         self.stdout.write(f"Branches: {len(branches)}")
@@ -55,6 +58,39 @@ class Command(BaseCommand):
         self.stdout.write(f"Scanner carts: {len(scanner_carts)}")
         self.stdout.write(f"Stock movements: {len(stock_movements)}")
         self.stdout.write(f"Audit logs: {len(audit_logs)}")
+
+    def cleanup_demo_workflow(self):
+        demo_cart_codes = ["WOZEK-01", "WOZEK-02", "WOZEK-03"]
+        demo_order_refs = [
+            "AX-ORDER-0001",
+            "AX-ORDER-0002",
+            "AX-ORDER-0003",
+            "AX-ORDER-0004",
+            "AX-ORDER-0005",
+        ]
+        cart_code_filter = models.Q()
+        related_cart_code_filter = models.Q()
+        job_cart_code_filter = models.Q()
+        for code in demo_cart_codes:
+            cart_code_filter |= models.Q(code__iexact=code)
+            related_cart_code_filter |= models.Q(cart__code__iexact=code)
+            job_cart_code_filter |= models.Q(cart_work_sessions__cart__code__iexact=code)
+
+        demo_sessions = ScannerSession.objects.filter(related_cart_code_filter)
+        demo_cart_work = CartWorkSession.objects.filter(related_cart_code_filter)
+        demo_jobs = PickingJob.objects.filter(
+            job_cart_code_filter
+            | models.Q(job_tasks__picking_task__order_line__order__external_reference__in=demo_order_refs)
+        ).distinct()
+
+        ScannerCustomerLabel.objects.filter(session__in=demo_sessions).delete()
+        CartPickedItem.objects.filter(
+            models.Q(session__in=demo_sessions) | models.Q(cart_work_session__in=demo_cart_work)
+        ).delete()
+        demo_cart_work.delete()
+        demo_sessions.update(status=ScannerSession.Status.CLOSED, ended_at=timezone.now())
+        ScannerCart.objects.filter(cart_code_filter).update(status=ScannerCart.Status.AVAILABLE)
+        demo_jobs.delete()
 
     def create_branches(self):
         branch_data = [
@@ -274,6 +310,8 @@ class Command(BaseCommand):
             ),
             ("AX-ORDER-0002", "GDY", "Demo Client Two", ("GDY", "ROUTE-01", 2), [("KLOCKI-001", 1, "1")]),
             ("AX-ORDER-0003", "GDA", "Demo Client Three", ("GDA", "ROUTE-01", 1), [("FILTR-001", 1, "3")]),
+            ("AX-ORDER-0004", "GDY", "Demo Client Four", ("GDY", "ROUTE-02", 1), [("OLEJ-001", 1, "2")]),
+            ("AX-ORDER-0005", "GDA", "Demo Client Five", ("GDA", "ROUTE-02", 1), [("OLEJ-001", 1, "2")]),
         ]
 
         orders = {}
@@ -341,6 +379,8 @@ class Command(BaseCommand):
             (("AX-ORDER-0001", 2), "GDY", "A-01-02", PickingTask.Status.ASSIGNED),
             (("AX-ORDER-0002", 1), "GDY", "A-02-01", PickingTask.Status.OPEN),
             (("AX-ORDER-0003", 1), "GDA", "B-01-01", PickingTask.Status.OPEN),
+            (("AX-ORDER-0004", 1), "GDY", "A-01-02", PickingTask.Status.OPEN),
+            (("AX-ORDER-0005", 1), "GDA", "B-01-02", PickingTask.Status.OPEN),
         ]
 
         picking_tasks = {}
@@ -372,10 +412,6 @@ class Command(BaseCommand):
                 },
             )
             carts[code] = cart
-        sessions = ScannerSession.objects.filter(cart__code__in=carts.keys())
-        ScannerCustomerLabel.objects.filter(session__in=sessions).delete()
-        CartPickedItem.objects.filter(session__in=sessions).delete()
-        sessions.update(status=ScannerSession.Status.CLOSED, ended_at=timezone.now())
         ScannerCart.objects.filter(code__in=carts.keys()).update(status=ScannerCart.Status.AVAILABLE)
         return carts
 

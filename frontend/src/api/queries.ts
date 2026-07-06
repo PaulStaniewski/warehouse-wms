@@ -17,9 +17,15 @@ import type {
   ScannerProductLookupResponse,
   ScannerQuickTransferResponse,
   ScannerCartItemsResponse,
+  ScannerCartWorkResponse,
+  ScannerCreateJobsResponse,
+  ScannerJobsResponse,
+  ScannerControlCartResponse,
   ScannerControlTargetResponse,
+  ScannerProformasResponse,
   ScannerPrintLabelResponse,
   ScannerSessionResponse,
+  ScannerTaskStartResponse,
 } from "../types/api";
 
 
@@ -172,21 +178,46 @@ export function useScannerPickingScan() {
 export function useScannerPickingPick() {
   return useMutation({
     mutationFn: async ({
+      cartWorkSessionId,
       code,
       quantity,
       routeRunId,
       sessionId,
+      workerCode,
     }: {
+      cartWorkSessionId?: number;
       code: string;
       quantity: string;
-      routeRunId: number;
-      sessionId: number;
+      routeRunId?: number;
+      sessionId?: number;
+      workerCode?: string;
     }) => {
       const response = await apiClient.post<ScannerPickingScanResponse>("/scanner/picking/pick/", {
         code,
+        product_code: code,
         quantity,
         route_run_id: routeRunId,
+        cart_work_session_id: cartWorkSessionId,
         session_id: sessionId,
+        worker_code: workerCode,
+      });
+      return response.data;
+    },
+  });
+}
+
+export function useScannerConfirmLocation() {
+  return useMutation({
+    mutationFn: async ({
+      cartWorkSessionId,
+      locationCode,
+    }: {
+      cartWorkSessionId: number;
+      locationCode: string;
+    }) => {
+      const response = await apiClient.post<ScannerCartWorkResponse>("/scanner/picking/confirm-location/", {
+        cart_work_session_id: cartWorkSessionId,
+        location_code: locationCode,
       });
       return response.data;
     },
@@ -227,6 +258,88 @@ export function useScannerSessionStart() {
         cart_code: cartCode,
         worker_code: workerCode,
       });
+      return response.data;
+    },
+  });
+}
+
+export function useScannerProformas(branchId?: number) {
+  return useQuery({
+    queryKey: ["scanner-proformas", branchId ?? "all"],
+    queryFn: async () => {
+      const response = await apiClient.get<ScannerProformasResponse>(
+        branchId ? `/scanner/proformas/?branch=${branchId}` : "/scanner/proformas/",
+      );
+      return response.data;
+    },
+  });
+}
+
+export function useScannerCreateJobs() {
+  return useMutation({
+    mutationFn: async ({
+      mode,
+      routeRunIds,
+      workerCode,
+    }: {
+      mode: "merged" | "separate";
+      routeRunIds: number[];
+      workerCode: string;
+    }) => {
+      const response = await apiClient.post<ScannerCreateJobsResponse>("/scanner/proformas/create-jobs/", {
+        mode,
+        route_run_ids: routeRunIds,
+        worker_code: workerCode,
+      });
+      return response.data;
+    },
+  });
+}
+
+export function useScannerJobs() {
+  return useQuery({
+    queryKey: ["scanner-jobs"],
+    queryFn: async () => {
+      const response = await apiClient.get<ScannerJobsResponse>("/scanner/tasks/");
+      return response.data;
+    },
+  });
+}
+
+export function useScannerTaskStart() {
+  return useMutation({
+    mutationFn: async ({ cartCode, jobId, workerCode }: { cartCode: string; jobId: number; workerCode: string }) => {
+      const response = await apiClient.post<ScannerTaskStartResponse>(`/scanner/tasks/${jobId}/start/`, {
+        cart_code: cartCode,
+        worker_code: workerCode,
+      });
+      return response.data;
+    },
+  });
+}
+
+export function useScannerCartWork(sessionId?: number, cartWorkSessionId?: number | null) {
+  return useQuery({
+    enabled: Boolean(sessionId || cartWorkSessionId),
+    refetchInterval: 4000,
+    queryKey: ["scanner-cart-work", sessionId ?? "no-session", cartWorkSessionId ?? "no-work"],
+    queryFn: async () => {
+      const query = cartWorkSessionId ? `cart_work_session_id=${cartWorkSessionId}` : `session_id=${sessionId}`;
+      const response = await apiClient.get<ScannerCartWorkResponse>(`/scanner/cart-work/current/?${query}`);
+      return response.data;
+    },
+  });
+}
+
+export function useScannerControlCart(cartCode: string) {
+  return useQuery({
+    enabled: Boolean(cartCode),
+    refetchInterval: 4000,
+    queryKey: ["scanner-control-cart", cartCode],
+    queryFn: async () => {
+      const response = await apiClient.get<ScannerControlCartResponse>(
+        `/scanner/control/cart/?cart_code=${encodeURIComponent(cartCode)}`,
+      );
       return response.data;
     },
   });

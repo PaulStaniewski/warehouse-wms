@@ -322,7 +322,7 @@ export function RouteMonitorPage() {
                         onClick={handleCloseRoute}
                         type="button"
                       >
-                        Zamknij trasę
+                        Close route
                       </button>
                     </div>
                   </>
