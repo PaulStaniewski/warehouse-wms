@@ -161,9 +161,9 @@ class CartPickedItemAdmin(admin.ModelAdmin):
 
 @admin.register(ScannerCustomerLabel)
 class ScannerCustomerLabelAdmin(admin.ModelAdmin):
-    list_display = ["session", "order", "printer_code", "printed_at"]
+    list_display = ["scan_code", "session", "order", "printer_code", "printed_at"]
     list_filter = ["printer_code"]
-    search_fields = ["order__external_reference", "session__cart__code"]
+    search_fields = ["scan_code", "order__external_reference", "session__cart__code"]
 
 
 @admin.register(StockMovement)

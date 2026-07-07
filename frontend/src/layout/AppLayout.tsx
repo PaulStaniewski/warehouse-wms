@@ -39,6 +39,7 @@ const scannerNavItems = [
   { to: "/scanner/picking", label: "Picking", icon: Barcode },
   { to: "/scanner/control", label: "Control", icon: ClipboardCheck },
   { to: "/scanner/product", label: "Product", icon: PackageSearch },
+  { to: "/scanner/contents", label: "Contents", icon: Boxes },
   { to: "/scanner/location", label: "Location", icon: MapPin },
   { to: "/scanner/quick-transfer", label: "Quick Transfer", icon: Forklift },
 ];
@@ -61,6 +62,7 @@ const pageTitles: Record<string, string> = {
   "/scanner/routes": "Picking",
   "/scanner/route-runs": "Scanner",
   "/scanner/product": "Product Lookup",
+  "/scanner/contents": "Contents",
   "/scanner/location": "Location Lookup",
   "/scanner/quick-transfer": "Quick Transfer",
 };

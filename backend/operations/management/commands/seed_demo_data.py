@@ -67,6 +67,7 @@ class Command(BaseCommand):
             "AX-ORDER-0003",
             "AX-ORDER-0004",
             "AX-ORDER-0005",
+            "AX-ORDER-LABEL-TEST",
         ]
         cart_code_filter = models.Q()
         related_cart_code_filter = models.Q()
@@ -165,6 +166,7 @@ class Command(BaseCommand):
         inventory_data = [
             ("GDY", "A-01-01", "FILTR-001", "10", "0"),
             ("GDY", "A-01-02", "OLEJ-001", "24", "0"),
+            ("GDY", "A-02-01", "FILTR-001", "12", "0"),
             ("GDY", "A-02-01", "KLOCKI-001", "6", "0"),
             ("GDY", "RET-01", "WYCIER-001", "3", "0"),
             ("GDA", "B-01-01", "FILTR-001", "8", "0"),
@@ -268,6 +270,15 @@ class Command(BaseCommand):
                 as_time(timedelta(hours=5)),
                 RouteRun.Status.OPEN,
             ),
+            (
+                "GDY",
+                "ROUTE-04",
+                1,
+                as_time(timedelta(hours=6, minutes=50)),
+                as_time(timedelta(hours=6, minutes=51)),
+                as_time(timedelta(hours=7)),
+                RouteRun.Status.OPEN,
+            ),
         ]
 
         route_runs = {}
@@ -312,6 +323,13 @@ class Command(BaseCommand):
             ("AX-ORDER-0003", "GDA", "Demo Client Three", ("GDA", "ROUTE-01", 1), [("FILTR-001", 1, "3")]),
             ("AX-ORDER-0004", "GDY", "Demo Client Four", ("GDY", "ROUTE-02", 1), [("OLEJ-001", 1, "2")]),
             ("AX-ORDER-0005", "GDA", "Demo Client Five", ("GDA", "ROUTE-02", 1), [("OLEJ-001", 1, "2")]),
+            (
+                "AX-ORDER-LABEL-TEST",
+                "GDY",
+                "Demo Client Label Test",
+                ("GDY", "ROUTE-04", 1),
+                [("FILTR-001", 1, "3"), ("OLEJ-001", 2, "2")],
+            ),
         ]
 
         orders = {}
@@ -381,6 +399,8 @@ class Command(BaseCommand):
             (("AX-ORDER-0003", 1), "GDA", "B-01-01", PickingTask.Status.OPEN),
             (("AX-ORDER-0004", 1), "GDY", "A-01-02", PickingTask.Status.OPEN),
             (("AX-ORDER-0005", 1), "GDA", "B-01-02", PickingTask.Status.OPEN),
+            (("AX-ORDER-LABEL-TEST", 1), "GDY", "A-02-01", PickingTask.Status.OPEN),
+            (("AX-ORDER-LABEL-TEST", 2), "GDY", "A-01-02", PickingTask.Status.OPEN),
         ]
 
         picking_tasks = {}

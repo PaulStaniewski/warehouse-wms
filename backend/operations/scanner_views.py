@@ -22,6 +22,7 @@ from operations.models import (
     ScannerSession,
     StockMovement,
 )
+from operations.contents import ContentsLookupError, resolve_contents_code
 from operations.serializers import PickingTaskSerializer, RouteRunSerializer
 from operations.services import TERMINAL_ROUTE_STATUSES, recalculate_route_readiness
 from warehouse.models import InventoryItem, Location, Product
@@ -120,7 +121,7 @@ def _get_active_session_or_response(session_id):
 def _cart_item_data(item: CartPickedItem):
     order = item.picking_task.order_line.order
     remaining = item.quantity_picked - item.quantity_prepared
-    label_ready = ScannerCustomerLabel.objects.filter(session=item.session, order=order).exists()
+    label = ScannerCustomerLabel.objects.filter(session=item.session, order=order).first()
     return {
         "id": item.id,
         "session": item.session_id,
@@ -138,7 +139,8 @@ def _cart_item_data(item: CartPickedItem):
         "quantity_picked": str(item.quantity_picked),
         "quantity_prepared": str(item.quantity_prepared),
         "remaining_quantity": str(remaining),
-        "customer_label_ready": label_ready,
+        "customer_label_ready": label is not None,
+        "customer_label_scan_code": label.scan_code if label else None,
     }
 
 
@@ -1143,6 +1145,7 @@ class ScannerControlPrintLabelView(APIView):
                 "message": "Customer label ready.",
                 "label": {
                     "id": label.id,
+                    "scan_code": label.scan_code,
                     "order_reference": order.external_reference,
                     "printer_code": label.printer_code,
                     "printed_at": label.printed_at.isoformat(),
@@ -1270,6 +1273,17 @@ class ScannerLocationContentsView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+class ScannerContentsView(APIView):
+    def get(self, request):
+        try:
+            return Response(resolve_contents_code(request.query_params.get("code", "")))
+        except ContentsLookupError as error:
+            payload = {"detail": error.detail}
+            if error.matched_object_types:
+                payload["matched_object_types"] = error.matched_object_types
+            return Response(payload, status=error.status_code)
 
 
 class ScannerQuickTransferView(APIView):

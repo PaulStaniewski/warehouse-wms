@@ -518,7 +518,9 @@ class ScannerPickingScanActionTests(APITestCase):
         response = self.print_label()
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertTrue(ScannerCustomerLabel.objects.filter(session=self.session, order=self.order).exists())
+        label = ScannerCustomerLabel.objects.get(session=self.session, order=self.order)
+        self.assertEqual(response.data["label"]["scan_code"], label.scan_code)
+        self.assertTrue(label.scan_code.startswith("CL-"))
         self.assertTrue(AuditLog.objects.filter(message__icontains="Customer label printed").exists())
 
     def test_print_label_reuses_existing_customer_label(self):
@@ -528,7 +530,19 @@ class ScannerPickingScanActionTests(APITestCase):
         self.assertEqual(first.status_code, status.HTTP_200_OK)
         self.assertEqual(second.status_code, status.HTTP_200_OK)
         self.assertEqual(first.data["label"]["id"], second.data["label"]["id"])
+        self.assertEqual(first.data["label"]["scan_code"], second.data["label"]["scan_code"])
         self.assertEqual(ScannerCustomerLabel.objects.filter(session=self.session, order=self.order).count(), 1)
+
+    def test_customer_label_scan_code_is_immutable(self):
+        self.print_label()
+        label = ScannerCustomerLabel.objects.get(session=self.session, order=self.order)
+        original_scan_code = label.scan_code
+
+        label.scan_code = "CL-CHANGED"
+        label.save()
+
+        label.refresh_from_db()
+        self.assertEqual(label.scan_code, original_scan_code)
 
     def test_finish_control_rejects_unprepared_items(self):
         self.client.post(
@@ -558,6 +572,221 @@ class ScannerPickingScanActionTests(APITestCase):
         self.cart.refresh_from_db()
         self.assertEqual(self.session.status, ScannerSession.Status.CLOSED)
         self.assertEqual(self.cart.status, ScannerCart.Status.AVAILABLE)
+
+
+class ScannerContentsLookupTests(APITestCase):
+    def setUp(self):
+        self.branch = Branch.objects.create(code="CNT", name="Contents Branch", city="Gdynia", country="Poland")
+        self.location = Location.objects.create(
+            branch=self.branch,
+            code="C-01-01",
+            name="Contents Location",
+            location_type=Location.LocationType.PICKING,
+        )
+        self.empty_location = Location.objects.create(
+            branch=self.branch,
+            code="C-EMPTY",
+            name="Empty Location",
+            location_type=Location.LocationType.STORAGE,
+        )
+        self.product = Product.objects.create(
+            sku="CNT-001",
+            name="Contents Product",
+            barcode="881000000001",
+            unit_of_measure="pcs",
+        )
+        self.other_product = Product.objects.create(
+            sku="CNT-002",
+            name="Zero Product",
+            barcode="881000000002",
+            unit_of_measure="pcs",
+        )
+        InventoryItem.objects.create(
+            branch=self.branch,
+            location=self.location,
+            product=self.product,
+            quantity_on_hand=Decimal("8"),
+            quantity_reserved=Decimal("1"),
+        )
+        InventoryItem.objects.create(
+            branch=self.branch,
+            location=self.location,
+            product=self.other_product,
+            quantity_on_hand=Decimal("0"),
+            quantity_reserved=Decimal("0"),
+        )
+        self.route = DeliveryRoute.objects.create(branch=self.branch, code="CNT-R", name="Contents Route")
+        self.route_run = RouteRun.objects.create(
+            route=self.route,
+            service_date=timezone.localdate(),
+            run_number=1,
+            order_cutoff_time=time(8, 50),
+            sync_time=time(8, 51),
+            departure_time=time(9, 0),
+            status=RouteRun.Status.OPEN,
+        )
+        self.order_1 = self.create_order("CNT-ORDER-1", "Customer One")
+        self.order_2 = self.create_order("CNT-ORDER-2", "Customer Two")
+        self.empty_order = self.create_order("CNT-ORDER-EMPTY", "Customer Empty")
+        self.task_1 = self.create_task(self.order_1.lines.first())
+        self.task_2 = self.create_task(self.order_2.lines.first())
+        self.empty_task = self.create_task(self.empty_order.lines.first())
+        self.cart = ScannerCart.objects.create(code="CNT-CART", name="Contents Cart", status=ScannerCart.Status.IN_USE)
+        self.empty_cart = ScannerCart.objects.create(code="CNT-EMPTY-CART", name="Empty Cart", status=ScannerCart.Status.AVAILABLE)
+        self.session = ScannerSession.objects.create(cart=self.cart, worker_code="CONTENTS")
+        self.picking_job = PickingJob.objects.create(status=PickingJob.Status.IN_PROGRESS, mode=PickingJob.Mode.MERGED)
+        self.picking_job.route_runs.add(self.route_run)
+        self.cart_work_session = CartWorkSession.objects.create(
+            cart=self.cart,
+            picking_job=self.picking_job,
+            scanner_session=self.session,
+        )
+        self.cart_item_1 = CartPickedItem.objects.create(
+            session=self.session,
+            cart_work_session=self.cart_work_session,
+            cart=self.cart,
+            route_run=self.route_run,
+            picking_task=self.task_1,
+            product=self.product,
+            quantity_picked=Decimal("3"),
+            quantity_prepared=Decimal("1"),
+        )
+        self.cart_item_2 = CartPickedItem.objects.create(
+            session=self.session,
+            cart_work_session=self.cart_work_session,
+            cart=self.cart,
+            route_run=self.route_run,
+            picking_task=self.task_2,
+            product=self.product,
+            quantity_picked=Decimal("2"),
+            quantity_prepared=Decimal("0"),
+        )
+        self.label = ScannerCustomerLabel.objects.create(
+            session=self.session,
+            order=self.order_1,
+            printer_code="ZEBRA-01",
+        )
+        self.empty_label = ScannerCustomerLabel.objects.create(
+            session=self.session,
+            order=self.empty_order,
+            printer_code="ZEBRA-01",
+        )
+
+    def create_order(self, reference, customer_name):
+        order = Order.objects.create(
+            branch=self.branch,
+            route_run=self.route_run,
+            external_reference=reference,
+            customer_name=customer_name,
+            status=Order.Status.IMPORTED,
+        )
+        OrderLine.objects.create(
+            order=order,
+            product=self.product,
+            line_number=1,
+            quantity_ordered=Decimal("3"),
+            quantity_picked=Decimal("0"),
+        )
+        return order
+
+    def create_task(self, order_line):
+        return PickingTask.objects.create(
+            branch=self.branch,
+            order_line=order_line,
+            source_location=self.location,
+            status=PickingTask.Status.OPEN,
+            quantity_to_pick=Decimal("3"),
+            quantity_picked=Decimal("0"),
+            quantity_prepared=Decimal("0"),
+        )
+
+    def get_contents(self, code):
+        return self.client.get("/api/scanner/contents/", {"code": code})
+
+    def test_known_location_resolves_with_positive_inventory_only(self):
+        response = self.get_contents("C-01-01")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["object_type"], "location")
+        self.assertEqual(response.data["code"], "C-01-01")
+        self.assertEqual(len(response.data["items"]), 1)
+        self.assertEqual(response.data["items"][0]["sku"], "CNT-001")
+        self.assertEqual(response.data["items"][0]["quantity"], 8)
+
+    def test_known_empty_location_returns_empty_items(self):
+        response = self.get_contents("C-EMPTY")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["object_type"], "location")
+        self.assertEqual(response.data["items"], [])
+
+    def test_unknown_code_returns_clear_not_found(self):
+        response = self.get_contents("UNKNOWN-CODE")
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(response.data["detail"], "Code not found.")
+
+    def test_active_cart_resolves_actual_picked_contents(self):
+        response = self.get_contents("CNT-CART")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["object_type"], "cart")
+        self.assertEqual(response.data["description"], f"Picking Job {self.picking_job.id}")
+        self.assertEqual(len(response.data["items"]), 2)
+        first_item = response.data["items"][0]
+        self.assertEqual(first_item["picked_quantity"], 3)
+        self.assertEqual(first_item["prepared_quantity"], 1)
+        self.assertEqual(first_item["remaining_quantity"], 2)
+
+    def test_cart_preserves_same_product_for_different_customers(self):
+        response = self.get_contents("CNT-CART")
+
+        order_references = [item["order_reference"] for item in response.data["items"]]
+        self.assertEqual(order_references, ["CNT-ORDER-1", "CNT-ORDER-2"])
+
+    def test_known_empty_cart_returns_empty_items(self):
+        response = self.get_contents("CNT-EMPTY-CART")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["object_type"], "cart")
+        self.assertEqual(response.data["items"], [])
+
+    def test_known_customer_label_resolves_prepared_contents(self):
+        response = self.get_contents(self.label.scan_code)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["object_type"], "customer_label")
+        self.assertEqual(response.data["code"], self.label.scan_code)
+        self.assertEqual(response.data["description"], "Customer One / CNT-ORDER-1")
+        self.assertEqual(len(response.data["items"]), 1)
+        self.assertEqual(response.data["items"][0]["quantity"], 1)
+        self.assertEqual(response.data["items"][0]["order_reference"], "CNT-ORDER-1")
+
+    def test_known_empty_customer_label_returns_empty_items(self):
+        response = self.get_contents(self.empty_label.scan_code)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["object_type"], "customer_label")
+        self.assertEqual(response.data["items"], [])
+
+    def test_customer_label_scan_codes_are_unique(self):
+        self.assertNotEqual(self.label.scan_code, self.empty_label.scan_code)
+        self.assertEqual(ScannerCustomerLabel.objects.values("scan_code").distinct().count(), 2)
+
+    def test_unknown_customer_label_scan_code_returns_not_found(self):
+        response = self.get_contents("CL-NOTREAL")
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(response.data["detail"], "Code not found.")
+
+    def test_ambiguous_code_returns_conflict(self):
+        ScannerCart.objects.create(code="C-01-01", name="Ambiguous Cart", status=ScannerCart.Status.AVAILABLE)
+
+        response = self.get_contents("C-01-01")
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertIn("matched_object_types", response.data)
+        self.assertEqual(set(response.data["matched_object_types"]), {"location", "cart"})
 
 
 class ScannerLookupAndQuickTransferTests(APITestCase):
@@ -1318,6 +1547,38 @@ class SeedDemoDataCommandTests(APITestCase):
         self.assertFalse(CartWorkSession.objects.exists())
         self.assertFalse(PickingJob.objects.exists())
         self.assertTrue(ScannerCart.objects.filter(code="WOZEK-01", status=ScannerCart.Status.AVAILABLE).exists())
+
+    def test_seed_creates_customer_label_reuse_scenario(self):
+        self.run_seed()
+
+        order = Order.objects.get(external_reference="AX-ORDER-LABEL-TEST")
+        lines = list(order.lines.select_related("product").order_by("line_number"))
+
+        self.assertEqual(order.customer_name, "Demo Client Label Test")
+        self.assertEqual(order.route_run.status, RouteRun.Status.OPEN)
+        self.assertEqual(len(lines), 2)
+        self.assertEqual({line.product.sku for line in lines}, {"FILTR-001", "OLEJ-001"})
+        self.assertEqual([line.quantity_ordered for line in lines], [Decimal("3.000"), Decimal("2.000")])
+        self.assertTrue(all(line.order_id == order.id for line in lines))
+        self.assertEqual(PickingTask.objects.filter(order_line__order=order).count(), 2)
+        self.assertTrue(
+            InventoryItem.objects.filter(
+                product__sku="FILTR-001",
+                location__code="A-02-01",
+                quantity_on_hand__gte=Decimal("3"),
+            ).exists()
+        )
+        self.assertTrue(
+            InventoryItem.objects.filter(
+                product__sku="OLEJ-001",
+                location__code="A-01-02",
+                quantity_on_hand__gte=Decimal("2"),
+            ).exists()
+        )
+
+        self.run_seed()
+        self.assertEqual(Order.objects.filter(external_reference="AX-ORDER-LABEL-TEST").count(), 1)
+        self.assertEqual(OrderLine.objects.filter(order__external_reference="AX-ORDER-LABEL-TEST").count(), 2)
 
     def test_seed_cleans_active_cart_work_and_stale_jobs(self):
         self.run_seed()

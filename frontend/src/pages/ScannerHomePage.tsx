@@ -1,5 +1,6 @@
 import {
   ArrowRight,
+  Boxes,
   ClipboardCheck,
   ClipboardList,
   Forklift,
@@ -19,11 +20,12 @@ const menuItems = [
   { label: "Picking", description: "Pick items for the active cart", to: "/scanner/picking", icon: ScanLine },
   { label: "Control", description: "Prepare picked items for customers", to: "/scanner/control", icon: ClipboardCheck },
   { label: "Product", description: "Lookup SKU or barcode", to: "/scanner/product", icon: PackageSearch },
+  { label: "Contents", description: "Scan a location, cart, or label", to: "/scanner/contents", icon: Boxes },
+  { label: "Location", description: "Lookup location stock", to: "/scanner/location", icon: PackageSearch },
   { label: "Quick Transfer", description: "Move one item between locations", to: "/scanner/quick-transfer", icon: Forklift },
 ];
 
 const disabledItems = [
-  { label: "Contents", icon: PackageSearch },
   { label: "Receiving", icon: Truck },
   { label: "Floor", icon: Layers },
   { label: "Inventory Tasks", icon: ClipboardList },

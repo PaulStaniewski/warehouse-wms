@@ -197,6 +197,7 @@ export type ScannerCartItem = {
   quantity_prepared: string;
   remaining_quantity: string;
   customer_label_ready: boolean;
+  customer_label_scan_code: string | null;
 };
 
 export type ScannerCartItemsResponse = {
@@ -213,6 +214,7 @@ export type ScannerPrintLabelResponse = {
   message: string;
   label: {
     id: number;
+    scan_code: string;
     order_reference: string;
     printer_code: string;
     printed_at: string;
@@ -257,6 +259,28 @@ export type ScannerLocationContentsResponse = {
     location_type: string;
   };
   inventory_items: ScannerInventoryPosition[];
+};
+
+export type ScannerContentsItem = {
+  product_id: number;
+  sku: string;
+  name: string;
+  quantity: number;
+  reserved_quantity?: number;
+  picked_quantity?: number;
+  prepared_quantity?: number;
+  remaining_quantity?: number;
+  order_reference?: string;
+  customer_name?: string;
+};
+
+export type ScannerContentsResponse = {
+  object_type: "location" | "cart" | "customer_label";
+  code: string;
+  title: string;
+  status: string;
+  description: string;
+  items: ScannerContentsItem[];
 };
 
 export type ScannerQuickTransferResponse = {

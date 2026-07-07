@@ -12,6 +12,7 @@ import type {
   Product,
   ReturnBatch,
   RouteRun,
+  ScannerContentsResponse,
   ScannerLocationContentsResponse,
   ScannerPickingScanResponse,
   ScannerProductLookupResponse,
@@ -434,6 +435,19 @@ export function useScannerLocationContents(code: string) {
     queryFn: async () => {
       const response = await apiClient.get<ScannerLocationContentsResponse>(
         `/scanner/locations/contents/?code=${encodeURIComponent(code)}`,
+      );
+      return response.data;
+    },
+  });
+}
+
+export function useScannerContents(code: string) {
+  return useQuery({
+    enabled: Boolean(code),
+    queryKey: ["scanner-contents", code],
+    queryFn: async () => {
+      const response = await apiClient.get<ScannerContentsResponse>(
+        `/scanner/contents/?code=${encodeURIComponent(code)}`,
       );
       return response.data;
     },

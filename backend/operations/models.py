@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+import uuid
 
 from django.conf import settings
 from django.db.models import Count, F, Q
@@ -8,6 +9,10 @@ from django.utils import timezone
 from warehouse.models import Branch, InventoryItem, Location, Product
 
 PRIORITY_LOCK_WINDOW_MINUTES = 15
+
+
+def generate_customer_label_scan_code():
+    return f"CL-{uuid.uuid4().hex[:10].upper()}"
 
 
 class TimestampedModel(models.Model):
@@ -465,6 +470,7 @@ class CartPickedItem(TimestampedModel):
 class ScannerCustomerLabel(TimestampedModel):
     session = models.ForeignKey(ScannerSession, on_delete=models.CASCADE, related_name="customer_labels")
     order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name="scanner_labels")
+    scan_code = models.CharField(max_length=32, unique=True, editable=False, default=generate_customer_label_scan_code)
     printer_code = models.CharField(max_length=64)
     printed_at = models.DateTimeField(default=timezone.now)
 
@@ -474,12 +480,22 @@ class ScannerCustomerLabel(TimestampedModel):
             models.UniqueConstraint(fields=["session", "order"], name="unique_scanner_label_per_session_order"),
         ]
         indexes = [
+            models.Index(fields=["scan_code"]),
             models.Index(fields=["printer_code"]),
             models.Index(fields=["printed_at"]),
         ]
 
     def __str__(self) -> str:
-        return f"{self.order.external_reference} / {self.printer_code}"
+        return f"{self.scan_code} / {self.order.external_reference}"
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            existing = ScannerCustomerLabel.objects.filter(pk=self.pk).only("scan_code").first()
+            if existing and existing.scan_code:
+                self.scan_code = existing.scan_code
+        if not self.scan_code:
+            self.scan_code = generate_customer_label_scan_code()
+        super().save(*args, **kwargs)
 
 
 class StockMovement(TimestampedModel):

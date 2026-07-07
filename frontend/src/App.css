@@ -1255,6 +1255,37 @@ a {
   font-weight: 900;
 }
 
+.scanner-contents-header {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 14px;
+  border: 1px solid #dce3e8;
+  border-left: 5px solid #1d4f5d;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 14px;
+}
+
+.scanner-contents-header span {
+  color: #1d4f5d;
+  font-size: 0.78rem;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+}
+
+.scanner-contents-header h1 {
+  margin: 0;
+  color: #172026;
+  font-size: 1.75rem;
+}
+
+.scanner-contents-header p,
+.scanner-contents-header small {
+  margin: 0;
+  color: #526570;
+  font-weight: 800;
+}
+
 .scanner-active-control-item {
   display: grid;
   gap: 12px;

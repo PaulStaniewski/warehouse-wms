@@ -12,6 +12,7 @@ import { ProductsPage } from "./pages/ProductsPage";
 import { RouteMonitorPage } from "./pages/RouteMonitorPage";
 import { RouteArchivePage } from "./pages/RouteArchivePage";
 import { RouteDocumentsPage } from "./pages/RouteDocumentsPage";
+import { ScannerContentsPage } from "./pages/ScannerContentsPage";
 import { ScannerControlPage } from "./pages/ScannerControlPage";
 import { ScannerHomePage } from "./pages/ScannerHomePage";
 import { ScannerLocationLookupPage } from "./pages/ScannerLocationLookupPage";
@@ -45,6 +46,7 @@ function App() {
         <Route path="scanner/route-runs/:id/picking" element={<Navigate to="/scanner/picking" replace />} />
         <Route path="scanner/route-runs/:id/control" element={<Navigate to="/scanner/control" replace />} />
         <Route path="scanner/product" element={<ScannerProductLookupPage />} />
+        <Route path="scanner/contents" element={<ScannerContentsPage />} />
         <Route path="scanner/location" element={<ScannerLocationLookupPage />} />
         <Route path="scanner/quick-transfer" element={<ScannerQuickTransferPage />} />
         <Route path="products" element={<Navigate to="/wms/products" replace />} />

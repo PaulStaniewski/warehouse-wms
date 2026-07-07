@@ -162,7 +162,7 @@ export function ScannerControlPage() {
         printerCode,
         sessionId: controlSession.id,
       });
-      setMessage({ type: "success", text: result.message });
+      setMessage({ type: "success", text: `${result.message} ${result.label.scan_code}` });
       await refreshCart();
     } catch (error) {
       setMessage({ type: "error", text: getErrorMessage(error, "Could not print the label.") });
@@ -313,7 +313,12 @@ export function ScannerControlPage() {
                   <span>{selectedTarget.product_sku}</span>
                   <h2>{selectedTarget.product_name}</h2>
                 </div>
-                {labelReady && <strong>Customer label ready</strong>}
+                {labelReady && (
+                  <strong>
+                    Customer label ready
+                    {selectedTarget.customer_label_scan_code ? ` ${selectedTarget.customer_label_scan_code}` : ""}
+                  </strong>
+                )}
               </header>
               <div className="scanner-target-block">
                 <span>Target</span>
