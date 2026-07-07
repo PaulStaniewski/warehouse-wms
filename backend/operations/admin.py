@@ -20,6 +20,8 @@ from operations.models import (
     ScannerCustomerLabel,
     ScannerSession,
     StockMovement,
+    TransferDiscrepancy,
+    TransferDiscrepancyItem,
     TransferPallet,
     TransferPalletItem,
 )
@@ -203,6 +205,34 @@ class PalletReceivingScanAdmin(admin.ModelAdmin):
     list_display = ["pallet", "product", "destination_location", "quantity", "worker_code", "scanned_at"]
     list_filter = ["pallet__transfer__destination_branch", "product", "destination_location"]
     search_fields = ["pallet__scan_code", "product__sku", "destination_location__code"]
+
+
+class TransferDiscrepancyItemInline(admin.TabularInline):
+    model = TransferDiscrepancyItem
+    extra = 0
+
+
+@admin.register(TransferDiscrepancy)
+class TransferDiscrepancyAdmin(admin.ModelAdmin):
+    list_display = ["reference", "pallet", "transfer", "status", "created_by_worker_code", "created_at"]
+    list_filter = ["status", "transfer__source_branch", "transfer__destination_branch"]
+    search_fields = ["reference", "pallet__scan_code", "transfer__reference"]
+    inlines = [TransferDiscrepancyItemInline]
+
+
+@admin.register(TransferDiscrepancyItem)
+class TransferDiscrepancyItemAdmin(admin.ModelAdmin):
+    list_display = [
+        "discrepancy",
+        "product",
+        "discrepancy_type",
+        "expected_quantity",
+        "received_quantity",
+        "difference_quantity",
+        "discrepancy_quantity",
+    ]
+    list_filter = ["discrepancy_type", "product"]
+    search_fields = ["discrepancy__reference", "product__sku", "product__name"]
 
 
 @admin.register(StockMovement)

@@ -149,9 +149,12 @@ def _customer_label_contents(label: ScannerCustomerLabel):
 
 
 def _pallet_contents(pallet: TransferPallet):
+    discrepancy = getattr(pallet, "discrepancy", None)
+    discrepancy_items = {item.pallet_item_id: item for item in discrepancy.items.all()} if discrepancy else {}
     items = []
     for item in pallet.items.select_related("product").order_by("product__sku"):
         remaining = item.expected_quantity - item.received_quantity
+        discrepancy_item = discrepancy_items.get(item.id)
         items.append(
             {
                 "product_id": item.product_id,
@@ -161,6 +164,8 @@ def _pallet_contents(pallet: TransferPallet):
                 "expected_quantity": piece_quantity(item.expected_quantity),
                 "received_quantity": piece_quantity(item.received_quantity),
                 "remaining_quantity": piece_quantity(remaining),
+                "missing_quantity": piece_quantity(discrepancy_item.discrepancy_quantity) if discrepancy_item else 0,
+                "discrepancy_type": discrepancy_item.discrepancy_type if discrepancy_item else None,
             }
         )
 
@@ -172,7 +177,11 @@ def _pallet_contents(pallet: TransferPallet):
             "code": pallet.scan_code,
             "title": f"Pallet {pallet.scan_code}",
             "status": pallet.status,
-            "description": f"{transfer.source_branch.code} -> {transfer.destination_branch.code} / {transfer.reference}",
+            "description": (
+                f"{transfer.source_branch.code} -> {transfer.destination_branch.code} / {transfer.reference}"
+                + (f" / Discrepancy: {discrepancy.reference}" if discrepancy else "")
+            ),
+            "discrepancy_reference": discrepancy.reference if discrepancy else None,
             "items": items,
         },
     )

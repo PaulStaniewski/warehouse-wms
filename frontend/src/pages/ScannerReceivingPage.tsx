@@ -5,7 +5,7 @@ import { Link } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 
 import {
-  useScannerReceivingComplete,
+  useScannerReceivingClose,
   useScannerReceivingCurrent,
   useScannerReceivingPutAway,
   useScannerReceivingScanProduct,
@@ -71,7 +71,7 @@ function PalletSummary({ session }: { session: ScannerReceivingSession }) {
         <strong>
           {formatQuantity(session.summary.received_quantity)} / {formatQuantity(session.summary.expected_quantity)}
         </strong>
-        <small>{remaining === 0 ? "Ready to complete" : `${formatQuantity(remaining)} pcs left`}</small>
+        <small>{remaining === 0 ? "Ready to close" : `${formatQuantity(remaining)} pcs left`}</small>
       </div>
     </section>
   );
@@ -96,8 +96,13 @@ export function ScannerReceivingPage() {
   const startReceiving = useScannerReceivingStart();
   const scanProduct = useScannerReceivingScanProduct();
   const putAway = useScannerReceivingPutAway();
-  const completeReceiving = useScannerReceivingComplete();
+  const closeReceiving = useScannerReceivingClose();
   const session = currentSession.data?.receiving_session;
+  const [closeResult, setCloseResult] = useState<{
+    result?: "exact" | "discrepancy";
+    session: ScannerReceivingSession;
+    message?: string;
+  } | null>(null);
   const isRestoringSession = Boolean(receivingSessionId && currentSession.isLoading);
 
   useEffect(() => {
@@ -204,20 +209,33 @@ export function ScannerReceivingPage() {
     }
   }
 
-  async function handleComplete() {
+  async function handleClosePallet() {
     if (!session) {
       return;
+    }
+    if (session.state === "waiting_for_location") {
+      setErrorMessage("Finish or cancel the pending put-away before closing the pallet.");
+      return;
+    }
+    if (session.summary.remaining_quantity > 0) {
+      const confirmed = window.confirm(
+        `This pallet is incomplete.\n\nExpected: ${formatQuantity(session.summary.expected_quantity)}\nReceived: ${formatQuantity(session.summary.received_quantity)}\nMissing: ${formatQuantity(session.summary.remaining_quantity)}\n\nClosing the pallet will create a discrepancy case.`,
+      );
+      if (!confirmed) {
+        return;
+      }
     }
     setMessage(null);
     setErrorMessage(null);
     try {
-      const response = await completeReceiving.mutateAsync({ receivingSessionId: session.id });
-      setMessage(response.message || "Pallet receiving completed.");
+      const response = await closeReceiving.mutateAsync({ receivingSessionId: session.id });
+      setCloseResult({ result: response.result, session: response.receiving_session, message: response.message });
+      setMessage(response.message || "Pallet closed.");
       setReceivingSessionId(null);
       setPalletCode("");
       await refetchCurrent();
     } catch (error) {
-      setErrorMessage(getErrorMessage(error, "Could not complete pallet receiving."));
+      setErrorMessage(getErrorMessage(error, "Could not close pallet."));
     }
   }
 
@@ -226,6 +244,7 @@ export function ScannerReceivingPage() {
     setPalletCode("");
     setProductCode("");
     setLocationCode("");
+    setCloseResult(null);
     setMessage(null);
     setErrorMessage(null);
   }
@@ -248,7 +267,7 @@ export function ScannerReceivingPage() {
   );
 
   const isBusy =
-    startReceiving.isPending || scanProduct.isPending || putAway.isPending || completeReceiving.isPending || currentSession.isFetching;
+    startReceiving.isPending || scanProduct.isPending || putAway.isPending || closeReceiving.isPending || currentSession.isFetching;
 
   return (
     <>
@@ -281,6 +300,41 @@ export function ScannerReceivingPage() {
             <h2>Restoring pallet receiving</h2>
           </header>
           <p className="scanner-inline-hint">Loading active pallet state from the backend.</p>
+        </section>
+      )}
+
+      {closeResult && (
+        <section className="scanner-contents-header">
+          <span>{closeResult.result === "discrepancy" ? "PALLET CLOSED WITH DISCREPANCY" : "PALLET RECEIVED"}</span>
+          <h1>{closeResult.session.pallet.scan_code}</h1>
+          <p>
+            Expected {formatQuantity(closeResult.session.summary.expected_quantity)} - Received{" "}
+            {formatQuantity(closeResult.session.summary.received_quantity)}
+            {closeResult.session.summary.remaining_quantity > 0
+              ? ` - Missing ${formatQuantity(closeResult.session.summary.remaining_quantity)}`
+              : " - No discrepancies"}
+          </p>
+          {closeResult.session.discrepancy && <small>Discrepancy {closeResult.session.discrepancy.reference}</small>}
+        </section>
+      )}
+
+      {closeResult?.session.discrepancy && (
+        <section className="scanner-compact-list">
+          {closeResult.session.discrepancy.items.map((item) => (
+            <article className="scanner-compact-row scanner-compact-row--active" key={item.id}>
+              <div>
+                <strong>{item.product_sku}</strong>
+                <span>{item.product_name}</span>
+                <small>
+                  Expected {formatQuantity(Number(item.expected_quantity))} - Received {formatQuantity(Number(item.received_quantity))}
+                </small>
+              </div>
+              <div>
+                <strong>{formatQuantity(Number(item.discrepancy_quantity))}</strong>
+                <small>missing</small>
+              </div>
+            </article>
+          ))}
         </section>
       )}
 
@@ -423,11 +477,11 @@ export function ScannerReceivingPage() {
 
           <button
             className="scanner-confirm-button"
-            disabled={session.summary.remaining_quantity > 0 || completeReceiving.isPending}
-            onClick={handleComplete}
+            disabled={closeReceiving.isPending}
+            onClick={handleClosePallet}
             type="button"
           >
-            {completeReceiving.isPending ? "Completing..." : "Complete pallet"}
+            {closeReceiving.isPending ? "Closing..." : "Close pallet"}
           </button>
           <button className="scanner-secondary-button" onClick={handleResetSession} type="button">
             Change pallet

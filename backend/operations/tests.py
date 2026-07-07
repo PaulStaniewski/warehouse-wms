@@ -24,6 +24,8 @@ from operations.models import (
     ScannerCustomerLabel,
     ScannerSession,
     StockMovement,
+    TransferDiscrepancy,
+    TransferDiscrepancyItem,
     TransferPallet,
     TransferPalletItem,
 )
@@ -1029,13 +1031,43 @@ class ScannerReceivingWorkflowTests(APITestCase):
         self.assertEqual(current.data["receiving_session"]["current_item"]["product_sku"], self.product.sku)
         self.assertEqual(current.data["receiving_session"]["pending_quantity"], 2)
 
-    def test_complete_incomplete_pallet_is_rejected(self):
+    def test_incomplete_pallet_closes_with_shortage_discrepancy(self):
+        session_id = self.start_receiving().data["receiving_session"]["id"]
+        self.scan_product(session_id, self.product.sku, "2")
+        self.put_away(session_id)
+        self.scan_product(session_id, self.second_product.sku, "2")
+        self.put_away(session_id)
+
+        response = self.complete(session_id)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["result"], "discrepancy")
+        self.pallet.refresh_from_db()
+        self.assertEqual(self.pallet.status, TransferPallet.Status.CLOSED_WITH_DISCREPANCY)
+        discrepancy = TransferDiscrepancy.objects.get(pallet=self.pallet)
+        self.assertEqual(discrepancy.items.count(), 1)
+        item = discrepancy.items.get()
+        self.assertEqual(item.product, self.product)
+        self.assertEqual(item.discrepancy_type, TransferDiscrepancyItem.DiscrepancyType.SHORTAGE)
+        self.assertEqual(item.expected_quantity, Decimal("3.000"))
+        self.assertEqual(item.received_quantity, Decimal("2.000"))
+        self.assertEqual(item.difference_quantity, Decimal("-1.000"))
+        self.assertEqual(item.discrepancy_quantity, Decimal("1.000"))
+        session = PalletReceivingSession.objects.get(pk=session_id)
+        self.assertEqual(session.status, PalletReceivingSession.Status.COMPLETED)
+
+    def test_multiple_shortage_lines_create_one_case_with_multiple_items(self):
         session_id = self.start_receiving().data["receiving_session"]["id"]
 
         response = self.complete(session_id)
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("All expected pallet items", response.data["detail"])
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        discrepancy = TransferDiscrepancy.objects.get(pallet=self.pallet)
+        self.assertEqual(discrepancy.items.count(), 2)
+        self.assertEqual(
+            set(discrepancy.items.values_list("product__sku", flat=True)),
+            {self.product.sku, self.second_product.sku},
+        )
 
     def test_exactly_received_manifest_can_be_completed(self):
         session_id = self.start_receiving().data["receiving_session"]["id"]
@@ -1054,6 +1086,7 @@ class ScannerReceivingWorkflowTests(APITestCase):
         self.assertEqual(self.pallet.status, TransferPallet.Status.RECEIVED)
         self.assertEqual(self.transfer.status, InterBranchTransfer.Status.RECEIVED)
         self.assertIsNotNone(self.pallet.received_at)
+        self.assertFalse(TransferDiscrepancy.objects.filter(pallet=self.pallet).exists())
 
     def test_completed_pallet_cannot_receive_more_goods(self):
         session_id = self.start_receiving().data["receiving_session"]["id"]
@@ -1066,6 +1099,30 @@ class ScannerReceivingWorkflowTests(APITestCase):
         response = self.start_receiving()
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_repeated_close_does_not_duplicate_discrepancy_cases(self):
+        session_id = self.start_receiving().data["receiving_session"]["id"]
+        self.scan_product(session_id, self.product.sku, "2")
+        self.put_away(session_id)
+        self.complete(session_id)
+
+        response = self.complete(session_id)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(TransferDiscrepancy.objects.filter(pallet=self.pallet).count(), 1)
+        self.assertEqual(TransferDiscrepancyItem.objects.filter(discrepancy__pallet=self.pallet).count(), 2)
+
+    def test_pallet_cannot_close_while_waiting_for_location(self):
+        session_id = self.start_receiving().data["receiving_session"]["id"]
+        self.scan_product(session_id, self.product.sku, "2")
+
+        response = self.complete(session_id)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("pending put-away", response.data["detail"])
+        current = self.client.get(f"/api/scanner/receiving/current/?receiving_session_id={session_id}")
+        self.assertEqual(current.data["receiving_session"]["state"], "waiting_for_location")
+        self.assertEqual(current.data["receiving_session"]["pending_quantity"], 2)
 
     def test_completed_session_is_not_restored_as_active(self):
         session_id = self.start_receiving().data["receiving_session"]["id"]
@@ -1088,15 +1145,52 @@ class ScannerReceivingWorkflowTests(APITestCase):
         self.assertEqual(response.data["code"], "PAL-TEST-001")
         self.assertEqual(len(response.data["items"]), 2)
 
+    def test_contents_resolves_discrepancy_pallet(self):
+        session_id = self.start_receiving().data["receiving_session"]["id"]
+        self.scan_product(session_id, self.product.sku, "2")
+        self.put_away(session_id)
+        self.complete(session_id)
+
+        response = self.client.get("/api/scanner/contents/?code=PAL-TEST-001")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], TransferPallet.Status.CLOSED_WITH_DISCREPANCY)
+        self.assertIn("discrepancy_reference", response.data)
+        shortage_row = next(item for item in response.data["items"] if item["sku"] == self.product.sku)
+        self.assertEqual(shortage_row["missing_quantity"], 1)
+
+    def test_discrepancy_register_and_detail_expose_summary_lines_and_scan_history(self):
+        session_id = self.start_receiving().data["receiving_session"]["id"]
+        self.scan_product(session_id, self.product.sku, "2")
+        self.put_away(session_id)
+        self.complete(session_id)
+        discrepancy = TransferDiscrepancy.objects.get(pallet=self.pallet)
+
+        list_response = self.client.get("/api/transfer-discrepancies/")
+        detail_response = self.client.get(f"/api/transfer-discrepancies/{discrepancy.id}/")
+
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(list_response.data["count"], 1)
+        self.assertEqual(list_response.data["results"][0]["reference"], discrepancy.reference)
+        self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail_response.data["pallet_code"], self.pallet.scan_code)
+        self.assertEqual(detail_response.data["line_count"], 2)
+        product_line = next(item for item in detail_response.data["items"] if item["product_sku"] == self.product.sku)
+        self.assertEqual(product_line["scan_history"][0]["destination_location_code"], self.destination_location.code)
+
     def test_seed_demo_pallet_exists_and_seed_is_idempotent(self):
         output = StringIO()
         call_command("seed_demo_data", stdout=output)
         call_command("seed_demo_data", stdout=output)
 
         pallet = TransferPallet.objects.get(scan_code="PAL-GDA-GDY-001")
+        discrepancy_pallet = TransferPallet.objects.get(scan_code="PAL-GDA-GDY-DISC-001")
         self.assertEqual(pallet.status, TransferPallet.Status.IN_TRANSIT)
+        self.assertEqual(discrepancy_pallet.status, TransferPallet.Status.IN_TRANSIT)
         self.assertEqual(pallet.items.count(), 2)
+        self.assertEqual(discrepancy_pallet.items.count(), 2)
         self.assertFalse(PalletReceivingSession.objects.filter(pallet=pallet).exists())
+        self.assertFalse(TransferDiscrepancy.objects.filter(pallet__in=[pallet, discrepancy_pallet]).exists())
 
 
 class ScannerLookupAndQuickTransferTests(APITestCase):

@@ -12,6 +12,8 @@ from operations.models import (
     ReturnLine,
     RouteRun,
     StockMovement,
+    TransferDiscrepancy,
+    TransferDiscrepancyItem,
 )
 from operations.services import is_route_late, is_route_work_fully_prepared, route_close_result
 
@@ -353,4 +355,83 @@ class AuditLogSerializer(serializers.ModelSerializer):
             "entity_id",
             "message",
             "created_at",
+        ]
+
+
+class TransferDiscrepancyItemSerializer(serializers.ModelSerializer):
+    product_sku = serializers.CharField(source="product.sku", read_only=True)
+    product_name = serializers.CharField(source="product.name", read_only=True)
+    scan_history = serializers.SerializerMethodField()
+
+    def get_scan_history(self, obj: TransferDiscrepancyItem) -> list[dict]:
+        scans = obj.discrepancy.pallet.receiving_scans.select_related("destination_location", "product").filter(
+            product=obj.product
+        )
+        return [
+            {
+                "id": scan.id,
+                "product_sku": scan.product.sku,
+                "destination_location_code": scan.destination_location.code,
+                "quantity": str(scan.quantity),
+                "worker_code": scan.worker_code,
+                "scanned_at": scan.scanned_at.isoformat(),
+            }
+            for scan in scans.order_by("scanned_at", "id")
+        ]
+
+    class Meta:
+        model = TransferDiscrepancyItem
+        fields = [
+            "id",
+            "pallet_item",
+            "product",
+            "product_sku",
+            "product_name",
+            "discrepancy_type",
+            "expected_quantity",
+            "received_quantity",
+            "difference_quantity",
+            "discrepancy_quantity",
+            "scan_history",
+            "created_at",
+            "updated_at",
+        ]
+
+
+class TransferDiscrepancySerializer(serializers.ModelSerializer):
+    pallet_code = serializers.CharField(source="pallet.scan_code", read_only=True)
+    transfer_reference = serializers.CharField(source="transfer.reference", read_only=True)
+    source_branch_code = serializers.CharField(source="transfer.source_branch.code", read_only=True)
+    destination_branch_code = serializers.CharField(source="transfer.destination_branch.code", read_only=True)
+    line_count = serializers.SerializerMethodField()
+    total_discrepancy_quantity = serializers.SerializerMethodField()
+    items = TransferDiscrepancyItemSerializer(many=True, read_only=True)
+
+    def get_line_count(self, obj: TransferDiscrepancy) -> int:
+        return obj.items.count()
+
+    def get_total_discrepancy_quantity(self, obj: TransferDiscrepancy) -> str:
+        total = sum((item.discrepancy_quantity for item in obj.items.all()), Decimal("0"))
+        return str(total)
+
+    class Meta:
+        model = TransferDiscrepancy
+        fields = [
+            "id",
+            "reference",
+            "pallet",
+            "pallet_code",
+            "transfer",
+            "transfer_reference",
+            "source_branch_code",
+            "destination_branch_code",
+            "status",
+            "created_by_worker_code",
+            "notes",
+            "closed_at",
+            "line_count",
+            "total_discrepancy_quantity",
+            "items",
+            "created_at",
+            "updated_at",
         ]

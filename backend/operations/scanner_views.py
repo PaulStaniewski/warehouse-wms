@@ -24,6 +24,8 @@ from operations.models import (
     ScannerCustomerLabel,
     ScannerSession,
     StockMovement,
+    TransferDiscrepancy,
+    TransferDiscrepancyItem,
     TransferPallet,
     TransferPalletItem,
 )
@@ -300,6 +302,34 @@ def _receiving_session_state(session: PalletReceivingSession):
     return "waiting_for_location" if session.current_pallet_item_id and session.pending_quantity else "waiting_for_product"
 
 
+def _discrepancy_item_data(item: TransferDiscrepancyItem):
+    return {
+        "id": item.id,
+        "product": item.product_id,
+        "product_sku": item.product.sku,
+        "product_name": item.product.name,
+        "discrepancy_type": item.discrepancy_type,
+        "expected_quantity": _piece_value(item.expected_quantity),
+        "received_quantity": _piece_value(item.received_quantity),
+        "difference_quantity": _piece_value(item.difference_quantity),
+        "discrepancy_quantity": _piece_value(item.discrepancy_quantity),
+    }
+
+
+def _discrepancy_data(discrepancy: TransferDiscrepancy | None):
+    if discrepancy is None:
+        return None
+    items = list(discrepancy.items.select_related("product").order_by("product__sku"))
+    return {
+        "id": discrepancy.id,
+        "reference": discrepancy.reference,
+        "status": discrepancy.status,
+        "line_count": len(items),
+        "total_discrepancy_quantity": _piece_value(sum((item.discrepancy_quantity for item in items), Decimal("0"))),
+        "items": [_discrepancy_item_data(item) for item in items],
+    }
+
+
 def _receiving_session_data(session: PalletReceivingSession):
     pallet = session.pallet
     transfer = pallet.transfer
@@ -309,6 +339,7 @@ def _receiving_session_data(session: PalletReceivingSession):
     total_expected = sum((item.expected_quantity for item in items), Decimal("0"))
     total_received = sum((item.received_quantity for item in items), Decimal("0"))
     pending_item = session.current_pallet_item
+    discrepancy = getattr(pallet, "discrepancy", None)
     pending = (
         {
             "pallet_item": pending_item.id,
@@ -342,6 +373,7 @@ def _receiving_session_data(session: PalletReceivingSession):
         "current_item": pending,
         "pending_quantity": _piece_value(session.pending_quantity) if session.pending_quantity else None,
         "pending": pending,
+        "discrepancy": _discrepancy_data(discrepancy),
         "manifest": [_pallet_item_data(item) for item in items],
     }
 
@@ -366,6 +398,142 @@ def _get_active_receiving_session_or_response(session_id):
     if session.status != PalletReceivingSession.Status.ACTIVE:
         return None, Response({"detail": "Receiving session is not active."}, status=status.HTTP_400_BAD_REQUEST)
     return session, None
+
+
+def _pallet_is_closed(pallet: TransferPallet):
+    return pallet.status in [
+        TransferPallet.Status.RECEIVED,
+        TransferPallet.Status.CLOSED_WITH_DISCREPANCY,
+        TransferPallet.Status.CANCELLED,
+    ]
+
+
+def _update_transfer_after_pallet_close(transfer: InterBranchTransfer):
+    pallets = list(transfer.pallets.all())
+    if not pallets:
+        return
+    terminal_statuses = {TransferPallet.Status.RECEIVED, TransferPallet.Status.CLOSED_WITH_DISCREPANCY}
+    if all(pallet.status in terminal_statuses for pallet in pallets):
+        transfer.status = (
+            InterBranchTransfer.Status.CLOSED_WITH_DISCREPANCY
+            if any(pallet.status == TransferPallet.Status.CLOSED_WITH_DISCREPANCY for pallet in pallets)
+            else InterBranchTransfer.Status.RECEIVED
+        )
+        transfer.completed_at = timezone.now()
+        transfer.save(update_fields=["status", "completed_at", "updated_at"])
+
+
+def _close_receiving_session(session_id):
+    with transaction.atomic():
+        session, error = _get_active_receiving_session_or_response(session_id)
+        if error is not None:
+            return error
+        session = (
+            PalletReceivingSession.objects.select_for_update(of=("self",))
+            .select_related("pallet", "pallet__transfer")
+            .get(pk=session.id)
+        )
+        pallet = TransferPallet.objects.select_for_update().select_related("transfer").get(pk=session.pallet_id)
+
+        if _pallet_is_closed(pallet):
+            return Response({"detail": "Pallet is already closed."}, status=status.HTTP_400_BAD_REQUEST)
+        if session.current_pallet_item_id or session.pending_quantity:
+            return Response(
+                {"detail": "Finish or cancel the pending put-away before closing the pallet."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        items = list(
+            TransferPalletItem.objects.select_for_update()
+            .select_related("product")
+            .filter(pallet=pallet)
+            .order_by("product__sku")
+        )
+        shortages = []
+        for item in items:
+            difference = item.received_quantity - item.expected_quantity
+            if difference < 0:
+                shortages.append((item, difference))
+
+        now = timezone.now()
+        session.status = PalletReceivingSession.Status.COMPLETED
+        session.completed_at = now
+        session.save(update_fields=["status", "completed_at", "updated_at"])
+
+        discrepancy = None
+        if shortages:
+            pallet.status = TransferPallet.Status.CLOSED_WITH_DISCREPANCY
+            pallet.received_at = now
+            pallet.save(update_fields=["status", "received_at", "updated_at"])
+
+            discrepancy, created = TransferDiscrepancy.objects.get_or_create(
+                pallet=pallet,
+                defaults={
+                    "reference": f"DIS-{pallet.id:08d}",
+                    "transfer": pallet.transfer,
+                    "status": TransferDiscrepancy.Status.OPEN,
+                    "created_by_worker_code": session.worker_code,
+                },
+            )
+            if not created and discrepancy.transfer_id != pallet.transfer_id:
+                discrepancy.transfer = pallet.transfer
+                discrepancy.save(update_fields=["transfer", "updated_at"])
+
+            for item, difference in shortages:
+                TransferDiscrepancyItem.objects.update_or_create(
+                    discrepancy=discrepancy,
+                    pallet_item=item,
+                    defaults={
+                        "product": item.product,
+                        "discrepancy_type": TransferDiscrepancyItem.DiscrepancyType.SHORTAGE,
+                        "expected_quantity": item.expected_quantity,
+                        "received_quantity": item.received_quantity,
+                        "difference_quantity": difference,
+                        "discrepancy_quantity": abs(difference),
+                    },
+                )
+
+            total_missing = sum((abs(difference) for _, difference in shortages), Decimal("0"))
+            AuditLog.objects.create(
+                action_type=AuditLog.ActionType.STATUS_CHANGE,
+                entity_name="TransferPallet",
+                entity_id=str(pallet.id),
+                message=(
+                    f"Worker {session.worker_code or 'scanner'} closed pallet {pallet.scan_code} "
+                    f"with discrepancies: {_piece_value(total_missing)} missing unit across {len(shortages)} line."
+                ),
+            )
+            if created:
+                AuditLog.objects.create(
+                    action_type=AuditLog.ActionType.CREATE,
+                    entity_name="TransferDiscrepancy",
+                    entity_id=str(discrepancy.id),
+                    message=f"Discrepancy {discrepancy.reference} created for pallet {pallet.scan_code}.",
+                )
+        else:
+            pallet.status = TransferPallet.Status.RECEIVED
+            pallet.received_at = now
+            pallet.save(update_fields=["status", "received_at", "updated_at"])
+            AuditLog.objects.create(
+                action_type=AuditLog.ActionType.STATUS_CHANGE,
+                entity_name="TransferPallet",
+                entity_id=str(pallet.id),
+                message=(
+                    f"Worker {session.worker_code or 'scanner'} closed pallet {pallet.scan_code} "
+                    "with exact manifest match."
+                ),
+            )
+
+        _update_transfer_after_pallet_close(pallet.transfer)
+
+    session.refresh_from_db()
+    return Response(
+        {
+            "message": "Pallet closed with discrepancy." if shortages else "Pallet received.",
+            "result": "discrepancy" if shortages else "exact",
+            "receiving_session": _receiving_session_data(session),
+        }
+    )
 
 
 def _get_active_cart_work_or_response(cart_work_session_id):
@@ -1398,10 +1566,8 @@ class ScannerReceivingStartView(APIView):
             )
             if pallet is None:
                 return Response({"detail": "Pallet not found."}, status=status.HTTP_404_NOT_FOUND)
-            if pallet.status == TransferPallet.Status.RECEIVED:
-                return Response({"detail": "Pallet is already received."}, status=status.HTTP_400_BAD_REQUEST)
-            if pallet.status == TransferPallet.Status.CANCELLED:
-                return Response({"detail": "Pallet is cancelled."}, status=status.HTTP_400_BAD_REQUEST)
+            if _pallet_is_closed(pallet):
+                return Response({"detail": "Pallet is already closed."}, status=status.HTTP_400_BAD_REQUEST)
 
             session = PalletReceivingSession.objects.select_for_update().filter(
                 pallet=pallet,
@@ -1497,10 +1663,8 @@ class ScannerReceivingScanProductView(APIView):
                 return error
             session = PalletReceivingSession.objects.select_for_update().get(pk=session.id)
             pallet = TransferPallet.objects.select_for_update().get(pk=session.pallet_id)
-            if pallet.status == TransferPallet.Status.RECEIVED:
-                return Response({"detail": "Pallet is already received."}, status=status.HTTP_400_BAD_REQUEST)
-            if pallet.status == TransferPallet.Status.CANCELLED:
-                return Response({"detail": "Pallet is cancelled."}, status=status.HTTP_400_BAD_REQUEST)
+            if _pallet_is_closed(pallet):
+                return Response({"detail": "Pallet is already closed."}, status=status.HTTP_400_BAD_REQUEST)
 
             item = (
                 TransferPalletItem.objects.select_for_update()
@@ -1561,10 +1725,8 @@ class ScannerReceivingPutAwayView(APIView):
                 )
 
             pallet = TransferPallet.objects.select_for_update().get(pk=session.pallet_id)
-            if pallet.status == TransferPallet.Status.RECEIVED:
-                return Response({"detail": "Pallet is already received."}, status=status.HTTP_400_BAD_REQUEST)
-            if pallet.status == TransferPallet.Status.CANCELLED:
-                return Response({"detail": "Pallet is cancelled."}, status=status.HTTP_400_BAD_REQUEST)
+            if _pallet_is_closed(pallet):
+                return Response({"detail": "Pallet is already closed."}, status=status.HTTP_400_BAD_REQUEST)
 
             location = Location.objects.select_related("branch").filter(code__iexact=location_code).first()
             if location is None:
@@ -1638,55 +1800,12 @@ class ScannerReceivingPutAwayView(APIView):
 
 class ScannerReceivingCompleteView(APIView):
     def post(self, request):
-        with transaction.atomic():
-            session, error = _get_active_receiving_session_or_response(request.data.get("receiving_session_id"))
-            if error is not None:
-                return error
-            session = PalletReceivingSession.objects.select_for_update().select_related("pallet", "pallet__transfer").get(
-                pk=session.id
-            )
-            pallet = TransferPallet.objects.select_for_update().select_related("transfer").get(pk=session.pallet_id)
-            if pallet.status == TransferPallet.Status.RECEIVED:
-                return Response({"detail": "Pallet is already received."}, status=status.HTTP_400_BAD_REQUEST)
-            if session.current_pallet_item_id or session.pending_quantity:
-                return Response(
-                    {"detail": "Put away the confirmed product before completing receiving."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+        return _close_receiving_session(request.data.get("receiving_session_id"))
 
-            incomplete_exists = TransferPalletItem.objects.filter(pallet=pallet).exclude(
-                received_quantity=F("expected_quantity")
-            ).exists()
-            if incomplete_exists:
-                return Response(
-                    {"detail": "All expected pallet items must be received before completion."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
 
-            now = timezone.now()
-            session.status = PalletReceivingSession.Status.COMPLETED
-            session.completed_at = now
-            session.save(update_fields=["status", "completed_at", "updated_at"])
-
-            pallet.status = TransferPallet.Status.RECEIVED
-            pallet.received_at = now
-            pallet.save(update_fields=["status", "received_at", "updated_at"])
-
-            transfer = InterBranchTransfer.objects.select_for_update().get(pk=pallet.transfer_id)
-            if not transfer.pallets.exclude(status=TransferPallet.Status.RECEIVED).exists():
-                transfer.status = InterBranchTransfer.Status.RECEIVED
-                transfer.completed_at = now
-                transfer.save(update_fields=["status", "completed_at", "updated_at"])
-
-            AuditLog.objects.create(
-                action_type=AuditLog.ActionType.STATUS_CHANGE,
-                entity_name="TransferPallet",
-                entity_id=str(pallet.id),
-                message=f"Pallet {pallet.scan_code} receiving completed.",
-            )
-
-        session.refresh_from_db()
-        return Response({"message": "Pallet receiving completed.", "receiving_session": _receiving_session_data(session)})
+class ScannerReceivingCloseView(APIView):
+    def post(self, request):
+        return _close_receiving_session(request.data.get("receiving_session_id"))
 
 
 class ScannerQuickTransferView(APIView):

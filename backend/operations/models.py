@@ -505,6 +505,7 @@ class InterBranchTransfer(TimestampedModel):
         IN_TRANSIT = "in_transit", "In transit"
         RECEIVING = "receiving", "Receiving"
         RECEIVED = "received", "Received"
+        CLOSED_WITH_DISCREPANCY = "closed_with_discrepancy", "Closed with discrepancy"
         CANCELLED = "cancelled", "Cancelled"
 
     reference = models.CharField(max_length=128, unique=True)
@@ -531,6 +532,7 @@ class TransferPallet(TimestampedModel):
         IN_TRANSIT = "in_transit", "In transit"
         RECEIVING = "receiving", "Receiving"
         RECEIVED = "received", "Received"
+        CLOSED_WITH_DISCREPANCY = "closed_with_discrepancy", "Closed with discrepancy"
         CANCELLED = "cancelled", "Cancelled"
 
     transfer = models.ForeignKey(InterBranchTransfer, on_delete=models.PROTECT, related_name="pallets")
@@ -631,6 +633,64 @@ class PalletReceivingScan(TimestampedModel):
 
     def __str__(self) -> str:
         return f"{self.pallet.scan_code} / {self.product.sku} / {self.quantity}"
+
+
+class TransferDiscrepancy(TimestampedModel):
+    class Status(models.TextChoices):
+        OPEN = "open", "Open"
+        INVESTIGATING = "investigating", "Investigating"
+        RESOLVED = "resolved", "Resolved"
+        CONFIRMED_SHORTAGE = "confirmed_shortage", "Confirmed shortage"
+
+    reference = models.CharField(max_length=64, unique=True)
+    pallet = models.OneToOneField(TransferPallet, on_delete=models.PROTECT, related_name="discrepancy")
+    transfer = models.ForeignKey(InterBranchTransfer, on_delete=models.PROTECT, related_name="discrepancies")
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.OPEN)
+    created_by_worker_code = models.CharField(max_length=64, blank=True)
+    notes = models.TextField(blank=True)
+    closed_at = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["reference"]),
+            models.Index(fields=["status"]),
+            models.Index(fields=["created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return self.reference
+
+
+class TransferDiscrepancyItem(TimestampedModel):
+    class DiscrepancyType(models.TextChoices):
+        SHORTAGE = "shortage", "Shortage"
+        SURPLUS = "surplus", "Surplus"
+        WRONG_LOCATION = "wrong_location", "Wrong location"
+
+    discrepancy = models.ForeignKey(TransferDiscrepancy, on_delete=models.CASCADE, related_name="items")
+    pallet_item = models.ForeignKey(TransferPalletItem, on_delete=models.PROTECT, related_name="discrepancy_items")
+    product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name="transfer_discrepancy_items")
+    discrepancy_type = models.CharField(max_length=32, choices=DiscrepancyType.choices)
+    expected_quantity = models.DecimalField(max_digits=12, decimal_places=3)
+    received_quantity = models.DecimalField(max_digits=12, decimal_places=3)
+    difference_quantity = models.DecimalField(max_digits=12, decimal_places=3)
+    discrepancy_quantity = models.DecimalField(max_digits=12, decimal_places=3)
+
+    class Meta:
+        ordering = ["product__sku"]
+        constraints = [
+            models.UniqueConstraint(fields=["discrepancy", "pallet_item"], name="unique_discrepancy_item_per_pallet_item"),
+            models.CheckConstraint(check=models.Q(discrepancy_quantity__gt=0), name="transfer_discrepancy_quantity_positive"),
+        ]
+        indexes = [
+            models.Index(fields=["discrepancy"]),
+            models.Index(fields=["product"]),
+            models.Index(fields=["discrepancy_type"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.discrepancy.reference} / {self.product.sku}"
 
 
 class StockMovement(TimestampedModel):

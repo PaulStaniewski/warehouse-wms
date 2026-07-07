@@ -24,6 +24,8 @@ from operations.models import (
     ScannerCustomerLabel,
     ScannerSession,
     StockMovement,
+    TransferDiscrepancy,
+    TransferDiscrepancyItem,
     TransferPallet,
     TransferPalletItem,
 )
@@ -68,8 +70,8 @@ class Command(BaseCommand):
 
     def cleanup_demo_workflow(self):
         demo_cart_codes = ["WOZEK-01", "WOZEK-02", "WOZEK-03"]
-        demo_transfer_refs = ["IBT-GDA-GDY-001"]
-        demo_pallet_codes = ["PAL-GDA-GDY-001"]
+        demo_transfer_refs = ["IBT-GDA-GDY-001", "IBT-GDA-GDY-DISC-001"]
+        demo_pallet_codes = ["PAL-GDA-GDY-001", "PAL-GDA-GDY-DISC-001"]
         demo_order_refs = [
             "AX-ORDER-0001",
             "AX-ORDER-0002",
@@ -103,6 +105,9 @@ class Command(BaseCommand):
         demo_jobs.delete()
 
         demo_pallets = TransferPallet.objects.filter(scan_code__in=demo_pallet_codes)
+        demo_discrepancies = TransferDiscrepancy.objects.filter(pallet__in=demo_pallets)
+        TransferDiscrepancyItem.objects.filter(discrepancy__in=demo_discrepancies).delete()
+        demo_discrepancies.delete()
         PalletReceivingScan.objects.filter(pallet__in=demo_pallets).delete()
         PalletReceivingSession.objects.filter(pallet__in=demo_pallets).delete()
         TransferPalletItem.objects.filter(pallet__in=demo_pallets).delete()
@@ -453,42 +458,52 @@ class Command(BaseCommand):
         return carts
 
     def create_transfer_pallets(self, branches, products):
-        transfer, _ = InterBranchTransfer.objects.update_or_create(
-            reference="IBT-GDA-GDY-001",
-            defaults={
-                "source_branch": branches["GDA"],
-                "destination_branch": branches["GDY"],
-                "status": InterBranchTransfer.Status.IN_TRANSIT,
-                "released_at": timezone.now(),
-                "completed_at": None,
-            },
-        )
-        pallet, _ = TransferPallet.objects.update_or_create(
-            scan_code="PAL-GDA-GDY-001",
-            defaults={
-                "transfer": transfer,
-                "status": TransferPallet.Status.IN_TRANSIT,
-                "released_at": timezone.now(),
-                "receiving_started_at": None,
-                "received_at": None,
-            },
-        )
-
-        manifest_data = [
-            ("FILTR-001", "3"),
-            ("OLEJ-001", "2"),
+        pallet_specs = [
+            (
+                "IBT-GDA-GDY-001",
+                "PAL-GDA-GDY-001",
+                [("FILTR-001", "3"), ("OLEJ-001", "2")],
+            ),
+            (
+                "IBT-GDA-GDY-DISC-001",
+                "PAL-GDA-GDY-DISC-001",
+                [("FILTR-001", "5"), ("OLEJ-001", "2")],
+            ),
         ]
-        for sku, expected_quantity in manifest_data:
-            TransferPalletItem.objects.update_or_create(
-                pallet=pallet,
-                product=products[sku],
+        pallets = {}
+        for transfer_reference, pallet_code, manifest_data in pallet_specs:
+            transfer, _ = InterBranchTransfer.objects.update_or_create(
+                reference=transfer_reference,
                 defaults={
-                    "expected_quantity": Decimal(expected_quantity),
-                    "received_quantity": Decimal("0"),
+                    "source_branch": branches["GDA"],
+                    "destination_branch": branches["GDY"],
+                    "status": InterBranchTransfer.Status.IN_TRANSIT,
+                    "released_at": timezone.now(),
+                    "completed_at": None,
                 },
             )
+            pallet, _ = TransferPallet.objects.update_or_create(
+                scan_code=pallet_code,
+                defaults={
+                    "transfer": transfer,
+                    "status": TransferPallet.Status.IN_TRANSIT,
+                    "released_at": timezone.now(),
+                    "receiving_started_at": None,
+                    "received_at": None,
+                },
+            )
+            for sku, expected_quantity in manifest_data:
+                TransferPalletItem.objects.update_or_create(
+                    pallet=pallet,
+                    product=products[sku],
+                    defaults={
+                        "expected_quantity": Decimal(expected_quantity),
+                        "received_quantity": Decimal("0"),
+                    },
+                )
+            pallets[pallet_code] = pallet
 
-        return {"PAL-GDA-GDY-001": pallet}
+        return pallets
 
     def create_stock_movements(self, branches, locations, products, inventory_items):
         movement_data = [

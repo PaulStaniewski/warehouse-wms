@@ -10,6 +10,7 @@ from operations.viewsets import (
     ReturnLineViewSet,
     RouteRunViewSet,
     StockMovementViewSet,
+    TransferDiscrepancyViewSet,
 )
 from warehouse.viewsets import BranchViewSet, InventoryItemViewSet, LocationViewSet, ProductViewSet
 
@@ -28,3 +29,4 @@ router.register("return-lines", ReturnLineViewSet, basename="return-line")
 router.register("picking-tasks", PickingTaskViewSet, basename="picking-task")
 router.register("stock-movements", StockMovementViewSet, basename="stock-movement")
 router.register("audit-logs", AuditLogViewSet, basename="audit-log")
+router.register("transfer-discrepancies", TransferDiscrepancyViewSet, basename="transfer-discrepancy")

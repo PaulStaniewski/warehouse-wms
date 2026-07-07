@@ -28,6 +28,7 @@ import type {
   ScannerPrintLabelResponse,
   ScannerSessionResponse,
   ScannerTaskStartResponse,
+  TransferDiscrepancy,
 } from "../types/api";
 
 
@@ -550,6 +551,35 @@ export function useScannerReceivingComplete() {
       const response = await apiClient.post<ScannerReceivingResponse>("/scanner/receiving/complete/", {
         receiving_session_id: receivingSessionId,
       });
+      return response.data;
+    },
+  });
+}
+
+export function useScannerReceivingClose() {
+  return useMutation({
+    mutationFn: async ({ receivingSessionId }: { receivingSessionId: number }) => {
+      const response = await apiClient.post<ScannerReceivingResponse>("/scanner/receiving/close/", {
+        receiving_session_id: receivingSessionId,
+      });
+      return response.data;
+    },
+  });
+}
+
+export function useTransferDiscrepancies() {
+  return useQuery({
+    queryKey: ["transfer-discrepancies"],
+    queryFn: () => getList<TransferDiscrepancy>("/transfer-discrepancies/"),
+  });
+}
+
+export function useTransferDiscrepancy(id?: string) {
+  return useQuery({
+    enabled: Boolean(id),
+    queryKey: ["transfer-discrepancy", id],
+    queryFn: async () => {
+      const response = await apiClient.get<TransferDiscrepancy>(`/transfer-discrepancies/${id}/`);
       return response.data;
     },
   });

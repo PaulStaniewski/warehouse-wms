@@ -5,6 +5,8 @@ import { AppLayout } from "./layout/AppLayout";
 import { ArchiveEventsPage } from "./pages/ArchiveEventsPage";
 import { CurrentEventsPage } from "./pages/CurrentEventsPage";
 import { DashboardPage } from "./pages/DashboardPage";
+import { DiscrepanciesPage } from "./pages/DiscrepanciesPage";
+import { DiscrepancyDetailPage } from "./pages/DiscrepancyDetailPage";
 import { InventoryPage } from "./pages/InventoryPage";
 import { LocationsPage } from "./pages/LocationsPage";
 import { OrdersPage } from "./pages/OrdersPage";
@@ -35,6 +37,8 @@ function App() {
         <Route path="wms/locations" element={<LocationsPage />} />
         <Route path="wms/routes-monitor" element={<RouteMonitorPage />} />
         <Route path="wms/routes/archive" element={<RouteArchivePage />} />
+        <Route path="wms/discrepancies" element={<DiscrepanciesPage />} />
+        <Route path="wms/discrepancies/:id" element={<DiscrepancyDetailPage />} />
         <Route path="wms/route-runs/:id/documents" element={<RouteDocumentsPage />} />
         <Route path="wms/events/current" element={<CurrentEventsPage />} />
         <Route path="wms/events/archive" element={<ArchiveEventsPage />} />

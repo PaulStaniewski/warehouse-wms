@@ -272,6 +272,8 @@ export type ScannerContentsItem = {
   picked_quantity?: number;
   prepared_quantity?: number;
   remaining_quantity?: number;
+  missing_quantity?: number;
+  discrepancy_type?: string | null;
   order_reference?: string;
   customer_name?: string;
 };
@@ -282,6 +284,7 @@ export type ScannerContentsResponse = {
   title: string;
   status: string;
   description: string;
+  discrepancy_reference?: string | null;
   items: ScannerContentsItem[];
 };
 
@@ -336,12 +339,78 @@ export type ScannerReceivingSession = {
     quantity: number;
   } | null;
   pending_quantity: number | null;
+  discrepancy: TransferDiscrepancySummary | null;
   manifest: TransferPalletManifestItem[];
 };
 
 export type ScannerReceivingResponse = {
   message?: string;
+  result?: "exact" | "discrepancy";
   receiving_session: ScannerReceivingSession;
+};
+
+export type TransferDiscrepancySummary = {
+  id: number;
+  reference: string;
+  status: string;
+  line_count: number;
+  total_discrepancy_quantity: number;
+  items: TransferDiscrepancySummaryItem[];
+};
+
+export type TransferDiscrepancySummaryItem = {
+  id: number;
+  product: number;
+  product_sku: string;
+  product_name: string;
+  discrepancy_type: string;
+  expected_quantity: number;
+  received_quantity: number;
+  difference_quantity: number;
+  discrepancy_quantity: number;
+};
+
+export type TransferDiscrepancyScanHistory = {
+  id: number;
+  product_sku: string;
+  destination_location_code: string;
+  quantity: string;
+  worker_code: string;
+  scanned_at: string;
+};
+
+export type TransferDiscrepancyItem = {
+  id: number;
+  pallet_item: number;
+  product: number;
+  product_sku: string;
+  product_name: string;
+  discrepancy_type: string;
+  expected_quantity: string;
+  received_quantity: string;
+  difference_quantity: string;
+  discrepancy_quantity: string;
+  scan_history: TransferDiscrepancyScanHistory[];
+};
+
+export type TransferDiscrepancy = {
+  id: number;
+  reference: string;
+  pallet: number;
+  pallet_code: string;
+  transfer: number;
+  transfer_reference: string;
+  source_branch_code: string;
+  destination_branch_code: string;
+  status: string;
+  created_by_worker_code: string;
+  notes: string;
+  closed_at: string | null;
+  line_count: number;
+  total_discrepancy_quantity: string;
+  items: TransferDiscrepancyItem[];
+  created_at: string;
+  updated_at: string;
 };
 
 export type ScannerProforma = {

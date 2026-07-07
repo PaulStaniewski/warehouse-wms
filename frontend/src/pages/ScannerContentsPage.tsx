@@ -60,6 +60,7 @@ function renderItemDetail(item: ScannerContentsItem, objectType: ScannerContents
       <small>
         Expected {formatQuantity(item.expected_quantity ?? item.quantity)} · Received {formatQuantity(item.received_quantity)} · Remaining{" "}
         {formatQuantity(item.remaining_quantity)}
+        {item.missing_quantity ? ` · Missing ${formatQuantity(item.missing_quantity)}` : ""}
       </small>
     );
   }

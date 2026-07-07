@@ -19,6 +19,7 @@ from operations.models import (
     ReturnLine,
     RouteRun,
     StockMovement,
+    TransferDiscrepancy,
 )
 from operations.serializers import (
     AuditLogSerializer,
@@ -30,6 +31,7 @@ from operations.serializers import (
     ReturnLineSerializer,
     RouteRunSerializer,
     StockMovementSerializer,
+    TransferDiscrepancySerializer,
 )
 from operations.services import is_route_late, is_route_work_fully_prepared, recalculate_route_readiness
 from warehouse.models import InventoryItem
@@ -386,3 +388,16 @@ class AuditLogViewSet(ReadOnlyModelViewSet):
 
         serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data)
+
+
+class TransferDiscrepancyViewSet(ReadOnlyModelViewSet):
+    queryset = TransferDiscrepancy.objects.select_related(
+        "pallet",
+        "transfer",
+        "transfer__source_branch",
+        "transfer__destination_branch",
+    ).prefetch_related("items", "items__product")
+    serializer_class = TransferDiscrepancySerializer
+    filterset_fields = ["status", "pallet", "transfer"]
+    search_fields = ["reference", "pallet__scan_code", "transfer__reference"]
+    ordering_fields = ["reference", "status", "created_at", "updated_at"]
