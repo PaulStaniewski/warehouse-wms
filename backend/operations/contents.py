@@ -1,7 +1,7 @@
 from decimal import Decimal
 from dataclasses import dataclass
 
-from operations.models import CartPickedItem, CartWorkSession, ScannerCart, ScannerCustomerLabel
+from operations.models import CartPickedItem, CartWorkSession, ScannerCart, ScannerCustomerLabel, TransferPallet
 from warehouse.models import InventoryItem, Location
 
 
@@ -148,6 +148,36 @@ def _customer_label_contents(label: ScannerCustomerLabel):
     )
 
 
+def _pallet_contents(pallet: TransferPallet):
+    items = []
+    for item in pallet.items.select_related("product").order_by("product__sku"):
+        remaining = item.expected_quantity - item.received_quantity
+        items.append(
+            {
+                "product_id": item.product_id,
+                "sku": item.product.sku,
+                "name": item.product.name,
+                "quantity": piece_quantity(item.expected_quantity),
+                "expected_quantity": piece_quantity(item.expected_quantity),
+                "received_quantity": piece_quantity(item.received_quantity),
+                "remaining_quantity": piece_quantity(remaining),
+            }
+        )
+
+    transfer = pallet.transfer
+    return ContentsMatch(
+        "pallet",
+        {
+            "object_type": "pallet",
+            "code": pallet.scan_code,
+            "title": f"Pallet {pallet.scan_code}",
+            "status": pallet.status,
+            "description": f"{transfer.source_branch.code} -> {transfer.destination_branch.code} / {transfer.reference}",
+            "items": items,
+        },
+    )
+
+
 def _find_label_by_code(code: str):
     return ScannerCustomerLabel.objects.select_related("session", "order").filter(scan_code__iexact=code.strip()).first()
 
@@ -169,6 +199,14 @@ def resolve_contents_code(code: str):
     label = _find_label_by_code(code)
     if label:
         matches.append(_customer_label_contents(label))
+
+    pallet = TransferPallet.objects.select_related(
+        "transfer",
+        "transfer__source_branch",
+        "transfer__destination_branch",
+    ).filter(scan_code__iexact=code).first()
+    if pallet:
+        matches.append(_pallet_contents(pallet))
 
     if len(matches) > 1:
         raise ContentsConflict(

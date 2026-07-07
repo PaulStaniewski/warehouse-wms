@@ -5,8 +5,11 @@ from operations.models import (
     CartPickedItem,
     CartWorkSession,
     DeliveryRoute,
+    InterBranchTransfer,
     Order,
     OrderLine,
+    PalletReceivingScan,
+    PalletReceivingSession,
     PickingJob,
     PickingJobTask,
     PickingTask,
@@ -17,6 +20,8 @@ from operations.models import (
     ScannerCustomerLabel,
     ScannerSession,
     StockMovement,
+    TransferPallet,
+    TransferPalletItem,
 )
 
 
@@ -164,6 +169,40 @@ class ScannerCustomerLabelAdmin(admin.ModelAdmin):
     list_display = ["scan_code", "session", "order", "printer_code", "printed_at"]
     list_filter = ["printer_code"]
     search_fields = ["scan_code", "order__external_reference", "session__cart__code"]
+
+
+@admin.register(InterBranchTransfer)
+class InterBranchTransferAdmin(admin.ModelAdmin):
+    list_display = ["reference", "source_branch", "destination_branch", "status", "released_at", "completed_at"]
+    list_filter = ["status", "source_branch", "destination_branch"]
+    search_fields = ["reference"]
+
+
+@admin.register(TransferPallet)
+class TransferPalletAdmin(admin.ModelAdmin):
+    list_display = ["scan_code", "transfer", "status", "released_at", "receiving_started_at", "received_at"]
+    list_filter = ["status", "transfer__source_branch", "transfer__destination_branch"]
+    search_fields = ["scan_code", "transfer__reference"]
+
+
+@admin.register(TransferPalletItem)
+class TransferPalletItemAdmin(admin.ModelAdmin):
+    list_display = ["pallet", "product", "expected_quantity", "received_quantity"]
+    search_fields = ["pallet__scan_code", "product__sku", "product__name"]
+
+
+@admin.register(PalletReceivingSession)
+class PalletReceivingSessionAdmin(admin.ModelAdmin):
+    list_display = ["pallet", "status", "worker_code", "current_pallet_item", "pending_quantity", "started_at", "completed_at"]
+    list_filter = ["status"]
+    search_fields = ["pallet__scan_code", "worker_code"]
+
+
+@admin.register(PalletReceivingScan)
+class PalletReceivingScanAdmin(admin.ModelAdmin):
+    list_display = ["pallet", "product", "destination_location", "quantity", "worker_code", "scanned_at"]
+    list_filter = ["pallet__transfer__destination_branch", "product", "destination_location"]
+    search_fields = ["pallet__scan_code", "product__sku", "destination_location__code"]
 
 
 @admin.register(StockMovement)

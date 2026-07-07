@@ -267,6 +267,8 @@ export type ScannerContentsItem = {
   name: string;
   quantity: number;
   reserved_quantity?: number;
+  expected_quantity?: number;
+  received_quantity?: number;
   picked_quantity?: number;
   prepared_quantity?: number;
   remaining_quantity?: number;
@@ -275,7 +277,7 @@ export type ScannerContentsItem = {
 };
 
 export type ScannerContentsResponse = {
-  object_type: "location" | "cart" | "customer_label";
+  object_type: "location" | "cart" | "customer_label" | "pallet";
   code: string;
   title: string;
   status: string;
@@ -288,6 +290,58 @@ export type ScannerQuickTransferResponse = {
   movement_id: number;
   source_inventory: ScannerInventoryPosition;
   target_inventory: ScannerInventoryPosition;
+};
+
+export type TransferPalletManifestItem = {
+  id: number;
+  product: number;
+  product_sku: string;
+  product_barcode: string | null;
+  product_name: string;
+  expected_quantity: number;
+  received_quantity: number;
+  remaining_quantity: number;
+};
+
+export type ScannerReceivingSession = {
+  id: number;
+  session_id: number;
+  status: string;
+  worker_code: string;
+  state: "waiting_for_product" | "waiting_for_location";
+  pallet: {
+    id: number;
+    scan_code: string;
+    status: string;
+    source_branch_code: string;
+    destination_branch_code: string;
+    transfer_reference: string;
+  };
+  summary: {
+    lines: number;
+    expected_quantity: number;
+    received_quantity: number;
+    remaining_quantity: number;
+  };
+  pending: {
+    pallet_item: number;
+    product_sku: string;
+    product_name: string;
+    quantity: number;
+  } | null;
+  current_item: {
+    pallet_item: number;
+    product_sku: string;
+    product_name: string;
+    quantity: number;
+  } | null;
+  pending_quantity: number | null;
+  manifest: TransferPalletManifestItem[];
+};
+
+export type ScannerReceivingResponse = {
+  message?: string;
+  receiving_session: ScannerReceivingSession;
 };
 
 export type ScannerProforma = {

@@ -17,6 +17,7 @@ import type {
   ScannerPickingScanResponse,
   ScannerProductLookupResponse,
   ScannerQuickTransferResponse,
+  ScannerReceivingResponse,
   ScannerCartItemsResponse,
   ScannerCartWorkResponse,
   ScannerCreateJobsResponse,
@@ -472,6 +473,82 @@ export function useScannerQuickTransfer() {
         quantity,
         source_location_code: sourceLocationCode,
         target_location_code: targetLocationCode,
+      });
+      return response.data;
+    },
+  });
+}
+
+export function useScannerReceivingCurrent(receivingSessionId?: number | null) {
+  return useQuery({
+    enabled: Boolean(receivingSessionId),
+    refetchInterval: 4000,
+    queryKey: ["scanner-receiving-current", receivingSessionId ?? "none"],
+    queryFn: async () => {
+      const response = await apiClient.get<ScannerReceivingResponse>(
+        `/scanner/receiving/current/?receiving_session_id=${receivingSessionId}`,
+      );
+      return response.data;
+    },
+  });
+}
+
+export function useScannerReceivingStart() {
+  return useMutation({
+    mutationFn: async ({ palletCode, workerCode }: { palletCode: string; workerCode: string }) => {
+      const response = await apiClient.post<ScannerReceivingResponse>("/scanner/receiving/start/", {
+        pallet_code: palletCode,
+        worker_code: workerCode,
+      });
+      return response.data;
+    },
+  });
+}
+
+export function useScannerReceivingScanProduct() {
+  return useMutation({
+    mutationFn: async ({
+      productCode,
+      quantity,
+      receivingSessionId,
+    }: {
+      productCode: string;
+      quantity: string;
+      receivingSessionId: number;
+    }) => {
+      const response = await apiClient.post<ScannerReceivingResponse>("/scanner/receiving/scan-product/", {
+        product_code: productCode,
+        quantity,
+        receiving_session_id: receivingSessionId,
+      });
+      return response.data;
+    },
+  });
+}
+
+export function useScannerReceivingPutAway() {
+  return useMutation({
+    mutationFn: async ({
+      locationCode,
+      receivingSessionId,
+    }: {
+      locationCode: string;
+      receivingSessionId: number;
+    }) => {
+      const response = await apiClient.post<ScannerReceivingResponse>("/scanner/receiving/put-away/", {
+        location_code: locationCode,
+        receiving_session_id: receivingSessionId,
+      });
+      return response.data;
+    },
+  });
+}
+
+export function useScannerReceivingComplete() {
+  return useMutation({
+    mutationFn: async ({ receivingSessionId }: { receivingSessionId: number }) => {
+      const response = await apiClient.post<ScannerReceivingResponse>("/scanner/receiving/complete/", {
+        receiving_session_id: receivingSessionId,
       });
       return response.data;
     },

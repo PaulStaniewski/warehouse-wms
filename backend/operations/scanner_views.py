@@ -12,7 +12,10 @@ from operations.models import (
     AuditLog,
     CartPickedItem,
     CartWorkSession,
+    InterBranchTransfer,
     Order,
+    PalletReceivingScan,
+    PalletReceivingSession,
     PickingJob,
     PickingJobTask,
     PickingTask,
@@ -21,6 +24,8 @@ from operations.models import (
     ScannerCustomerLabel,
     ScannerSession,
     StockMovement,
+    TransferPallet,
+    TransferPalletItem,
 )
 from operations.contents import ContentsLookupError, resolve_contents_code
 from operations.serializers import PickingTaskSerializer, RouteRunSerializer
@@ -270,6 +275,97 @@ def _picking_state(cart_work_session: CartWorkSession):
             else "waiting_for_location"
         )
     return state, confirmed_code, instruction
+
+
+def _piece_value(value):
+    value = Decimal(value)
+    return int(value) if value == value.to_integral_value() else float(value)
+
+
+def _pallet_item_data(item: TransferPalletItem):
+    remaining = item.expected_quantity - item.received_quantity
+    return {
+        "id": item.id,
+        "product": item.product_id,
+        "product_sku": item.product.sku,
+        "product_barcode": item.product.barcode,
+        "product_name": item.product.name,
+        "expected_quantity": _piece_value(item.expected_quantity),
+        "received_quantity": _piece_value(item.received_quantity),
+        "remaining_quantity": _piece_value(remaining),
+    }
+
+
+def _receiving_session_state(session: PalletReceivingSession):
+    return "waiting_for_location" if session.current_pallet_item_id and session.pending_quantity else "waiting_for_product"
+
+
+def _receiving_session_data(session: PalletReceivingSession):
+    pallet = session.pallet
+    transfer = pallet.transfer
+    items = list(
+        pallet.items.select_related("product").order_by("product__sku")
+    )
+    total_expected = sum((item.expected_quantity for item in items), Decimal("0"))
+    total_received = sum((item.received_quantity for item in items), Decimal("0"))
+    pending_item = session.current_pallet_item
+    pending = (
+        {
+            "pallet_item": pending_item.id,
+            "product_sku": pending_item.product.sku,
+            "product_name": pending_item.product.name,
+            "quantity": _piece_value(session.pending_quantity),
+        }
+        if pending_item and session.pending_quantity
+        else None
+    )
+    return {
+        "id": session.id,
+        "status": session.status,
+        "worker_code": session.worker_code,
+        "state": _receiving_session_state(session),
+        "session_id": session.id,
+        "pallet": {
+            "id": pallet.id,
+            "scan_code": pallet.scan_code,
+            "status": pallet.status,
+            "source_branch_code": transfer.source_branch.code,
+            "destination_branch_code": transfer.destination_branch.code,
+            "transfer_reference": transfer.reference,
+        },
+        "summary": {
+            "lines": len(items),
+            "expected_quantity": _piece_value(total_expected),
+            "received_quantity": _piece_value(total_received),
+            "remaining_quantity": _piece_value(total_expected - total_received),
+        },
+        "current_item": pending,
+        "pending_quantity": _piece_value(session.pending_quantity) if session.pending_quantity else None,
+        "pending": pending,
+        "manifest": [_pallet_item_data(item) for item in items],
+    }
+
+
+def _get_active_receiving_session_or_response(session_id):
+    if not session_id:
+        return None, Response({"detail": "receiving_session_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+    session = (
+        PalletReceivingSession.objects.select_related(
+            "pallet",
+            "pallet__transfer",
+            "pallet__transfer__source_branch",
+            "pallet__transfer__destination_branch",
+            "current_pallet_item",
+            "current_pallet_item__product",
+        )
+        .filter(pk=session_id)
+        .first()
+    )
+    if session is None:
+        return None, Response({"detail": "Receiving session not found."}, status=status.HTTP_404_NOT_FOUND)
+    if session.status != PalletReceivingSession.Status.ACTIVE:
+        return None, Response({"detail": "Receiving session is not active."}, status=status.HTTP_400_BAD_REQUEST)
+    return session, None
 
 
 def _get_active_cart_work_or_response(cart_work_session_id):
@@ -1284,6 +1380,313 @@ class ScannerContentsView(APIView):
             if error.matched_object_types:
                 payload["matched_object_types"] = error.matched_object_types
             return Response(payload, status=error.status_code)
+
+
+class ScannerReceivingStartView(APIView):
+    def post(self, request):
+        pallet_code = str(request.data.get("pallet_code", "")).strip()
+        worker_code = str(request.data.get("worker_code", "")).strip() or "DEMO"
+        if not pallet_code:
+            return Response({"detail": "pallet_code is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            pallet = (
+                TransferPallet.objects.select_for_update()
+                .select_related("transfer", "transfer__source_branch", "transfer__destination_branch")
+                .filter(scan_code__iexact=pallet_code)
+                .first()
+            )
+            if pallet is None:
+                return Response({"detail": "Pallet not found."}, status=status.HTTP_404_NOT_FOUND)
+            if pallet.status == TransferPallet.Status.RECEIVED:
+                return Response({"detail": "Pallet is already received."}, status=status.HTTP_400_BAD_REQUEST)
+            if pallet.status == TransferPallet.Status.CANCELLED:
+                return Response({"detail": "Pallet is cancelled."}, status=status.HTTP_400_BAD_REQUEST)
+
+            session = PalletReceivingSession.objects.select_for_update().filter(
+                pallet=pallet,
+                status=PalletReceivingSession.Status.ACTIVE,
+            ).first()
+            created = False
+            if session is None:
+                session = PalletReceivingSession.objects.create(pallet=pallet, worker_code=worker_code)
+                created = True
+            elif session.worker_code != worker_code:
+                session.worker_code = worker_code
+                session.save(update_fields=["worker_code", "updated_at"])
+
+            now = timezone.now()
+            update_fields = []
+            if pallet.status != TransferPallet.Status.RECEIVING:
+                pallet.status = TransferPallet.Status.RECEIVING
+                update_fields.append("status")
+            if pallet.receiving_started_at is None:
+                pallet.receiving_started_at = now
+                update_fields.append("receiving_started_at")
+            if update_fields:
+                update_fields.append("updated_at")
+                pallet.save(update_fields=update_fields)
+
+            transfer = pallet.transfer
+            if transfer.status != InterBranchTransfer.Status.RECEIVING:
+                transfer.status = InterBranchTransfer.Status.RECEIVING
+                transfer.save(update_fields=["status", "updated_at"])
+
+            if created:
+                AuditLog.objects.create(
+                    action_type=AuditLog.ActionType.UPDATE,
+                    entity_name="TransferPallet",
+                    entity_id=str(pallet.id),
+                    message=f"Receiving started for pallet {pallet.scan_code} by {worker_code}.",
+                )
+
+        return Response(
+            {"message": "Pallet receiving started.", "receiving_session": _receiving_session_data(session)},
+            status=status.HTTP_200_OK,
+        )
+
+
+class ScannerReceivingCurrentView(APIView):
+    def get(self, request):
+        session_id = request.query_params.get("receiving_session_id")
+        pallet_code = str(request.query_params.get("pallet_code", "")).strip()
+
+        if not session_id and not pallet_code:
+            return Response(
+                {"detail": "receiving_session_id or pallet_code is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        queryset = PalletReceivingSession.objects.select_related(
+            "pallet",
+            "pallet__transfer",
+            "pallet__transfer__source_branch",
+            "pallet__transfer__destination_branch",
+            "current_pallet_item",
+            "current_pallet_item__product",
+        )
+        session = queryset.filter(pk=session_id).first() if session_id else queryset.filter(
+            pallet__scan_code__iexact=pallet_code,
+            status=PalletReceivingSession.Status.ACTIVE,
+        ).first()
+        if session is None:
+            return Response({"detail": "Receiving session not found."}, status=status.HTTP_404_NOT_FOUND)
+        if session.status != PalletReceivingSession.Status.ACTIVE:
+            return Response({"detail": "Receiving session is not active."}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response({"receiving_session": _receiving_session_data(session)})
+
+
+class ScannerReceivingScanProductView(APIView):
+    def post(self, request):
+        product_code = str(request.data.get("product_code") or request.data.get("code") or "").strip()
+        if not product_code:
+            return Response({"detail": "product_code is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        quantity, error = _parse_positive_piece_quantity(request.data.get("quantity", 1))
+        if error is not None:
+            return error
+
+        product = _find_product_by_code(product_code)
+        if product is None:
+            return Response({"detail": "Product not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        with transaction.atomic():
+            session, error = _get_active_receiving_session_or_response(request.data.get("receiving_session_id"))
+            if error is not None:
+                return error
+            session = PalletReceivingSession.objects.select_for_update().get(pk=session.id)
+            pallet = TransferPallet.objects.select_for_update().get(pk=session.pallet_id)
+            if pallet.status == TransferPallet.Status.RECEIVED:
+                return Response({"detail": "Pallet is already received."}, status=status.HTTP_400_BAD_REQUEST)
+            if pallet.status == TransferPallet.Status.CANCELLED:
+                return Response({"detail": "Pallet is cancelled."}, status=status.HTTP_400_BAD_REQUEST)
+
+            item = (
+                TransferPalletItem.objects.select_for_update()
+                .select_related("product")
+                .filter(pallet=pallet, product=product)
+                .first()
+            )
+            if item is None:
+                return Response({"detail": "Product is not expected on this pallet."}, status=status.HTTP_400_BAD_REQUEST)
+
+            remaining = item.expected_quantity - item.received_quantity
+            if quantity > remaining:
+                return Response(
+                    {"detail": "Quantity exceeds remaining pallet quantity."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            session.current_pallet_item = item
+            session.pending_quantity = quantity
+            session.save(update_fields=["current_pallet_item", "pending_quantity", "updated_at"])
+
+            AuditLog.objects.create(
+                action_type=AuditLog.ActionType.UPDATE,
+                entity_name="TransferPallet",
+                entity_id=str(pallet.id),
+                message=f"Receiving scanned {quantity} {product.sku} on pallet {pallet.scan_code}.",
+            )
+
+        session.refresh_from_db()
+        return Response({"message": "Product confirmed.", "receiving_session": _receiving_session_data(session)})
+
+
+class ScannerReceivingPutAwayView(APIView):
+    def post(self, request):
+        location_code = str(request.data.get("location_code", "")).strip()
+        if not location_code:
+            return Response({"detail": "location_code is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            session, error = _get_active_receiving_session_or_response(request.data.get("receiving_session_id"))
+            if error is not None:
+                return error
+            session = (
+                PalletReceivingSession.objects.select_for_update(of=("self",))
+                .select_related(
+                    "pallet",
+                    "pallet__transfer",
+                    "pallet__transfer__destination_branch",
+                    "current_pallet_item",
+                    "current_pallet_item__product",
+                )
+                .get(pk=session.id)
+            )
+            if not session.current_pallet_item_id or not session.pending_quantity:
+                return Response(
+                    {"detail": "Scan a product before scanning the destination location."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            pallet = TransferPallet.objects.select_for_update().get(pk=session.pallet_id)
+            if pallet.status == TransferPallet.Status.RECEIVED:
+                return Response({"detail": "Pallet is already received."}, status=status.HTTP_400_BAD_REQUEST)
+            if pallet.status == TransferPallet.Status.CANCELLED:
+                return Response({"detail": "Pallet is cancelled."}, status=status.HTTP_400_BAD_REQUEST)
+
+            location = Location.objects.select_related("branch").filter(code__iexact=location_code).first()
+            if location is None:
+                return Response({"detail": "Destination location not found."}, status=status.HTTP_404_NOT_FOUND)
+            destination_branch = session.pallet.transfer.destination_branch
+            if location.branch_id != destination_branch.id:
+                return Response(
+                    {"detail": f"Wrong branch. Use a {destination_branch.code} destination location."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            item = TransferPalletItem.objects.select_for_update().select_related("product").get(
+                pk=session.current_pallet_item_id
+            )
+            quantity = session.pending_quantity
+            remaining = item.expected_quantity - item.received_quantity
+            if quantity > remaining:
+                return Response(
+                    {"detail": "Quantity exceeds remaining pallet quantity."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            inventory_item, _ = InventoryItem.objects.select_for_update().get_or_create(
+                branch=destination_branch,
+                location=location,
+                product=item.product,
+                defaults={"quantity_on_hand": Decimal("0"), "quantity_reserved": Decimal("0")},
+            )
+            inventory_item.quantity_on_hand = F("quantity_on_hand") + quantity
+            inventory_item.save(update_fields=["quantity_on_hand", "updated_at"])
+
+            item.received_quantity = F("received_quantity") + quantity
+            item.save(update_fields=["received_quantity", "updated_at"])
+            item.refresh_from_db()
+
+            PalletReceivingScan.objects.create(
+                receiving_session=session,
+                pallet=pallet,
+                product=item.product,
+                destination_location=location,
+                quantity=quantity,
+                worker_code=session.worker_code,
+            )
+            movement = StockMovement.objects.create(
+                branch=destination_branch,
+                product=item.product,
+                inventory_item=inventory_item,
+                destination_location=location,
+                movement_type=StockMovement.MovementType.TRANSFER,
+                quantity=quantity,
+                reference=pallet.scan_code,
+                performed_by=None,
+            )
+            AuditLog.objects.create(
+                action_type=AuditLog.ActionType.UPDATE,
+                entity_name="PalletReceivingScan",
+                entity_id=str(movement.id),
+                message=(
+                    f"Received {quantity} {item.product.sku} from pallet {pallet.scan_code} "
+                    f"to location {location.code}."
+                ),
+            )
+
+            session.current_pallet_item = None
+            session.pending_quantity = None
+            session.save(update_fields=["current_pallet_item", "pending_quantity", "updated_at"])
+
+        session.refresh_from_db()
+        return Response({"message": "Product put away.", "receiving_session": _receiving_session_data(session)})
+
+
+class ScannerReceivingCompleteView(APIView):
+    def post(self, request):
+        with transaction.atomic():
+            session, error = _get_active_receiving_session_or_response(request.data.get("receiving_session_id"))
+            if error is not None:
+                return error
+            session = PalletReceivingSession.objects.select_for_update().select_related("pallet", "pallet__transfer").get(
+                pk=session.id
+            )
+            pallet = TransferPallet.objects.select_for_update().select_related("transfer").get(pk=session.pallet_id)
+            if pallet.status == TransferPallet.Status.RECEIVED:
+                return Response({"detail": "Pallet is already received."}, status=status.HTTP_400_BAD_REQUEST)
+            if session.current_pallet_item_id or session.pending_quantity:
+                return Response(
+                    {"detail": "Put away the confirmed product before completing receiving."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            incomplete_exists = TransferPalletItem.objects.filter(pallet=pallet).exclude(
+                received_quantity=F("expected_quantity")
+            ).exists()
+            if incomplete_exists:
+                return Response(
+                    {"detail": "All expected pallet items must be received before completion."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            now = timezone.now()
+            session.status = PalletReceivingSession.Status.COMPLETED
+            session.completed_at = now
+            session.save(update_fields=["status", "completed_at", "updated_at"])
+
+            pallet.status = TransferPallet.Status.RECEIVED
+            pallet.received_at = now
+            pallet.save(update_fields=["status", "received_at", "updated_at"])
+
+            transfer = InterBranchTransfer.objects.select_for_update().get(pk=pallet.transfer_id)
+            if not transfer.pallets.exclude(status=TransferPallet.Status.RECEIVED).exists():
+                transfer.status = InterBranchTransfer.Status.RECEIVED
+                transfer.completed_at = now
+                transfer.save(update_fields=["status", "completed_at", "updated_at"])
+
+            AuditLog.objects.create(
+                action_type=AuditLog.ActionType.STATUS_CHANGE,
+                entity_name="TransferPallet",
+                entity_id=str(pallet.id),
+                message=f"Pallet {pallet.scan_code} receiving completed.",
+            )
+
+        session.refresh_from_db()
+        return Response({"message": "Pallet receiving completed.", "receiving_session": _receiving_session_data(session)})
 
 
 class ScannerQuickTransferView(APIView):

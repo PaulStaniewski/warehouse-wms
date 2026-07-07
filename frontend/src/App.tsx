@@ -20,6 +20,7 @@ import { ScannerPickingPage } from "./pages/ScannerPickingPage";
 import { ScannerProformasPage } from "./pages/ScannerProformasPage";
 import { ScannerProductLookupPage } from "./pages/ScannerProductLookupPage";
 import { ScannerQuickTransferPage } from "./pages/ScannerQuickTransferPage";
+import { ScannerReceivingPage } from "./pages/ScannerReceivingPage";
 import { ScannerTasksPage } from "./pages/ScannerTasksPage";
 
 function App() {
@@ -42,6 +43,7 @@ function App() {
         <Route path="scanner/tasks" element={<ScannerTasksPage />} />
         <Route path="scanner/picking" element={<ScannerPickingPage />} />
         <Route path="scanner/control" element={<ScannerControlPage />} />
+        <Route path="scanner/receiving" element={<ScannerReceivingPage />} />
         <Route path="scanner/routes" element={<Navigate to="/scanner/proformas" replace />} />
         <Route path="scanner/route-runs/:id/picking" element={<Navigate to="/scanner/picking" replace />} />
         <Route path="scanner/route-runs/:id/control" element={<Navigate to="/scanner/control" replace />} />

@@ -24,6 +24,9 @@ function formatObjectType(value: ScannerContentsResponse["object_type"]) {
   if (value === "customer_label") {
     return "CUSTOMER LABEL";
   }
+  if (value === "pallet") {
+    return "PALLET";
+  }
 
   return value.toUpperCase();
 }
@@ -50,6 +53,15 @@ function renderItemDetail(item: ScannerContentsItem, objectType: ScannerContents
 
   if (objectType === "customer_label") {
     return <small>{formatQuantity(item.quantity)} pcs</small>;
+  }
+
+  if (objectType === "pallet") {
+    return (
+      <small>
+        Expected {formatQuantity(item.expected_quantity ?? item.quantity)} · Received {formatQuantity(item.received_quantity)} · Remaining{" "}
+        {formatQuantity(item.remaining_quantity)}
+      </small>
+    );
   }
 
   return <small>{formatQuantity(item.quantity)} pcs</small>;

@@ -10,8 +10,11 @@ from operations.models import (
     CartPickedItem,
     CartWorkSession,
     DeliveryRoute,
+    InterBranchTransfer,
     Order,
     OrderLine,
+    PalletReceivingScan,
+    PalletReceivingSession,
     PickingJob,
     PickingTask,
     ReturnBatch,
@@ -21,6 +24,8 @@ from operations.models import (
     ScannerCustomerLabel,
     ScannerSession,
     StockMovement,
+    TransferPallet,
+    TransferPalletItem,
 )
 from warehouse.models import Branch, InventoryItem, Location, Product
 
@@ -41,6 +46,7 @@ class Command(BaseCommand):
             return_batch, return_lines = self.create_returns(branches, products)
             picking_tasks = self.create_picking_tasks(branches, locations, order_lines)
             scanner_carts = self.create_scanner_carts()
+            transfer_pallets = self.create_transfer_pallets(branches, products)
             stock_movements = self.create_stock_movements(branches, locations, products, inventory_items)
             audit_logs = self.create_audit_logs(orders, return_batch)
 
@@ -56,11 +62,14 @@ class Command(BaseCommand):
         self.stdout.write(f"Returns: 1 batch, {len(return_lines)} lines")
         self.stdout.write(f"Picking tasks: {len(picking_tasks)}")
         self.stdout.write(f"Scanner carts: {len(scanner_carts)}")
+        self.stdout.write(f"Transfer pallets: {len(transfer_pallets)}")
         self.stdout.write(f"Stock movements: {len(stock_movements)}")
         self.stdout.write(f"Audit logs: {len(audit_logs)}")
 
     def cleanup_demo_workflow(self):
         demo_cart_codes = ["WOZEK-01", "WOZEK-02", "WOZEK-03"]
+        demo_transfer_refs = ["IBT-GDA-GDY-001"]
+        demo_pallet_codes = ["PAL-GDA-GDY-001"]
         demo_order_refs = [
             "AX-ORDER-0001",
             "AX-ORDER-0002",
@@ -92,6 +101,14 @@ class Command(BaseCommand):
         demo_sessions.update(status=ScannerSession.Status.CLOSED, ended_at=timezone.now())
         ScannerCart.objects.filter(cart_code_filter).update(status=ScannerCart.Status.AVAILABLE)
         demo_jobs.delete()
+
+        demo_pallets = TransferPallet.objects.filter(scan_code__in=demo_pallet_codes)
+        PalletReceivingScan.objects.filter(pallet__in=demo_pallets).delete()
+        PalletReceivingSession.objects.filter(pallet__in=demo_pallets).delete()
+        TransferPalletItem.objects.filter(pallet__in=demo_pallets).delete()
+        StockMovement.objects.filter(reference__in=demo_pallet_codes).delete()
+        demo_pallets.delete()
+        InterBranchTransfer.objects.filter(reference__in=demo_transfer_refs).delete()
 
     def create_branches(self):
         branch_data = [
@@ -434,6 +451,44 @@ class Command(BaseCommand):
             carts[code] = cart
         ScannerCart.objects.filter(code__in=carts.keys()).update(status=ScannerCart.Status.AVAILABLE)
         return carts
+
+    def create_transfer_pallets(self, branches, products):
+        transfer, _ = InterBranchTransfer.objects.update_or_create(
+            reference="IBT-GDA-GDY-001",
+            defaults={
+                "source_branch": branches["GDA"],
+                "destination_branch": branches["GDY"],
+                "status": InterBranchTransfer.Status.IN_TRANSIT,
+                "released_at": timezone.now(),
+                "completed_at": None,
+            },
+        )
+        pallet, _ = TransferPallet.objects.update_or_create(
+            scan_code="PAL-GDA-GDY-001",
+            defaults={
+                "transfer": transfer,
+                "status": TransferPallet.Status.IN_TRANSIT,
+                "released_at": timezone.now(),
+                "receiving_started_at": None,
+                "received_at": None,
+            },
+        )
+
+        manifest_data = [
+            ("FILTR-001", "3"),
+            ("OLEJ-001", "2"),
+        ]
+        for sku, expected_quantity in manifest_data:
+            TransferPalletItem.objects.update_or_create(
+                pallet=pallet,
+                product=products[sku],
+                defaults={
+                    "expected_quantity": Decimal(expected_quantity),
+                    "received_quantity": Decimal("0"),
+                },
+            )
+
+        return {"PAL-GDA-GDY-001": pallet}
 
     def create_stock_movements(self, branches, locations, products, inventory_items):
         movement_data = [

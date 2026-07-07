@@ -12,8 +12,11 @@ from operations.models import (
     CartPickedItem,
     CartWorkSession,
     DeliveryRoute,
+    InterBranchTransfer,
     Order,
     OrderLine,
+    PalletReceivingScan,
+    PalletReceivingSession,
     PickingJob,
     PickingTask,
     RouteRun,
@@ -21,6 +24,8 @@ from operations.models import (
     ScannerCustomerLabel,
     ScannerSession,
     StockMovement,
+    TransferPallet,
+    TransferPalletItem,
 )
 from operations.services import recalculate_route_readiness, route_close_result
 from warehouse.models import Branch, InventoryItem, Location, Product
@@ -787,6 +792,311 @@ class ScannerContentsLookupTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
         self.assertIn("matched_object_types", response.data)
         self.assertEqual(set(response.data["matched_object_types"]), {"location", "cart"})
+
+
+class ScannerReceivingWorkflowTests(APITestCase):
+    def setUp(self):
+        self.source_branch = Branch.objects.create(code="GDA", name="Gdansk", city="Gdansk", country="Poland")
+        self.destination_branch = Branch.objects.create(code="GDY", name="Gdynia", city="Gdynia", country="Poland")
+        self.destination_location = Location.objects.create(
+            branch=self.destination_branch,
+            code="A-01-01",
+            name="A-01-01",
+            location_type=Location.LocationType.STORAGE,
+        )
+        self.wrong_branch_location = Location.objects.create(
+            branch=self.source_branch,
+            code="B-01-01",
+            name="B-01-01",
+            location_type=Location.LocationType.STORAGE,
+        )
+        self.product = Product.objects.create(
+            sku="FILTR-001",
+            name="Filter",
+            barcode="590000000001",
+            unit_of_measure="pcs",
+        )
+        self.second_product = Product.objects.create(
+            sku="OLEJ-001",
+            name="Oil",
+            barcode="590000000002",
+            unit_of_measure="pcs",
+        )
+        self.unexpected_product = Product.objects.create(
+            sku="OTHER-001",
+            name="Other",
+            barcode="590000000099",
+            unit_of_measure="pcs",
+        )
+        self.transfer = InterBranchTransfer.objects.create(
+            reference="IBT-TEST-001",
+            source_branch=self.source_branch,
+            destination_branch=self.destination_branch,
+            status=InterBranchTransfer.Status.IN_TRANSIT,
+            released_at=timezone.now(),
+        )
+        self.pallet = TransferPallet.objects.create(
+            transfer=self.transfer,
+            scan_code="PAL-TEST-001",
+            status=TransferPallet.Status.IN_TRANSIT,
+            released_at=timezone.now(),
+        )
+        self.item = TransferPalletItem.objects.create(
+            pallet=self.pallet,
+            product=self.product,
+            expected_quantity=Decimal("3"),
+            received_quantity=Decimal("0"),
+        )
+        self.second_item = TransferPalletItem.objects.create(
+            pallet=self.pallet,
+            product=self.second_product,
+            expected_quantity=Decimal("2"),
+            received_quantity=Decimal("0"),
+        )
+
+    def start_receiving(self, pallet_code="PAL-TEST-001"):
+        return self.client.post(
+            "/api/scanner/receiving/start/",
+            {"pallet_code": pallet_code, "worker_code": "WORKER-1"},
+            format="json",
+        )
+
+    def scan_product(self, session_id, product_code="FILTR-001", quantity="1"):
+        return self.client.post(
+            "/api/scanner/receiving/scan-product/",
+            {"receiving_session_id": session_id, "product_code": product_code, "quantity": quantity},
+            format="json",
+        )
+
+    def put_away(self, session_id, location_code="A-01-01"):
+        return self.client.post(
+            "/api/scanner/receiving/put-away/",
+            {"receiving_session_id": session_id, "location_code": location_code},
+            format="json",
+        )
+
+    def complete(self, session_id):
+        return self.client.post(
+            "/api/scanner/receiving/complete/",
+            {"receiving_session_id": session_id},
+            format="json",
+        )
+
+    def test_start_known_pallet_creates_active_session(self):
+        response = self.start_receiving()
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(PalletReceivingSession.objects.count(), 1)
+        self.pallet.refresh_from_db()
+        self.transfer.refresh_from_db()
+        self.assertEqual(self.pallet.status, TransferPallet.Status.RECEIVING)
+        self.assertEqual(self.transfer.status, InterBranchTransfer.Status.RECEIVING)
+        self.assertIsNotNone(self.pallet.receiving_started_at)
+        self.assertTrue(AuditLog.objects.filter(message__icontains="Receiving started").exists())
+
+    def test_unknown_pallet_returns_not_found(self):
+        response = self.start_receiving("PAL-NOT-FOUND")
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_completed_pallet_cannot_start(self):
+        self.pallet.status = TransferPallet.Status.RECEIVED
+        self.pallet.received_at = timezone.now()
+        self.pallet.save(update_fields=["status", "received_at", "updated_at"])
+
+        response = self.start_receiving()
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_start_reopens_existing_active_session(self):
+        first = self.start_receiving()
+        second = self.start_receiving()
+
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(PalletReceivingSession.objects.count(), 1)
+        self.assertEqual(first.data["receiving_session"]["id"], second.data["receiving_session"]["id"])
+
+    def test_start_reopens_existing_pending_session(self):
+        first = self.start_receiving()
+        session_id = first.data["receiving_session"]["id"]
+        self.scan_product(session_id, self.product.sku, "2")
+
+        response = self.start_receiving()
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(PalletReceivingSession.objects.count(), 1)
+        self.assertEqual(response.data["receiving_session"]["id"], session_id)
+        self.assertEqual(response.data["receiving_session"]["state"], "waiting_for_location")
+        self.assertEqual(response.data["receiving_session"]["pending"]["product_sku"], self.product.sku)
+        self.assertEqual(response.data["receiving_session"]["pending"]["quantity"], 2)
+
+    def test_current_returns_pending_session_state(self):
+        session_id = self.start_receiving().data["receiving_session"]["id"]
+        self.scan_product(session_id, self.product.barcode, "2")
+
+        response = self.client.get(f"/api/scanner/receiving/current/?receiving_session_id={session_id}")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["receiving_session"]["id"], session_id)
+        self.assertEqual(response.data["receiving_session"]["session_id"], session_id)
+        self.assertEqual(response.data["receiving_session"]["pallet"]["scan_code"], "PAL-TEST-001")
+        self.assertEqual(response.data["receiving_session"]["state"], "waiting_for_location")
+        self.assertEqual(response.data["receiving_session"]["pending"]["product_sku"], self.product.sku)
+        self.assertEqual(response.data["receiving_session"]["current_item"]["product_sku"], self.product.sku)
+        self.assertEqual(response.data["receiving_session"]["pending"]["quantity"], 2)
+        self.assertEqual(response.data["receiving_session"]["pending_quantity"], 2)
+
+    def test_scan_expected_product_by_barcode_succeeds(self):
+        session_id = self.start_receiving().data["receiving_session"]["id"]
+
+        response = self.scan_product(session_id, self.product.barcode, "2")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["receiving_session"]["state"], "waiting_for_location")
+        self.assertEqual(response.data["receiving_session"]["pending"]["quantity"], 2)
+
+    def test_unexpected_product_is_rejected(self):
+        session_id = self.start_receiving().data["receiving_session"]["id"]
+
+        response = self.scan_product(session_id, self.unexpected_product.sku, "1")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("not expected", response.data["detail"])
+
+    def test_invalid_quantities_are_rejected(self):
+        session_id = self.start_receiving().data["receiving_session"]["id"]
+
+        for quantity in ["0", "-1", "1.5", "abc"]:
+            with self.subTest(quantity=quantity):
+                response = self.scan_product(session_id, self.product.sku, quantity)
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_quantity_above_remaining_is_rejected(self):
+        session_id = self.start_receiving().data["receiving_session"]["id"]
+
+        response = self.scan_product(session_id, self.product.sku, "4")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("remaining pallet quantity", response.data["detail"])
+
+    def test_put_away_updates_inventory_manifest_scan_movement_and_audit(self):
+        session_id = self.start_receiving().data["receiving_session"]["id"]
+        self.scan_product(session_id, self.product.sku, "2")
+
+        response = self.put_away(session_id)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        inventory = InventoryItem.objects.get(
+            branch=self.destination_branch,
+            location=self.destination_location,
+            product=self.product,
+        )
+        self.assertEqual(inventory.quantity_on_hand, Decimal("2"))
+        self.item.refresh_from_db()
+        self.assertEqual(self.item.received_quantity, Decimal("2"))
+        self.assertEqual(PalletReceivingScan.objects.count(), 1)
+        self.assertTrue(StockMovement.objects.filter(reference=self.pallet.scan_code, quantity=Decimal("2")).exists())
+        self.assertTrue(AuditLog.objects.filter(message__icontains="Received 2").exists())
+        self.assertEqual(response.data["receiving_session"]["state"], "waiting_for_product")
+        self.assertIsNone(response.data["receiving_session"]["current_item"])
+        self.assertIsNone(response.data["receiving_session"]["pending"])
+        self.assertIsNone(response.data["receiving_session"]["pending_quantity"])
+
+    def test_wrong_branch_location_is_rejected(self):
+        session_id = self.start_receiving().data["receiving_session"]["id"]
+        self.scan_product(session_id, self.product.sku, "1")
+
+        response = self.put_away(session_id, "B-01-01")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Wrong branch", response.data["detail"])
+        current = self.client.get(f"/api/scanner/receiving/current/?receiving_session_id={session_id}")
+        self.assertEqual(current.status_code, status.HTTP_200_OK)
+        self.assertEqual(current.data["receiving_session"]["state"], "waiting_for_location")
+        self.assertEqual(current.data["receiving_session"]["pending"]["product_sku"], self.product.sku)
+        self.assertEqual(current.data["receiving_session"]["pending"]["quantity"], 1)
+
+    def test_unknown_location_keeps_pending_product(self):
+        session_id = self.start_receiving().data["receiving_session"]["id"]
+        self.scan_product(session_id, self.product.sku, "2")
+
+        response = self.put_away(session_id, "UNKNOWN-LOC")
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        current = self.client.get(f"/api/scanner/receiving/current/?receiving_session_id={session_id}")
+        self.assertEqual(current.data["receiving_session"]["state"], "waiting_for_location")
+        self.assertEqual(current.data["receiving_session"]["current_item"]["product_sku"], self.product.sku)
+        self.assertEqual(current.data["receiving_session"]["pending_quantity"], 2)
+
+    def test_complete_incomplete_pallet_is_rejected(self):
+        session_id = self.start_receiving().data["receiving_session"]["id"]
+
+        response = self.complete(session_id)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("All expected pallet items", response.data["detail"])
+
+    def test_exactly_received_manifest_can_be_completed(self):
+        session_id = self.start_receiving().data["receiving_session"]["id"]
+        self.scan_product(session_id, self.product.sku, "3")
+        self.put_away(session_id)
+        self.scan_product(session_id, self.second_product.sku, "2")
+        self.put_away(session_id)
+
+        response = self.complete(session_id)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.pallet.refresh_from_db()
+        self.transfer.refresh_from_db()
+        session = PalletReceivingSession.objects.get(pk=session_id)
+        self.assertEqual(session.status, PalletReceivingSession.Status.COMPLETED)
+        self.assertEqual(self.pallet.status, TransferPallet.Status.RECEIVED)
+        self.assertEqual(self.transfer.status, InterBranchTransfer.Status.RECEIVED)
+        self.assertIsNotNone(self.pallet.received_at)
+
+    def test_completed_pallet_cannot_receive_more_goods(self):
+        session_id = self.start_receiving().data["receiving_session"]["id"]
+        self.scan_product(session_id, self.product.sku, "3")
+        self.put_away(session_id)
+        self.scan_product(session_id, self.second_product.sku, "2")
+        self.put_away(session_id)
+        self.complete(session_id)
+
+        response = self.start_receiving()
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_completed_session_is_not_restored_as_active(self):
+        session_id = self.start_receiving().data["receiving_session"]["id"]
+        self.scan_product(session_id, self.product.sku, "3")
+        self.put_away(session_id)
+        self.scan_product(session_id, self.second_product.sku, "2")
+        self.put_away(session_id)
+        self.complete(session_id)
+
+        response = self.client.get(f"/api/scanner/receiving/current/?receiving_session_id={session_id}")
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertIn("not active", response.data["detail"])
+
+    def test_contents_resolves_pallet_manifest(self):
+        response = self.client.get("/api/scanner/contents/?code=PAL-TEST-001")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["object_type"], "pallet")
+        self.assertEqual(response.data["code"], "PAL-TEST-001")
+        self.assertEqual(len(response.data["items"]), 2)
+
+    def test_seed_demo_pallet_exists_and_seed_is_idempotent(self):
+        output = StringIO()
+        call_command("seed_demo_data", stdout=output)
+        call_command("seed_demo_data", stdout=output)
+
+        pallet = TransferPallet.objects.get(scan_code="PAL-GDA-GDY-001")
+        self.assertEqual(pallet.status, TransferPallet.Status.IN_TRANSIT)
+        self.assertEqual(pallet.items.count(), 2)
+        self.assertFalse(PalletReceivingSession.objects.filter(pallet=pallet).exists())
 
 
 class ScannerLookupAndQuickTransferTests(APITestCase):

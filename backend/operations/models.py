@@ -498,6 +498,141 @@ class ScannerCustomerLabel(TimestampedModel):
         super().save(*args, **kwargs)
 
 
+class InterBranchTransfer(TimestampedModel):
+    class Status(models.TextChoices):
+        DRAFT = "draft", "Draft"
+        RELEASED = "released", "Released"
+        IN_TRANSIT = "in_transit", "In transit"
+        RECEIVING = "receiving", "Receiving"
+        RECEIVED = "received", "Received"
+        CANCELLED = "cancelled", "Cancelled"
+
+    reference = models.CharField(max_length=128, unique=True)
+    source_branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="outgoing_transfers")
+    destination_branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="incoming_transfers")
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.DRAFT)
+    released_at = models.DateTimeField(blank=True, null=True)
+    completed_at = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["reference"]),
+            models.Index(fields=["status"]),
+            models.Index(fields=["destination_branch", "status"]),
+        ]
+
+    def __str__(self) -> str:
+        return self.reference
+
+
+class TransferPallet(TimestampedModel):
+    class Status(models.TextChoices):
+        IN_TRANSIT = "in_transit", "In transit"
+        RECEIVING = "receiving", "Receiving"
+        RECEIVED = "received", "Received"
+        CANCELLED = "cancelled", "Cancelled"
+
+    transfer = models.ForeignKey(InterBranchTransfer, on_delete=models.PROTECT, related_name="pallets")
+    scan_code = models.CharField(max_length=64, unique=True)
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.IN_TRANSIT)
+    released_at = models.DateTimeField(blank=True, null=True)
+    receiving_started_at = models.DateTimeField(blank=True, null=True)
+    received_at = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        ordering = ["scan_code"]
+        indexes = [
+            models.Index(fields=["scan_code"]),
+            models.Index(fields=["status"]),
+        ]
+
+    def __str__(self) -> str:
+        return self.scan_code
+
+
+class TransferPalletItem(TimestampedModel):
+    pallet = models.ForeignKey(TransferPallet, on_delete=models.CASCADE, related_name="items")
+    product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name="transfer_pallet_items")
+    expected_quantity = models.DecimalField(max_digits=12, decimal_places=3)
+    received_quantity = models.DecimalField(max_digits=12, decimal_places=3, default=0)
+
+    class Meta:
+        ordering = ["product__sku"]
+        constraints = [
+            models.UniqueConstraint(fields=["pallet", "product"], name="unique_product_per_transfer_pallet"),
+            models.CheckConstraint(check=models.Q(expected_quantity__gt=0), name="transfer_pallet_expected_positive"),
+            models.CheckConstraint(check=models.Q(received_quantity__gte=0), name="transfer_pallet_received_non_negative"),
+        ]
+        indexes = [
+            models.Index(fields=["pallet"]),
+            models.Index(fields=["product"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.pallet.scan_code} / {self.product.sku}"
+
+
+class PalletReceivingSession(TimestampedModel):
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        COMPLETED = "completed", "Completed"
+        CANCELLED = "cancelled", "Cancelled"
+
+    pallet = models.ForeignKey(TransferPallet, on_delete=models.PROTECT, related_name="receiving_sessions")
+    current_pallet_item = models.ForeignKey(
+        TransferPalletItem,
+        on_delete=models.PROTECT,
+        related_name="pending_receiving_sessions",
+        blank=True,
+        null=True,
+    )
+    pending_quantity = models.DecimalField(max_digits=12, decimal_places=3, blank=True, null=True)
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.ACTIVE)
+    worker_code = models.CharField(max_length=64, blank=True)
+    started_at = models.DateTimeField(default=timezone.now)
+    completed_at = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        ordering = ["-started_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["pallet"],
+                condition=models.Q(status="active"),
+                name="unique_active_receiving_session_per_pallet",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["status"]),
+            models.Index(fields=["started_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.pallet.scan_code} / {self.status}"
+
+
+class PalletReceivingScan(TimestampedModel):
+    receiving_session = models.ForeignKey(PalletReceivingSession, on_delete=models.PROTECT, related_name="scans")
+    pallet = models.ForeignKey(TransferPallet, on_delete=models.PROTECT, related_name="receiving_scans")
+    product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name="pallet_receiving_scans")
+    destination_location = models.ForeignKey(Location, on_delete=models.PROTECT, related_name="pallet_receiving_scans")
+    quantity = models.DecimalField(max_digits=12, decimal_places=3)
+    worker_code = models.CharField(max_length=64, blank=True)
+    scanned_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["-scanned_at"]
+        indexes = [
+            models.Index(fields=["pallet"]),
+            models.Index(fields=["product"]),
+            models.Index(fields=["destination_location"]),
+            models.Index(fields=["scanned_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.pallet.scan_code} / {self.product.sku} / {self.quantity}"
+
+
 class StockMovement(TimestampedModel):
     class MovementType(models.TextChoices):
         RECEIPT = "receipt", "Receipt"
