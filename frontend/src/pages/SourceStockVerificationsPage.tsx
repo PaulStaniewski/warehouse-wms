@@ -68,8 +68,8 @@ export function SourceStockVerificationsPage() {
                   <th>Status</th>
                   <th>Target</th>
                   <th>Found</th>
-                  <th>Remaining</th>
-                  <th>Unresolved</th>
+                  <th>Source remaining</th>
+                  <th>Source unresolved</th>
                   <th>Created</th>
                 </tr>
               </thead>

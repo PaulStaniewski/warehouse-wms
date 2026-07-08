@@ -9,6 +9,7 @@ import {
 } from "../api/queries";
 import { DataState } from "../components/DataState";
 import { PageHeader } from "../components/PageHeader";
+import { sourceVerificationStatusLabel } from "../types/display";
 
 function formatQuantity(value: string) {
   return new Intl.NumberFormat("en-GB", { maximumFractionDigits: 0 }).format(Number(value));
@@ -156,7 +157,7 @@ export function DiscrepancyDetailPage() {
                 <strong>{formatQuantity(data.total_confirmed_shortage_quantity)}</strong>
               </article>
               <article className="summary-card">
-                <span>Remaining</span>
+                <span>Destination remaining</span>
                 <strong>{formatQuantity(data.total_remaining_quantity)}</strong>
               </article>
               {data.confirmed_shortage_at && (
@@ -194,10 +195,15 @@ export function DiscrepancyDetailPage() {
               {data.reconciliation?.source_stock_verification && (
                 <article className="summary-card">
                   <span>Source stock verification</span>
-                  <strong>{data.reconciliation.source_stock_verification.status}</strong>
+                  <strong>
+                    {sourceVerificationStatusLabel(
+                      data.reconciliation.source_stock_verification.status,
+                      data.reconciliation.source_stock_verification.status_label,
+                    )}
+                  </strong>
                   <small>
-                    Found {formatQuantity(String(data.reconciliation.source_stock_verification.total_found_quantity))} / Remaining{" "}
-                    {formatQuantity(String(data.reconciliation.source_stock_verification.total_remaining_quantity))} / Unresolved{" "}
+                    Found {formatQuantity(String(data.reconciliation.source_stock_verification.total_found_quantity))} / Source remaining{" "}
+                    {formatQuantity(String(data.reconciliation.source_stock_verification.total_remaining_quantity))} / Source unresolved{" "}
                     {formatQuantity(String(data.reconciliation.source_stock_verification.total_unresolved_quantity))}
                   </small>
                 </article>
@@ -253,7 +259,7 @@ export function DiscrepancyDetailPage() {
                         <th>Posted to UNCONFIRMED</th>
                       <th>Recovered</th>
                       <th>Confirmed shortage</th>
-                      <th>Remaining</th>
+                      <th>Destination remaining</th>
                     </tr>
                   </thead>
                   <tbody>

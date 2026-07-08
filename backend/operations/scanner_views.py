@@ -512,13 +512,15 @@ def _close_receiving_session(session_id):
                 )
 
             total_missing = sum((abs(difference) for _, difference in shortages), Decimal("0"))
+            missing_unit = "unit" if total_missing == 1 else "units"
+            line_word = "line" if len(shortages) == 1 else "lines"
             AuditLog.objects.create(
                 action_type=AuditLog.ActionType.STATUS_CHANGE,
                 entity_name="TransferPallet",
                 entity_id=str(pallet.id),
                 message=(
                     f"Worker {session.worker_code or 'scanner'} closed pallet {pallet.scan_code} "
-                    f"with discrepancies: {_piece_value(total_missing)} missing unit across {len(shortages)} line."
+                    f"with discrepancies: {_piece_value(total_missing)} missing {missing_unit} across {len(shortages)} {line_word}."
                 ),
             )
             if created:
@@ -1708,7 +1710,7 @@ class ScannerReceivingScanProductView(APIView):
                 action_type=AuditLog.ActionType.UPDATE,
                 entity_name="TransferPallet",
                 entity_id=str(pallet.id),
-                message=f"Receiving scanned {quantity} {product.sku} on pallet {pallet.scan_code}.",
+                message=f"Receiving scanned {_piece_value(quantity)} {product.sku} on pallet {pallet.scan_code}.",
             )
 
         session.refresh_from_db()
@@ -1803,7 +1805,7 @@ class ScannerReceivingPutAwayView(APIView):
                 entity_name="PalletReceivingScan",
                 entity_id=str(movement.id),
                 message=(
-                    f"Received {quantity} {item.product.sku} from pallet {pallet.scan_code} "
+                    f"Received {_piece_value(quantity)} {item.product.sku} from pallet {pallet.scan_code} "
                     f"to location {location.code}."
                 ),
             )

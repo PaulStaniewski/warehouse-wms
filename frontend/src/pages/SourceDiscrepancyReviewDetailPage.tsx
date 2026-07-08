@@ -9,6 +9,7 @@ import {
 } from "../api/queries";
 import { DataState } from "../components/DataState";
 import { PageHeader } from "../components/PageHeader";
+import { sourceVerificationStatusLabel } from "../types/display";
 
 const findingOptions = [
   { value: "source_shortage_found", label: "Source shortage found" },
@@ -209,10 +210,17 @@ export function SourceDiscrepancyReviewDetailPage() {
                 <p>
                   <strong>{data.reconciliation.source_stock_verification.reference}</strong>
                 </p>
-                <p>Status: {data.reconciliation.source_stock_verification.status}</p>
                 <p>
-                  Found at source: {formatQuantity(String(data.reconciliation.source_stock_verification.total_found_quantity))} / Remaining:{" "}
-                  {formatQuantity(String(data.reconciliation.source_stock_verification.total_remaining_quantity))} / Unresolved:{" "}
+                  Status:{" "}
+                  {sourceVerificationStatusLabel(
+                    data.reconciliation.source_stock_verification.status,
+                    data.reconciliation.source_stock_verification.status_label,
+                  )}
+                </p>
+                <p>
+                  Found at source: {formatQuantity(String(data.reconciliation.source_stock_verification.total_found_quantity))} / Source
+                  remaining: {formatQuantity(String(data.reconciliation.source_stock_verification.total_remaining_quantity))} / Source
+                  unresolved:{" "}
                   {formatQuantity(String(data.reconciliation.source_stock_verification.total_unresolved_quantity))}
                 </p>
                 <Link to={`/wms/source-stock-verifications/${data.reconciliation.source_stock_verification.id}`}>
@@ -245,7 +253,7 @@ export function SourceDiscrepancyReviewDetailPage() {
                   <strong>{formatQuantity(data.total_confirmed_shortage_quantity)}</strong>
                 </article>
                 <article className="summary-card">
-                  <span>Remaining</span>
+                  <span>Destination remaining</span>
                   <strong>{formatQuantity(data.total_remaining_quantity)}</strong>
                 </article>
               </div>

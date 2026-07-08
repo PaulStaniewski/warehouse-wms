@@ -9,6 +9,7 @@ import {
 } from "../api/queries";
 import { DataState } from "../components/DataState";
 import { PageHeader } from "../components/PageHeader";
+import { sourceVerificationStatusLabel } from "../types/display";
 
 function formatQuantity(value: string | number) {
   return new Intl.NumberFormat("en-GB", { maximumFractionDigits: 0 }).format(Number(value));
@@ -163,10 +164,12 @@ export function DiscrepancyReconciliationDetailPage() {
               )}
             </section>
 
-            <section className="panel">
-              <h2>Next required action</h2>
-              <p>{data.next_action_label}</p>
-            </section>
+            {data.status !== "completed" && (
+              <section className="panel">
+                <h2>Next required action</h2>
+                <p>{data.next_action_label}</p>
+              </section>
+            )}
 
             {data.status === "pending_action" && (
               <section className="panel">
@@ -261,17 +264,33 @@ export function DiscrepancyReconciliationDetailPage() {
               </section>
             )}
 
+            {data.status === "completed" && !data.manual_decision && (
+              <section className="panel">
+                <h2>Reconciliation completed</h2>
+                <p>All target shortage quantity was physically found at the source branch.</p>
+                <p>
+                  Completed by {data.completed_by_worker_code || "-"} at {formatDateTime(data.completed_at)}
+                </p>
+              </section>
+            )}
+
             {data.source_stock_verification && (
               <section className="panel">
                 <h2>Source stock verification</h2>
                 <p>
                   <strong>{data.source_stock_verification.reference}</strong>
                 </p>
-                <p>Status: {data.source_stock_verification.status}</p>
+                <p>
+                  Status:{" "}
+                  {sourceVerificationStatusLabel(
+                    data.source_stock_verification.status,
+                    data.source_stock_verification.status_label,
+                  )}
+                </p>
                 <p>
                   Target {formatQuantity(data.source_stock_verification.total_target_quantity)} / Found{" "}
-                  {formatQuantity(data.source_stock_verification.total_found_quantity)} / Remaining{" "}
-                  {formatQuantity(data.source_stock_verification.total_remaining_quantity)} / Unresolved{" "}
+                  {formatQuantity(data.source_stock_verification.total_found_quantity)} / Source remaining{" "}
+                  {formatQuantity(data.source_stock_verification.total_remaining_quantity)} / Source unresolved{" "}
                   {formatQuantity(data.source_stock_verification.total_unresolved_quantity)}
                 </p>
                 <Link to={`/wms/source-stock-verifications/${data.source_stock_verification.id}`}>
@@ -302,7 +321,7 @@ export function DiscrepancyReconciliationDetailPage() {
                       <th>Missing</th>
                       <th>Recovered</th>
                       <th>Confirmed shortage</th>
-                      <th>Remaining</th>
+                      <th>Destination investigation remaining</th>
                     </tr>
                   </thead>
                   <tbody>

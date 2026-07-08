@@ -3,6 +3,7 @@ import { useParams } from "react-router-dom";
 
 import { useTransferDiscrepancy } from "../api/queries";
 import { DataState } from "../components/DataState";
+import { sourceVerificationStatusLabel } from "../types/display";
 
 function formatQuantity(value: string) {
   return new Intl.NumberFormat("en-GB", { maximumFractionDigits: 0 }).format(Number(value));
@@ -86,7 +87,7 @@ export function DiscrepancyReportPage() {
             Status: {data.status} / Posted to UNCONFIRMED:{" "}
             {formatQuantity(data.total_posted_to_unconfirmed_quantity)} / Recovered:{" "}
             {formatQuantity(data.total_recovered_quantity)} / Confirmed shortage:{" "}
-            {formatQuantity(data.total_confirmed_shortage_quantity)} / Remaining: {formatQuantity(data.total_remaining_quantity)}
+            {formatQuantity(data.total_confirmed_shortage_quantity)} / Destination remaining: {formatQuantity(data.total_remaining_quantity)}
           </p>
 
           <h2>Discrepancy lines</h2>
@@ -102,7 +103,7 @@ export function DiscrepancyReportPage() {
                 <th>Posted</th>
                 <th>Recovered</th>
                 <th>Confirmed shortage</th>
-                <th>Remaining</th>
+                <th>Destination remaining</th>
               </tr>
             </thead>
             <tbody>
@@ -198,10 +199,14 @@ export function DiscrepancyReportPage() {
               <h2>Source stock verification</h2>
               <p>
                 Reference: {data.reconciliation.source_stock_verification.reference} / Status:{" "}
-                {data.reconciliation.source_stock_verification.status} / Target:{" "}
+                {sourceVerificationStatusLabel(
+                  data.reconciliation.source_stock_verification.status,
+                  data.reconciliation.source_stock_verification.status_label,
+                )}{" "}
+                / Target:{" "}
                 {formatQuantity(String(data.reconciliation.source_stock_verification.total_target_quantity))} / Found at source:{" "}
-                {formatQuantity(String(data.reconciliation.source_stock_verification.total_found_quantity))} / Remaining:{" "}
-                {formatQuantity(String(data.reconciliation.source_stock_verification.total_remaining_quantity))} / Unresolved:{" "}
+                {formatQuantity(String(data.reconciliation.source_stock_verification.total_found_quantity))} / Source remaining:{" "}
+                {formatQuantity(String(data.reconciliation.source_stock_verification.total_remaining_quantity))} / Source unresolved:{" "}
                 {formatQuantity(String(data.reconciliation.source_stock_verification.total_unresolved_quantity))}
               </p>
               {data.reconciliation.source_stock_verification.search_completed_at && (

@@ -11,6 +11,7 @@ import {
 import { CameraBarcodeScanner } from "../components/scanner/CameraBarcodeScanner";
 import { DataState } from "../components/DataState";
 import { PageHeader } from "../components/PageHeader";
+import { sourceVerificationPageDescription } from "../types/display";
 
 type CameraMode = "product" | "location" | null;
 
@@ -162,7 +163,10 @@ export function SourceStockVerificationDetailPage() {
 
       <CameraBarcodeScanner isOpen={cameraMode !== null} onClose={() => setCameraMode(null)} onDetected={handleCameraDetected} />
 
-      <PageHeader title={data?.reference ?? "Source stock verification"} description="Restore physically found source stock." />
+      <PageHeader
+        title={data?.reference ?? "Source stock verification"}
+        description={sourceVerificationPageDescription(data?.status)}
+      />
 
       {message && <div className="scanner-message scanner-message--success">{message}</div>}
       {error && <div className="scanner-message scanner-message--error">{error}</div>}
@@ -198,11 +202,11 @@ export function SourceStockVerificationDetailPage() {
                 <strong>{formatQuantity(data.total_found_quantity)}</strong>
               </article>
               <article className="summary-card">
-                <span>Remaining</span>
+                <span>Source verification remaining</span>
                 <strong>{formatQuantity(data.total_remaining_quantity)}</strong>
               </article>
               <article className="summary-card">
-                <span>Unresolved</span>
+                <span>Source verification unresolved</span>
                 <strong>{formatQuantity(data.total_unresolved_quantity)}</strong>
               </article>
             </section>
@@ -363,7 +367,7 @@ export function SourceStockVerificationDetailPage() {
                       <th>Product</th>
                       <th>Target</th>
                       <th>Found</th>
-                      <th>Remaining</th>
+                      <th>Source remaining</th>
                       <th>Unresolved</th>
                       <th>Last found</th>
                     </tr>

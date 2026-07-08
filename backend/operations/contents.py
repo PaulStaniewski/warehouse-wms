@@ -235,6 +235,7 @@ def _pallet_contents(pallet: TransferPallet):
                 "id": source_verification.id,
                 "reference": source_verification.reference,
                 "status": source_verification.status,
+                "status_label": source_verification.get_status_display(),
                 "total_target_quantity": piece_quantity(get_source_verification_totals(source_verification)["target"]),
                 "total_found_quantity": piece_quantity(get_source_verification_totals(source_verification)["found"]),
                 "total_remaining_quantity": piece_quantity(get_source_verification_totals(source_verification)["remaining"]),

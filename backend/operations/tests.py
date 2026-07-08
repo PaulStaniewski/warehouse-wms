@@ -2101,6 +2101,32 @@ class ScannerReceivingWorkflowTests(APITestCase):
         self.assertEqual(response.data["detail"], "This source stock verification has already been completed.")
         self.assertEqual(StockMovement.objects.count(), movement_count)
 
+    def test_discrepancy_audit_quantities_are_whole_pieces(self):
+        discrepancy = self.create_shortage_discrepancy()
+        self.print_report(discrepancy)
+        self.confirm_shortage(discrepancy)
+
+        event_messages = list(AuditLog.objects.values_list("message", flat=True))
+        self.assertTrue(any("1 missing unit" in message for message in event_messages))
+        self.assertTrue(any("1 unit of FILTR-001 as missing" in message for message in event_messages))
+        self.assertTrue(any("0 recovered, 1 confirmed missing" in message for message in event_messages))
+        self.assertFalse(any(".000" in message for message in event_messages))
+
+    def test_source_verification_unresolved_audit_quantities_are_whole_pieces(self):
+        verification = self.create_source_stock_verification()
+        item = verification.items.get(product=self.product)
+        item.target_quantity = Decimal("5.000")
+        item.save(update_fields=["target_quantity", "updated_at"])
+        self.begin_source_stock_verification(verification)
+        self.record_source_stock_found(verification, quantity="2")
+        self.complete_source_search(verification)
+
+        event_messages = list(AuditLog.objects.values_list("message", flat=True))
+        self.assertTrue(any("found 2 units of FILTR-001" in message for message in event_messages))
+        self.assertTrue(any("with 3 units unresolved" in message for message in event_messages))
+        self.assertTrue(any("3 source-verification units remain unresolved" in message for message in event_messages))
+        self.assertFalse(any(".000" in message for message in event_messages))
+
     def test_manual_decision_completes_source_verification_escalation_without_inventory_mutation(self):
         verification = self.create_source_stock_verification()
         self.begin_source_stock_verification(verification)

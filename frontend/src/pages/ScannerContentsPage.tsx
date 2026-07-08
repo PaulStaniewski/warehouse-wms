@@ -6,6 +6,7 @@ import { Link } from "react-router-dom";
 import { useScannerContents } from "../api/queries";
 import { CameraBarcodeScanner } from "../components/scanner/CameraBarcodeScanner";
 import type { ScannerContentsItem, ScannerContentsResponse } from "../types/api";
+import { sourceVerificationStatusLabel } from "../types/display";
 
 
 function getErrorMessage(error: unknown) {
@@ -187,9 +188,13 @@ export function ScannerContentsPage() {
             )}
             {lookup.data.object_type === "pallet" && lookup.data.source_stock_verification && (
               <small>
-                Source verification: {lookup.data.source_stock_verification.status} / Found at source{" "}
-                {formatQuantity(Number(lookup.data.source_stock_verification.total_found_quantity))} / Remaining{" "}
-                {formatQuantity(Number(lookup.data.source_stock_verification.total_remaining_quantity))} / Unresolved{" "}
+                Source verification:{" "}
+                {sourceVerificationStatusLabel(
+                  lookup.data.source_stock_verification.status,
+                  lookup.data.source_stock_verification.status_label,
+                )}{" "}
+                / Found at source {formatQuantity(Number(lookup.data.source_stock_verification.total_found_quantity))} / Source remaining{" "}
+                {formatQuantity(Number(lookup.data.source_stock_verification.total_remaining_quantity))} / Source unresolved{" "}
                 {formatQuantity(Number(lookup.data.source_stock_verification.total_unresolved_quantity))}
               </small>
             )}

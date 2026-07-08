@@ -62,6 +62,17 @@ from operations.services import (
 from warehouse.models import InventoryItem, Location, Product
 
 
+def format_piece_quantity(value) -> str:
+    quantity = Decimal(value)
+    if quantity == quantity.to_integral_value():
+        return str(int(quantity))
+    return str(quantity.normalize())
+
+
+def unit_label(value, singular="unit", plural="units") -> str:
+    return singular if Decimal(value) == 1 else plural
+
+
 class AuditLogFilter(django_filters.FilterSet):
     action = django_filters.CharFilter(field_name="action_type")
 
@@ -541,12 +552,14 @@ class TransferDiscrepancyViewSet(ReadOnlyModelViewSet):
                     message=f"Worker {worker_code} printed discrepancy report {discrepancy.reference} on printer {printer_code}.",
                 )
                 if posted_quantity:
+                    posted_quantity_label = format_piece_quantity(posted_quantity)
+                    missing_unit = unit_label(posted_quantity)
                     AuditLog.objects.create(
                         action_type=AuditLog.ActionType.UPDATE,
                         entity_name="TransferDiscrepancy",
                         entity_id=str(discrepancy.id),
                         message=(
-                            f"{posted_quantity} missing unit from discrepancy {discrepancy.reference} "
+                            f"{posted_quantity_label} missing {missing_unit} from discrepancy {discrepancy.reference} "
                             f"posted to location {unconfirmed_location.code}."
                         ),
                     )
@@ -721,13 +734,16 @@ class TransferDiscrepancyViewSet(ReadOnlyModelViewSet):
             item.save(update_fields=["recovered_quantity", "last_recovered_at", "updated_at"])
             item.refresh_from_db()
 
+            quantity_label = format_piece_quantity(quantity)
+            unit_word = unit_label(quantity)
+            move_word = "it" if quantity == 1 else "them"
             AuditLog.objects.create(
                 action_type=AuditLog.ActionType.UPDATE,
                 entity_name="TransferDiscrepancy",
                 entity_id=str(discrepancy.id),
                 message=(
-                    f"Worker {worker_code} recovered {quantity} unit of {product.sku} from discrepancy "
-                    f"{discrepancy.reference} and moved it from {unconfirmed_location.code} to {destination_location.code}."
+                    f"Worker {worker_code} recovered {quantity_label} {unit_word} of {product.sku} from discrepancy "
+                    f"{discrepancy.reference} and moved {move_word} from {unconfirmed_location.code} to {destination_location.code}."
                 ),
             )
 
@@ -747,7 +763,8 @@ class TransferDiscrepancyViewSet(ReadOnlyModelViewSet):
                     entity_id=str(discrepancy.id),
                     message=(
                         f"Discrepancy {discrepancy.reference} was closed with confirmed shortage: "
-                        f"{totals['recovered']} recovered, {totals['confirmed_shortage']} confirmed missing."
+                        f"{format_piece_quantity(totals['recovered'])} recovered, "
+                        f"{format_piece_quantity(totals['confirmed_shortage'])} confirmed missing."
                     ),
                 )
 
@@ -876,14 +893,15 @@ class TransferDiscrepancyViewSet(ReadOnlyModelViewSet):
             item.save(update_fields=["confirmed_shortage_quantity", "last_confirmed_shortage_at", "updated_at"])
             item.refresh_from_db()
 
-            unit_word = "unit" if quantity == 1 else "units"
+            quantity_label = format_piece_quantity(quantity)
+            unit_word = unit_label(quantity)
             remove_word = "it" if quantity == 1 else "them"
             AuditLog.objects.create(
                 action_type=AuditLog.ActionType.UPDATE,
                 entity_name="TransferDiscrepancy",
                 entity_id=str(discrepancy.id),
                 message=(
-                    f"Worker {worker_code} confirmed {quantity} {unit_word} of {product.sku} as missing for "
+                    f"Worker {worker_code} confirmed {quantity_label} {unit_word} of {product.sku} as missing for "
                     f"discrepancy {discrepancy.reference} and removed {remove_word} from {unconfirmed_location.code}."
                 ),
             )
@@ -897,7 +915,8 @@ class TransferDiscrepancyViewSet(ReadOnlyModelViewSet):
                     entity_id=str(discrepancy.id),
                     message=(
                         f"Discrepancy {discrepancy.reference} was closed with confirmed shortage: "
-                        f"{totals['recovered']} recovered, {totals['confirmed_shortage']} confirmed missing."
+                        f"{format_piece_quantity(totals['recovered'])} recovered, "
+                        f"{format_piece_quantity(totals['confirmed_shortage'])} confirmed missing."
                     ),
                 )
 
@@ -1563,14 +1582,15 @@ class TransferDiscrepancySourceStockVerificationViewSet(ReadOnlyModelViewSet):
             item.save(update_fields=["found_quantity", "last_found_at", "updated_at"])
             item.refresh_from_db()
 
-            unit_word = "unit" if quantity == 1 else "units"
+            quantity_label = format_piece_quantity(quantity)
+            unit_word = unit_label(quantity)
             restore_word = "it" if quantity == 1 else "them"
             AuditLog.objects.create(
                 action_type=AuditLog.ActionType.UPDATE,
                 entity_name="TransferDiscrepancySourceStockVerification",
                 entity_id=str(verification.id),
                 message=(
-                    f"Worker {worker_code} found {quantity} {unit_word} of {product.sku} at source location "
+                    f"Worker {worker_code} found {quantity_label} {unit_word} of {product.sku} at source location "
                     f"{destination_location.code} during verification {verification.reference} and restored {restore_word} "
                     f"to inventory."
                 ),
@@ -1715,7 +1735,8 @@ class TransferDiscrepancySourceStockVerificationViewSet(ReadOnlyModelViewSet):
             reconciliation.status = TransferDiscrepancyReconciliation.Status.MANUAL_ACTION_REQUIRED
             reconciliation.save(update_fields=["status", "updated_at"])
 
-            unit_word = "unit" if unresolved_quantity == 1 else "units"
+            unresolved_quantity_label = format_piece_quantity(unresolved_quantity)
+            unit_word = unit_label(unresolved_quantity)
             remain_word = "remains" if unresolved_quantity == 1 else "remain"
             AuditLog.objects.create(
                 action_type=AuditLog.ActionType.STATUS_CHANGE,
@@ -1723,7 +1744,7 @@ class TransferDiscrepancySourceStockVerificationViewSet(ReadOnlyModelViewSet):
                 entity_id=str(verification.id),
                 message=(
                     f"Worker {worker_code} completed source stock verification {verification.reference} "
-                    f"with {unresolved_quantity} {unit_word} unresolved."
+                    f"with {unresolved_quantity_label} {unit_word} unresolved."
                 ),
             )
             AuditLog.objects.create(
@@ -1732,7 +1753,7 @@ class TransferDiscrepancySourceStockVerificationViewSet(ReadOnlyModelViewSet):
                 entity_id=str(reconciliation.id),
                 message=(
                     f"Reconciliation {reconciliation.reference} now requires manual action because "
-                    f"{unresolved_quantity} source-verification {unit_word} {remain_word} unresolved."
+                    f"{unresolved_quantity_label} source-verification {unit_word} {remain_word} unresolved."
                 ),
             )
             verification.refresh_from_db()
