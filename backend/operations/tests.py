@@ -26,10 +26,18 @@ from operations.models import (
     StockMovement,
     TransferDiscrepancy,
     TransferDiscrepancyItem,
+    TransferDiscrepancyManualReconciliationDecision,
+    TransferDiscrepancyReconciliation,
+    TransferDiscrepancyRecovery,
+    TransferDiscrepancyShortageConfirmation,
+    TransferDiscrepancySourceReview,
+    TransferDiscrepancySourceStockRecovery,
+    TransferDiscrepancySourceStockVerification,
+    TransferDiscrepancySourceStockVerificationItem,
     TransferPallet,
     TransferPalletItem,
 )
-from operations.services import recalculate_route_readiness, route_close_result
+from operations.services import recalculate_route_readiness, reconciliation_route_for_finding, route_close_result
 from warehouse.models import Branch, InventoryItem, Location, Product
 
 
@@ -806,6 +814,12 @@ class ScannerReceivingWorkflowTests(APITestCase):
             name="A-01-01",
             location_type=Location.LocationType.STORAGE,
         )
+        self.unconfirmed_location = Location.objects.create(
+            branch=self.destination_branch,
+            code="UNCONFIRMED",
+            name="UNCONFIRMED",
+            location_type=Location.LocationType.RECEIVING,
+        )
         self.wrong_branch_location = Location.objects.create(
             branch=self.source_branch,
             code="B-01-01",
@@ -883,6 +897,156 @@ class ScannerReceivingWorkflowTests(APITestCase):
             {"receiving_session_id": session_id},
             format="json",
         )
+
+    def print_report(self, discrepancy, printer_code="ZEBRA-01"):
+        return self.client.post(
+            f"/api/transfer-discrepancies/{discrepancy.id}/print-report/",
+            {"printer_code": printer_code, "worker_code": "WORKER-1"},
+            format="json",
+        )
+
+    def recover_item(self, discrepancy, product_code="FILTR-001", location_code="A-01-01", quantity="1", operation_id="op-1"):
+        return self.client.post(
+            f"/api/transfer-discrepancies/{discrepancy.id}/recover-item/",
+            {
+                "product_code": product_code,
+                "destination_location_code": location_code,
+                "quantity": quantity,
+                "worker_code": "WORKER-1",
+                "client_operation_id": operation_id,
+            },
+            format="json",
+        )
+
+    def confirm_shortage(self, discrepancy, product_code="FILTR-001", quantity="1", operation_id="shortage-1"):
+        return self.client.post(
+            f"/api/transfer-discrepancies/{discrepancy.id}/confirm-shortage/",
+            {
+                "product_code": product_code,
+                "quantity": quantity,
+                "worker_code": "WORKER-1",
+                "client_operation_id": operation_id,
+            },
+            format="json",
+        )
+
+    def begin_source_review(self, review, worker_code="WORKER-1"):
+        return self.client.post(
+            f"/api/transfer-discrepancy-source-reviews/{review.id}/begin/",
+            {"worker_code": worker_code},
+            format="json",
+        )
+
+    def complete_source_review(
+        self,
+        review,
+        finding=TransferDiscrepancySourceReview.Finding.SOURCE_SHORTAGE_FOUND,
+        note="Picking evidence shows only 4 units confirmed.",
+        operation_id="source-review-complete-1",
+    ):
+        return self.client.post(
+            f"/api/transfer-discrepancy-source-reviews/{review.id}/complete/",
+            {
+                "finding": finding,
+                "finding_note": note,
+                "worker_code": "WORKER-1",
+                "client_operation_id": operation_id,
+            },
+            format="json",
+        )
+
+    def acknowledge_reconciliation(self, reconciliation, worker_code="WORKER-1"):
+        return self.client.post(
+            f"/api/transfer-discrepancy-reconciliations/{reconciliation.id}/acknowledge/",
+            {"worker_code": worker_code},
+            format="json",
+        )
+
+    def begin_source_stock_verification(self, verification, worker_code="WORKER-1"):
+        return self.client.post(
+            f"/api/transfer-discrepancy-source-stock-verifications/{verification.id}/begin/",
+            {"worker_code": worker_code},
+            format="json",
+        )
+
+    def record_source_stock_found(
+        self,
+        verification,
+        product_code="FILTR-001",
+        location_code="B-01-01",
+        quantity="1",
+        operation_id="source-found-1",
+    ):
+        return self.client.post(
+            f"/api/transfer-discrepancy-source-stock-verifications/{verification.id}/record-found/",
+            {
+                "product_code": product_code,
+                "destination_location_code": location_code,
+                "quantity": quantity,
+                "worker_code": "WORKER-1",
+                "client_operation_id": operation_id,
+            },
+            format="json",
+        )
+
+    def complete_source_search(
+        self,
+        verification,
+        note="Checked picking, staging and loading areas. Remaining stock was not found.",
+        operation_id="source-search-complete-1",
+    ):
+        return self.client.post(
+            f"/api/transfer-discrepancy-source-stock-verifications/{verification.id}/complete-search/",
+            {
+                "worker_code": "WORKER-1",
+                "search_completion_note": note,
+                "client_operation_id": operation_id,
+            },
+            format="json",
+        )
+
+    def complete_manual_reconciliation(
+        self,
+        reconciliation,
+        outcome=TransferDiscrepancyManualReconciliationDecision.Outcome.SOURCE_LOSS_CONFIRMED,
+        note="Source search was completed and the remaining unit could not be located.",
+        operation_id="manual-decision-1",
+    ):
+        return self.client.post(
+            f"/api/transfer-discrepancy-reconciliations/{reconciliation.id}/complete-manual/",
+            {
+                "outcome": outcome,
+                "decision_note": note,
+                "worker_code": "WORKER-1",
+                "client_operation_id": operation_id,
+            },
+            format="json",
+        )
+
+    def create_acknowledged_manual_reconciliation(self):
+        discrepancy = self.create_shortage_discrepancy()
+        self.print_report(discrepancy)
+        self.confirm_shortage(discrepancy)
+        review = TransferDiscrepancySourceReview.objects.get(discrepancy=discrepancy)
+        self.begin_source_review(review)
+        self.complete_source_review(
+            review,
+            finding=TransferDiscrepancySourceReview.Finding.INCONCLUSIVE,
+            operation_id="manual-route-review",
+        )
+        reconciliation = TransferDiscrepancyReconciliation.objects.get(discrepancy=discrepancy)
+        self.acknowledge_reconciliation(reconciliation)
+        reconciliation.refresh_from_db()
+        return reconciliation
+
+    def create_shortage_discrepancy(self):
+        session_id = self.start_receiving().data["receiving_session"]["id"]
+        self.scan_product(session_id, self.product.sku, "2")
+        self.put_away(session_id)
+        self.scan_product(session_id, self.second_product.sku, "2")
+        self.put_away(session_id)
+        self.complete(session_id)
+        return TransferDiscrepancy.objects.get(pallet=self.pallet)
 
     def test_start_known_pallet_creates_active_session(self):
         response = self.start_receiving()
@@ -1178,6 +1342,914 @@ class ScannerReceivingWorkflowTests(APITestCase):
         product_line = next(item for item in detail_response.data["items"] if item["product_sku"] == self.product.sku)
         self.assertEqual(product_line["scan_history"][0]["destination_location_code"], self.destination_location.code)
 
+    def test_shortage_is_not_posted_before_report_print(self):
+        discrepancy = self.create_shortage_discrepancy()
+
+        self.assertEqual(discrepancy.status, TransferDiscrepancy.Status.OPEN)
+        self.assertIsNone(discrepancy.report_printed_at)
+        self.assertFalse(
+            InventoryItem.objects.filter(
+                branch=self.destination_branch,
+                location=self.unconfirmed_location,
+                product=self.product,
+            ).exists()
+        )
+
+    def test_first_report_print_posts_shortage_to_unconfirmed_once(self):
+        discrepancy = self.create_shortage_discrepancy()
+
+        response = self.print_report(discrepancy)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["first_print"])
+        discrepancy.refresh_from_db()
+        self.assertEqual(discrepancy.status, TransferDiscrepancy.Status.INVESTIGATING)
+        self.assertEqual(discrepancy.report_print_count, 1)
+        self.assertEqual(discrepancy.last_report_printer_code, "ZEBRA-01")
+        self.assertIsNotNone(discrepancy.report_printed_at)
+        self.assertIsNotNone(discrepancy.shortage_posted_at)
+        shortage_line = discrepancy.items.get(product=self.product)
+        self.assertEqual(shortage_line.posted_to_unconfirmed_quantity, Decimal("1.000"))
+        inventory = InventoryItem.objects.get(
+            branch=self.destination_branch,
+            location=self.unconfirmed_location,
+            product=self.product,
+        )
+        self.assertEqual(inventory.quantity_on_hand, Decimal("1.000"))
+        self.assertTrue(
+            StockMovement.objects.filter(
+                reference=discrepancy.reference,
+                movement_type=StockMovement.MovementType.RECEIVING_DISCREPANCY,
+                quantity=Decimal("1.000"),
+            ).exists()
+        )
+        self.assertTrue(AuditLog.objects.filter(message__icontains="posted to location UNCONFIRMED").exists())
+
+    def test_report_reprint_does_not_post_shortage_again(self):
+        discrepancy = self.create_shortage_discrepancy()
+        self.print_report(discrepancy)
+
+        response = self.print_report(discrepancy)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data["first_print"])
+        discrepancy.refresh_from_db()
+        self.assertEqual(discrepancy.report_print_count, 2)
+        inventory = InventoryItem.objects.get(
+            branch=self.destination_branch,
+            location=self.unconfirmed_location,
+            product=self.product,
+        )
+        self.assertEqual(inventory.quantity_on_hand, Decimal("1.000"))
+        shortage_line = discrepancy.items.get(product=self.product)
+        self.assertEqual(shortage_line.posted_to_unconfirmed_quantity, Decimal("1.000"))
+        self.assertEqual(
+            StockMovement.objects.filter(
+                reference=discrepancy.reference,
+                movement_type=StockMovement.MovementType.RECEIVING_DISCREPANCY,
+            ).count(),
+            1,
+        )
+
+    def test_missing_unconfirmed_location_rolls_back_report_print(self):
+        discrepancy = self.create_shortage_discrepancy()
+        self.unconfirmed_location.delete()
+
+        response = self.print_report(discrepancy)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        discrepancy.refresh_from_db()
+        self.assertEqual(discrepancy.report_print_count, 0)
+        self.assertIsNone(discrepancy.report_printed_at)
+        self.assertEqual(discrepancy.status, TransferDiscrepancy.Status.OPEN)
+        self.assertFalse(StockMovement.objects.filter(reference=discrepancy.reference).exists())
+
+    def test_unconfirmed_contents_shows_posted_shortage(self):
+        discrepancy = self.create_shortage_discrepancy()
+        self.print_report(discrepancy)
+
+        response = self.client.get("/api/scanner/contents/?code=UNCONFIRMED")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["object_type"], "location")
+        self.assertEqual(response.data["items"][0]["sku"], self.product.sku)
+        self.assertEqual(response.data["items"][0]["quantity"], 1)
+
+    def test_full_recovery_moves_stock_and_resolves_discrepancy(self):
+        discrepancy = self.create_shortage_discrepancy()
+        self.print_report(discrepancy)
+
+        response = self.recover_item(discrepancy)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["recovery"]["status"], TransferDiscrepancy.Status.RESOLVED)
+        discrepancy.refresh_from_db()
+        self.assertEqual(discrepancy.status, TransferDiscrepancy.Status.RESOLVED)
+        self.assertIsNotNone(discrepancy.resolved_at)
+        line = discrepancy.items.get(product=self.product)
+        self.assertEqual(line.recovered_quantity, Decimal("1.000"))
+        unconfirmed = InventoryItem.objects.get(location=self.unconfirmed_location, product=self.product)
+        destination = InventoryItem.objects.get(location=self.destination_location, product=self.product)
+        self.assertEqual(unconfirmed.quantity_on_hand, Decimal("0.000"))
+        self.assertEqual(destination.quantity_on_hand, Decimal("3.000"))
+        self.assertEqual(TransferDiscrepancyRecovery.objects.filter(discrepancy=discrepancy).count(), 1)
+        self.assertTrue(StockMovement.objects.filter(reference=discrepancy.reference, movement_type=StockMovement.MovementType.DISCREPANCY_RECOVERY).exists())
+        self.assertTrue(AuditLog.objects.filter(message__icontains="was resolved").exists())
+
+    def test_recovery_retry_with_same_operation_id_does_not_move_twice(self):
+        discrepancy = self.create_shortage_discrepancy()
+        self.print_report(discrepancy)
+
+        first = self.recover_item(discrepancy, operation_id="retry-1")
+        second = self.recover_item(discrepancy, operation_id="retry-1")
+
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(TransferDiscrepancyRecovery.objects.filter(discrepancy=discrepancy).count(), 1)
+        destination = InventoryItem.objects.get(location=self.destination_location, product=self.product)
+        self.assertEqual(destination.quantity_on_hand, Decimal("3.000"))
+
+    def test_open_discrepancy_cannot_recover_before_report_print(self):
+        discrepancy = self.create_shortage_discrepancy()
+
+        response = self.recover_item(discrepancy)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("investigating", response.data["detail"])
+
+    def test_recovery_rejects_unrelated_product_and_unconfirmed_destination(self):
+        discrepancy = self.create_shortage_discrepancy()
+        self.print_report(discrepancy)
+
+        wrong_product = self.recover_item(discrepancy, product_code=self.unexpected_product.sku)
+        wrong_location = self.recover_item(discrepancy, location_code="UNCONFIRMED", operation_id="op-2")
+
+        self.assertEqual(wrong_product.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(wrong_location.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_recovery_rejects_quantity_above_remaining(self):
+        discrepancy = self.create_shortage_discrepancy()
+        self.print_report(discrepancy)
+
+        response = self.recover_item(discrepancy, quantity="2")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("exceeds", response.data["detail"])
+
+    def test_full_confirmed_shortage_removes_unconfirmed_and_closes_case(self):
+        discrepancy = self.create_shortage_discrepancy()
+        self.print_report(discrepancy)
+
+        response = self.confirm_shortage(discrepancy)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["confirmation"]["status"], TransferDiscrepancy.Status.CONFIRMED_SHORTAGE)
+        discrepancy.refresh_from_db()
+        self.assertEqual(discrepancy.status, TransferDiscrepancy.Status.CONFIRMED_SHORTAGE)
+        self.assertIsNotNone(discrepancy.confirmed_shortage_at)
+        self.assertEqual(discrepancy.confirmed_shortage_by_worker_code, "WORKER-1")
+        line = discrepancy.items.get(product=self.product)
+        self.assertEqual(line.confirmed_shortage_quantity, Decimal("1.000"))
+        self.assertEqual(line.recovered_quantity, Decimal("0.000"))
+        unconfirmed = InventoryItem.objects.get(location=self.unconfirmed_location, product=self.product)
+        self.assertEqual(unconfirmed.quantity_on_hand, Decimal("0.000"))
+        self.assertEqual(TransferDiscrepancyShortageConfirmation.objects.filter(discrepancy=discrepancy).count(), 1)
+        self.assertTrue(
+            StockMovement.objects.filter(
+                reference=discrepancy.reference,
+                movement_type=StockMovement.MovementType.DISCREPANCY_SHORTAGE,
+                quantity=Decimal("1.000"),
+            ).exists()
+        )
+        self.assertTrue(AuditLog.objects.filter(message__icontains="closed with confirmed shortage").exists())
+        review = TransferDiscrepancySourceReview.objects.get(discrepancy=discrepancy)
+        self.assertEqual(review.status, TransferDiscrepancySourceReview.Status.PENDING_REVIEW)
+        self.assertEqual(review.source_branch, self.source_branch)
+        self.assertTrue(review.reference.startswith("SRV-"))
+        self.assertTrue(AuditLog.objects.filter(message__icontains="Source review").exists())
+
+    def test_resolved_discrepancy_does_not_create_source_review(self):
+        discrepancy = self.create_shortage_discrepancy()
+        self.print_report(discrepancy)
+
+        response = self.recover_item(discrepancy)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(TransferDiscrepancySourceReview.objects.filter(discrepancy=discrepancy).exists())
+
+    def test_partial_and_multiple_shortage_confirmations_accumulate(self):
+        session_id = self.start_receiving().data["receiving_session"]["id"]
+        self.complete(session_id)
+        discrepancy = TransferDiscrepancy.objects.get(pallet=self.pallet)
+        self.print_report(discrepancy)
+
+        first = self.confirm_shortage(discrepancy, quantity="1", operation_id="shortage-part-1")
+        second = self.confirm_shortage(discrepancy, quantity="2", operation_id="shortage-part-2")
+
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(first.data["confirmation"]["status"], TransferDiscrepancy.Status.INVESTIGATING)
+        self.assertEqual(first.data["confirmation"]["line_remaining_quantity"], "2.000")
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        discrepancy.refresh_from_db()
+        line = discrepancy.items.get(product=self.product)
+        self.assertEqual(line.confirmed_shortage_quantity, Decimal("3.000"))
+        self.assertEqual(discrepancy.status, TransferDiscrepancy.Status.INVESTIGATING)
+        self.assertEqual(TransferDiscrepancyShortageConfirmation.objects.filter(discrepancy=discrepancy, product=self.product).count(), 2)
+        unconfirmed = InventoryItem.objects.get(location=self.unconfirmed_location, product=self.product)
+        self.assertEqual(unconfirmed.quantity_on_hand, Decimal("0.000"))
+
+    def test_mixed_recovery_and_shortage_final_status_is_confirmed_shortage(self):
+        session_id = self.start_receiving().data["receiving_session"]["id"]
+        self.complete(session_id)
+        discrepancy = TransferDiscrepancy.objects.get(pallet=self.pallet)
+        self.print_report(discrepancy)
+
+        recovery = self.recover_item(discrepancy, quantity="1", operation_id="mixed-recovery")
+        confirmation = self.confirm_shortage(discrepancy, quantity="2", operation_id="mixed-shortage")
+
+        self.assertEqual(recovery.status_code, status.HTTP_200_OK)
+        self.assertEqual(confirmation.status_code, status.HTTP_200_OK)
+        discrepancy.refresh_from_db()
+        line = discrepancy.items.get(product=self.product)
+        self.assertEqual(line.recovered_quantity, Decimal("1.000"))
+        self.assertEqual(line.confirmed_shortage_quantity, Decimal("2.000"))
+        self.assertEqual(discrepancy.status, TransferDiscrepancy.Status.INVESTIGATING)
+
+        final_line = discrepancy.items.get(product=self.second_product)
+        final = self.confirm_shortage(discrepancy, product_code=final_line.product.sku, quantity="2", operation_id="mixed-final")
+
+        self.assertEqual(final.status_code, status.HTTP_200_OK)
+        discrepancy.refresh_from_db()
+        self.assertEqual(discrepancy.status, TransferDiscrepancy.Status.CONFIRMED_SHORTAGE)
+        self.assertEqual(final.data["confirmation"]["total_remaining_quantity"], "0.000")
+
+    def test_shortage_confirmation_retry_does_not_remove_inventory_twice(self):
+        discrepancy = self.create_shortage_discrepancy()
+        self.print_report(discrepancy)
+
+        first = self.confirm_shortage(discrepancy, operation_id="retry-shortage")
+        second = self.confirm_shortage(discrepancy, operation_id="retry-shortage")
+
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(TransferDiscrepancyShortageConfirmation.objects.filter(discrepancy=discrepancy).count(), 1)
+        self.assertEqual(TransferDiscrepancySourceReview.objects.filter(discrepancy=discrepancy).count(), 1)
+        self.assertEqual(
+            StockMovement.objects.filter(
+                reference=discrepancy.reference,
+                movement_type=StockMovement.MovementType.DISCREPANCY_SHORTAGE,
+            ).count(),
+            1,
+        )
+        unconfirmed = InventoryItem.objects.get(location=self.unconfirmed_location, product=self.product)
+        self.assertEqual(unconfirmed.quantity_on_hand, Decimal("0.000"))
+
+    def test_shortage_confirmation_validates_state_product_quantity_and_inventory(self):
+        discrepancy = self.create_shortage_discrepancy()
+
+        open_response = self.confirm_shortage(discrepancy, operation_id="bad-open")
+        self.assertEqual(open_response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        self.print_report(discrepancy)
+        wrong_product = self.confirm_shortage(discrepancy, product_code=self.unexpected_product.sku, operation_id="bad-product")
+        zero = self.confirm_shortage(discrepancy, quantity="0", operation_id="bad-zero")
+        above_remaining = self.confirm_shortage(discrepancy, quantity="2", operation_id="bad-quantity")
+        InventoryItem.objects.filter(location=self.unconfirmed_location, product=self.product).update(quantity_on_hand=Decimal("0.000"))
+        no_stock = self.confirm_shortage(discrepancy, quantity="1", operation_id="bad-stock")
+
+        self.assertEqual(wrong_product.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(zero.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(above_remaining.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(no_stock.status_code, status.HTTP_400_BAD_REQUEST)
+        line = discrepancy.items.get(product=self.product)
+        self.assertEqual(line.confirmed_shortage_quantity, Decimal("0.000"))
+        self.assertFalse(TransferDiscrepancyShortageConfirmation.objects.filter(discrepancy=discrepancy).exists())
+
+    def test_recovery_remaining_calculation_includes_confirmed_shortage(self):
+        session_id = self.start_receiving().data["receiving_session"]["id"]
+        self.complete(session_id)
+        discrepancy = TransferDiscrepancy.objects.get(pallet=self.pallet)
+        self.print_report(discrepancy)
+        self.confirm_shortage(discrepancy, quantity="2", operation_id="confirm-before-recovery")
+
+        too_much = self.recover_item(discrepancy, quantity="2", operation_id="recover-too-much")
+        valid = self.recover_item(discrepancy, quantity="1", operation_id="recover-remaining")
+
+        self.assertEqual(too_much.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(valid.status_code, status.HTTP_200_OK)
+        line = TransferDiscrepancyItem.objects.get(discrepancy=discrepancy, product=self.product)
+        self.assertEqual(line.recovered_quantity, Decimal("1.000"))
+        self.assertEqual(line.confirmed_shortage_quantity, Decimal("2.000"))
+        self.assertEqual(valid.data["recovery"]["line_remaining_quantity"], "0.000")
+
+    def test_source_review_begin_and_complete_records_finding_without_inventory_changes(self):
+        discrepancy = self.create_shortage_discrepancy()
+        self.print_report(discrepancy)
+        self.confirm_shortage(discrepancy)
+        review = TransferDiscrepancySourceReview.objects.get(discrepancy=discrepancy)
+        movement_count = StockMovement.objects.count()
+        unconfirmed_before = InventoryItem.objects.get(location=self.unconfirmed_location, product=self.product).quantity_on_hand
+
+        begin = self.begin_source_review(review)
+        complete = self.complete_source_review(review)
+
+        self.assertEqual(begin.status_code, status.HTTP_200_OK)
+        self.assertEqual(complete.status_code, status.HTTP_200_OK)
+        review.refresh_from_db()
+        discrepancy.refresh_from_db()
+        self.assertEqual(review.status, TransferDiscrepancySourceReview.Status.COMPLETED)
+        self.assertEqual(review.finding, TransferDiscrepancySourceReview.Finding.SOURCE_SHORTAGE_FOUND)
+        self.assertEqual(review.finding_note, "Picking evidence shows only 4 units confirmed.")
+        self.assertEqual(review.started_by_worker_code, "WORKER-1")
+        self.assertEqual(review.completed_by_worker_code, "WORKER-1")
+        self.assertEqual(discrepancy.status, TransferDiscrepancy.Status.CONFIRMED_SHORTAGE)
+        self.assertEqual(StockMovement.objects.count(), movement_count)
+        unconfirmed_after = InventoryItem.objects.get(location=self.unconfirmed_location, product=self.product).quantity_on_hand
+        self.assertEqual(unconfirmed_after, unconfirmed_before)
+        self.assertTrue(AuditLog.objects.filter(message__icontains="began source review").exists())
+        self.assertTrue(AuditLog.objects.filter(message__icontains="completed source review").exists())
+
+    def test_source_review_begin_is_idempotent_and_completed_cannot_begin(self):
+        discrepancy = self.create_shortage_discrepancy()
+        self.print_report(discrepancy)
+        self.confirm_shortage(discrepancy)
+        review = TransferDiscrepancySourceReview.objects.get(discrepancy=discrepancy)
+
+        first = self.begin_source_review(review)
+        second = self.begin_source_review(review)
+        self.complete_source_review(review)
+        completed_begin = self.begin_source_review(review)
+
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(completed_begin.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(AuditLog.objects.filter(message__icontains="began source review").count(), 1)
+
+    def test_source_review_complete_idempotency_and_validation(self):
+        discrepancy = self.create_shortage_discrepancy()
+        self.print_report(discrepancy)
+        self.confirm_shortage(discrepancy)
+        review = TransferDiscrepancySourceReview.objects.get(discrepancy=discrepancy)
+
+        pending_complete = self.complete_source_review(review, operation_id="pending-complete")
+        invalid = self.client.post(
+            f"/api/transfer-discrepancy-source-reviews/{review.id}/complete/",
+            {
+                "finding": "bad_finding",
+                "worker_code": "WORKER-1",
+                "client_operation_id": "invalid-finding",
+            },
+            format="json",
+        )
+        self.begin_source_review(review)
+        first = self.complete_source_review(
+            review,
+            finding=TransferDiscrepancySourceReview.Finding.DISPATCH_EVIDENCE_MATCHES,
+            note="Manifest evidence matches expected quantity.",
+            operation_id="review-retry",
+        )
+        retry = self.complete_source_review(
+            review,
+            finding=TransferDiscrepancySourceReview.Finding.DISPATCH_EVIDENCE_MATCHES,
+            note="Manifest evidence matches expected quantity.",
+            operation_id="review-retry",
+        )
+        overwrite = self.complete_source_review(
+            review,
+            finding=TransferDiscrepancySourceReview.Finding.INCONCLUSIVE,
+            note="Trying to overwrite.",
+            operation_id="review-overwrite",
+        )
+
+        self.assertEqual(pending_complete.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(invalid.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(retry.status_code, status.HTTP_200_OK)
+        self.assertEqual(overwrite.status_code, status.HTTP_400_BAD_REQUEST)
+        review.refresh_from_db()
+        self.assertEqual(review.finding, TransferDiscrepancySourceReview.Finding.DISPATCH_EVIDENCE_MATCHES)
+        self.assertEqual(AuditLog.objects.filter(message__icontains="completed source review").count(), 1)
+
+    def test_source_review_detail_api_exposes_accounting_and_evidence(self):
+        discrepancy = self.create_shortage_discrepancy()
+        self.print_report(discrepancy)
+        self.confirm_shortage(discrepancy)
+        review = TransferDiscrepancySourceReview.objects.get(discrepancy=discrepancy)
+
+        response = self.client.get(f"/api/transfer-discrepancy-source-reviews/{review.id}/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["reference"], review.reference)
+        self.assertEqual(response.data["discrepancy_reference"], discrepancy.reference)
+        self.assertEqual(response.data["source_branch_code"], self.source_branch.code)
+        self.assertEqual(response.data["destination_branch_code"], self.destination_branch.code)
+        self.assertEqual(response.data["pallet_code"], self.pallet.scan_code)
+        self.assertEqual(response.data["total_confirmed_shortage_quantity"], "1.000")
+        self.assertEqual(len(response.data["source_dispatch_evidence"]), 2)
+        self.assertEqual(len(response.data["destination_receiving_evidence"]), 2)
+        self.assertEqual(len(response.data["shortage_confirmations"]), 1)
+
+    def test_source_review_completion_creates_reconciliation_for_each_route(self):
+        self.assertEqual(
+            reconciliation_route_for_finding(TransferDiscrepancySourceReview.Finding.SOURCE_SHORTAGE_FOUND),
+            TransferDiscrepancyReconciliation.Route.SOURCE_STOCK_VERIFICATION,
+        )
+        self.assertEqual(
+            reconciliation_route_for_finding(TransferDiscrepancySourceReview.Finding.DISPATCH_EVIDENCE_MATCHES),
+            TransferDiscrepancyReconciliation.Route.TRANSIT_INVESTIGATION,
+        )
+        self.assertEqual(
+            reconciliation_route_for_finding(TransferDiscrepancySourceReview.Finding.INCONCLUSIVE),
+            TransferDiscrepancyReconciliation.Route.MANUAL_RECONCILIATION,
+        )
+
+        discrepancy = self.create_shortage_discrepancy()
+        self.print_report(discrepancy)
+        self.confirm_shortage(discrepancy)
+        review = TransferDiscrepancySourceReview.objects.get(discrepancy=discrepancy)
+        self.begin_source_review(review)
+        movement_count = StockMovement.objects.count()
+
+        response = self.complete_source_review(review)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        reconciliation = TransferDiscrepancyReconciliation.objects.get(discrepancy=discrepancy)
+        self.assertEqual(reconciliation.route, TransferDiscrepancyReconciliation.Route.SOURCE_STOCK_VERIFICATION)
+        self.assertEqual(reconciliation.status, TransferDiscrepancyReconciliation.Status.PENDING_ACTION)
+        self.assertEqual(StockMovement.objects.count(), movement_count)
+        detail = self.client.get(f"/api/transfer-discrepancy-reconciliations/{reconciliation.id}/")
+        self.assertEqual(detail.data["route"], TransferDiscrepancyReconciliation.Route.SOURCE_STOCK_VERIFICATION)
+        self.assertEqual(
+            detail.data["next_action_label"],
+            "Verify whether the confirmed shortage quantity still physically exists at the source branch.",
+        )
+
+    def test_reconciliation_creation_is_idempotent_on_source_review_retry(self):
+        discrepancy = self.create_shortage_discrepancy()
+        self.print_report(discrepancy)
+        self.confirm_shortage(discrepancy)
+        review = TransferDiscrepancySourceReview.objects.get(discrepancy=discrepancy)
+        self.begin_source_review(review)
+
+        first = self.complete_source_review(review, operation_id="reconciliation-retry")
+        second = self.complete_source_review(review, operation_id="reconciliation-retry")
+
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(TransferDiscrepancyReconciliation.objects.filter(discrepancy=discrepancy).count(), 1)
+        self.assertEqual(AuditLog.objects.filter(message__icontains="Reconciliation case").count(), 1)
+
+    def test_reconciliation_acknowledge_is_idempotent_and_does_not_change_inventory(self):
+        discrepancy = self.create_shortage_discrepancy()
+        self.print_report(discrepancy)
+        self.confirm_shortage(discrepancy)
+        review = TransferDiscrepancySourceReview.objects.get(discrepancy=discrepancy)
+        self.begin_source_review(review)
+        self.complete_source_review(review)
+        reconciliation = TransferDiscrepancyReconciliation.objects.get(discrepancy=discrepancy)
+        movement_count = StockMovement.objects.count()
+        unconfirmed_before = InventoryItem.objects.get(location=self.unconfirmed_location, product=self.product).quantity_on_hand
+
+        first = self.acknowledge_reconciliation(reconciliation)
+        second = self.acknowledge_reconciliation(reconciliation)
+
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        reconciliation.refresh_from_db()
+        self.assertEqual(reconciliation.status, TransferDiscrepancyReconciliation.Status.IN_PROGRESS)
+        self.assertEqual(reconciliation.acknowledged_by_worker_code, "WORKER-1")
+        self.assertIsNotNone(reconciliation.acknowledged_at)
+        self.assertEqual(StockMovement.objects.count(), movement_count)
+        unconfirmed_after = InventoryItem.objects.get(location=self.unconfirmed_location, product=self.product).quantity_on_hand
+        self.assertEqual(unconfirmed_after, unconfirmed_before)
+        self.assertEqual(AuditLog.objects.filter(message__icontains="acknowledged reconciliation case").count(), 1)
+
+    def test_reconciliation_list_filters_and_search_work(self):
+        discrepancy = self.create_shortage_discrepancy()
+        self.print_report(discrepancy)
+        self.confirm_shortage(discrepancy)
+        review = TransferDiscrepancySourceReview.objects.get(discrepancy=discrepancy)
+        self.begin_source_review(review)
+        self.complete_source_review(review)
+        reconciliation = TransferDiscrepancyReconciliation.objects.get(discrepancy=discrepancy)
+
+        by_status = self.client.get("/api/transfer-discrepancy-reconciliations/", {"status": "pending_action"})
+        by_route = self.client.get(
+            "/api/transfer-discrepancy-reconciliations/",
+            {"route": TransferDiscrepancyReconciliation.Route.SOURCE_STOCK_VERIFICATION},
+        )
+        by_search = self.client.get(
+            "/api/transfer-discrepancy-reconciliations/",
+            {"search": reconciliation.reference},
+        )
+        by_discrepancy = self.client.get(
+            "/api/transfer-discrepancy-reconciliations/",
+            {"search": discrepancy.reference},
+        )
+
+        self.assertEqual(by_status.data["count"], 1)
+        self.assertEqual(by_route.data["count"], 1)
+        self.assertEqual(by_search.data["count"], 1)
+        self.assertEqual(by_discrepancy.data["count"], 1)
+
+    def test_source_stock_verification_created_on_source_route_acknowledgement(self):
+        discrepancy = self.create_shortage_discrepancy()
+        self.print_report(discrepancy)
+        self.confirm_shortage(discrepancy)
+        review = TransferDiscrepancySourceReview.objects.get(discrepancy=discrepancy)
+        self.begin_source_review(review)
+        self.complete_source_review(review)
+        reconciliation = TransferDiscrepancyReconciliation.objects.get(discrepancy=discrepancy)
+
+        first = self.acknowledge_reconciliation(reconciliation)
+        second = self.acknowledge_reconciliation(reconciliation)
+
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(TransferDiscrepancySourceStockVerification.objects.filter(reconciliation=reconciliation).count(), 1)
+        verification = TransferDiscrepancySourceStockVerification.objects.get(reconciliation=reconciliation)
+        self.assertEqual(verification.status, TransferDiscrepancySourceStockVerification.Status.PENDING_VERIFICATION)
+        self.assertEqual(verification.items.count(), 1)
+        item = verification.items.get(product=self.product)
+        self.assertEqual(item.target_quantity, Decimal("1.000"))
+        self.assertEqual(item.found_quantity, Decimal("0.000"))
+        self.assertEqual(AuditLog.objects.filter(message__icontains="was created for reconciliation").count(), 1)
+
+    def test_transit_and_manual_reconciliations_do_not_create_source_verification(self):
+        discrepancy = self.create_shortage_discrepancy()
+        self.print_report(discrepancy)
+        self.confirm_shortage(discrepancy)
+        review = TransferDiscrepancySourceReview.objects.get(discrepancy=discrepancy)
+        self.begin_source_review(review)
+        self.complete_source_review(review, finding=TransferDiscrepancySourceReview.Finding.DISPATCH_EVIDENCE_MATCHES)
+        reconciliation = TransferDiscrepancyReconciliation.objects.get(discrepancy=discrepancy)
+        self.acknowledge_reconciliation(reconciliation)
+
+        self.assertFalse(TransferDiscrepancySourceStockVerification.objects.filter(reconciliation=reconciliation).exists())
+
+    def test_begin_source_stock_verification_is_idempotent_and_inventory_neutral(self):
+        verification = self.create_source_stock_verification()
+        movement_count = StockMovement.objects.count()
+
+        first = self.begin_source_stock_verification(verification)
+        second = self.begin_source_stock_verification(verification)
+
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        verification.refresh_from_db()
+        self.assertEqual(verification.status, TransferDiscrepancySourceStockVerification.Status.INVESTIGATING)
+        self.assertEqual(verification.started_by_worker_code, "WORKER-1")
+        self.assertEqual(StockMovement.objects.count(), movement_count)
+        self.assertEqual(AuditLog.objects.filter(message__icontains="began source stock verification").count(), 1)
+
+    def create_source_stock_verification(self, operation_id="source-review-complete-1"):
+        discrepancy = self.create_shortage_discrepancy()
+        self.print_report(discrepancy)
+        self.confirm_shortage(discrepancy)
+        review = TransferDiscrepancySourceReview.objects.get(discrepancy=discrepancy)
+        self.begin_source_review(review)
+        self.complete_source_review(review, operation_id=operation_id)
+        reconciliation = TransferDiscrepancyReconciliation.objects.get(discrepancy=discrepancy)
+        self.acknowledge_reconciliation(reconciliation)
+        return TransferDiscrepancySourceStockVerification.objects.get(reconciliation=reconciliation)
+
+    def test_full_source_stock_recovery_restores_source_inventory_and_completes(self):
+        verification = self.create_source_stock_verification()
+        self.begin_source_stock_verification(verification)
+        source_before = InventoryItem.objects.filter(
+            branch=self.source_branch,
+            location=self.wrong_branch_location,
+            product=self.product,
+        ).first()
+        before_quantity = source_before.quantity_on_hand if source_before else Decimal("0")
+        destination_before = InventoryItem.objects.filter(
+            branch=self.destination_branch,
+            location=self.destination_location,
+            product=self.product,
+        ).get().quantity_on_hand
+        unconfirmed_before = InventoryItem.objects.get(location=self.unconfirmed_location, product=self.product).quantity_on_hand
+
+        response = self.record_source_stock_found(verification)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        verification.refresh_from_db()
+        verification.reconciliation.refresh_from_db()
+        self.assertEqual(verification.status, TransferDiscrepancySourceStockVerification.Status.COMPLETED)
+        self.assertEqual(verification.reconciliation.status, TransferDiscrepancyReconciliation.Status.COMPLETED)
+        self.assertEqual(verification.items.get(product=self.product).found_quantity, Decimal("1.000"))
+        source_after = InventoryItem.objects.get(branch=self.source_branch, location=self.wrong_branch_location, product=self.product)
+        self.assertEqual(source_after.quantity_on_hand, before_quantity + Decimal("1.000"))
+        self.assertEqual(
+            InventoryItem.objects.get(branch=self.destination_branch, location=self.destination_location, product=self.product).quantity_on_hand,
+            destination_before,
+        )
+        self.assertEqual(InventoryItem.objects.get(location=self.unconfirmed_location, product=self.product).quantity_on_hand, unconfirmed_before)
+        self.assertEqual(TransferDiscrepancySourceStockRecovery.objects.filter(verification=verification).count(), 1)
+        self.assertTrue(
+            StockMovement.objects.filter(
+                reference=verification.reference,
+                movement_type=StockMovement.MovementType.SOURCE_DISCREPANCY_RECOVERY,
+            ).exists()
+        )
+        discrepancy = verification.reconciliation.discrepancy
+        discrepancy.refresh_from_db()
+        self.assertEqual(discrepancy.status, TransferDiscrepancy.Status.CONFIRMED_SHORTAGE)
+
+    def test_source_stock_recovery_retry_does_not_restore_twice(self):
+        verification = self.create_source_stock_verification()
+        self.begin_source_stock_verification(verification)
+
+        first = self.record_source_stock_found(verification, operation_id="source-retry")
+        second = self.record_source_stock_found(verification, operation_id="source-retry")
+
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(TransferDiscrepancySourceStockRecovery.objects.filter(verification=verification).count(), 1)
+        item = TransferDiscrepancySourceStockVerificationItem.objects.get(verification=verification, product=self.product)
+        self.assertEqual(item.found_quantity, Decimal("1.000"))
+        self.assertEqual(AuditLog.objects.filter(message__icontains="restored it to inventory").count(), 1)
+        self.assertEqual(AuditLog.objects.filter(message__icontains="was completed after all target quantity").count(), 1)
+
+    def test_source_stock_recovery_validates_product_quantity_location_and_state(self):
+        verification = self.create_source_stock_verification()
+        pending = self.record_source_stock_found(verification, operation_id="bad-pending")
+        self.begin_source_stock_verification(verification)
+        wrong_product = self.record_source_stock_found(verification, product_code=self.unexpected_product.sku, operation_id="bad-product")
+        zero = self.record_source_stock_found(verification, quantity="0", operation_id="bad-zero")
+        too_much = self.record_source_stock_found(verification, quantity="2", operation_id="bad-quantity")
+        wrong_branch = self.record_source_stock_found(verification, location_code=self.destination_location.code, operation_id="bad-branch")
+        unconfirmed = self.record_source_stock_found(verification, location_code=self.unconfirmed_location.code, operation_id="bad-unconfirmed")
+
+        self.assertEqual(pending.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(wrong_product.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(zero.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(too_much.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(wrong_branch.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(unconfirmed.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(TransferDiscrepancySourceStockRecovery.objects.filter(verification=verification).exists())
+
+    def test_complete_source_search_with_zero_found_requires_manual_action_without_inventory_mutation(self):
+        verification = self.create_source_stock_verification()
+        self.begin_source_stock_verification(verification)
+        source_before = InventoryItem.objects.filter(
+            branch=self.source_branch,
+            location=self.wrong_branch_location,
+            product=self.product,
+        ).first()
+        source_quantity_before = source_before.quantity_on_hand if source_before else Decimal("0")
+        destination_before = InventoryItem.objects.get(
+            branch=self.destination_branch,
+            location=self.destination_location,
+            product=self.product,
+        ).quantity_on_hand
+        unconfirmed_before = InventoryItem.objects.get(location=self.unconfirmed_location, product=self.product).quantity_on_hand
+        movement_count = StockMovement.objects.count()
+
+        response = self.complete_source_search(verification)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        verification.refresh_from_db()
+        verification.reconciliation.refresh_from_db()
+        item = verification.items.get(product=self.product)
+        self.assertEqual(verification.status, TransferDiscrepancySourceStockVerification.Status.COMPLETED_UNRESOLVED)
+        self.assertEqual(verification.search_completed_by_worker_code, "WORKER-1")
+        self.assertEqual(verification.search_completion_note, "Checked picking, staging and loading areas. Remaining stock was not found.")
+        self.assertEqual(item.found_quantity, Decimal("0.000"))
+        self.assertEqual(item.target_quantity - item.found_quantity, Decimal("1.000"))
+        self.assertEqual(verification.reconciliation.route, TransferDiscrepancyReconciliation.Route.SOURCE_STOCK_VERIFICATION)
+        self.assertEqual(verification.reconciliation.status, TransferDiscrepancyReconciliation.Status.MANUAL_ACTION_REQUIRED)
+        source_after = InventoryItem.objects.filter(
+            branch=self.source_branch,
+            location=self.wrong_branch_location,
+            product=self.product,
+        ).first()
+        self.assertEqual(source_after.quantity_on_hand if source_after else Decimal("0"), source_quantity_before)
+        self.assertEqual(
+            InventoryItem.objects.get(branch=self.destination_branch, location=self.destination_location, product=self.product).quantity_on_hand,
+            destination_before,
+        )
+        self.assertEqual(InventoryItem.objects.get(location=self.unconfirmed_location, product=self.product).quantity_on_hand, unconfirmed_before)
+        self.assertEqual(StockMovement.objects.count(), movement_count)
+        self.assertEqual(AuditLog.objects.filter(message__icontains="completed source stock verification").count(), 1)
+        self.assertEqual(AuditLog.objects.filter(message__icontains="now requires manual action").count(), 1)
+
+    def test_complete_source_search_after_partial_found_preserves_found_quantity_only(self):
+        verification = self.create_source_stock_verification()
+        item = verification.items.get(product=self.product)
+        item.target_quantity = Decimal("5.000")
+        item.save(update_fields=["target_quantity", "updated_at"])
+        self.begin_source_stock_verification(verification)
+        source_before = InventoryItem.objects.filter(
+            branch=self.source_branch,
+            location=self.wrong_branch_location,
+            product=self.product,
+        ).first()
+        source_quantity_before = source_before.quantity_on_hand if source_before else Decimal("0")
+
+        found = self.record_source_stock_found(verification, quantity="2")
+        movement_count_after_found = StockMovement.objects.count()
+        response = self.complete_source_search(verification)
+
+        self.assertEqual(found.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        verification.refresh_from_db()
+        verification.reconciliation.refresh_from_db()
+        item.refresh_from_db()
+        source_after = InventoryItem.objects.get(branch=self.source_branch, location=self.wrong_branch_location, product=self.product)
+        self.assertEqual(item.found_quantity, Decimal("2.000"))
+        self.assertEqual(item.target_quantity - item.found_quantity, Decimal("3.000"))
+        self.assertEqual(source_after.quantity_on_hand, source_quantity_before + Decimal("2.000"))
+        self.assertEqual(StockMovement.objects.count(), movement_count_after_found)
+        self.assertEqual(verification.status, TransferDiscrepancySourceStockVerification.Status.COMPLETED_UNRESOLVED)
+        self.assertEqual(verification.reconciliation.status, TransferDiscrepancyReconciliation.Status.MANUAL_ACTION_REQUIRED)
+
+    def test_complete_source_search_is_idempotent_and_does_not_overwrite_closure(self):
+        verification = self.create_source_stock_verification()
+        self.begin_source_stock_verification(verification)
+
+        first = self.complete_source_search(verification, note="First note.", operation_id="same-source-search")
+        second = self.complete_source_search(verification, note="Different note.", operation_id="same-source-search")
+        third = self.complete_source_search(verification, note="Another note.", operation_id="different-source-search")
+
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(third.status_code, status.HTTP_400_BAD_REQUEST)
+        verification.refresh_from_db()
+        self.assertEqual(verification.search_completion_note, "First note.")
+        self.assertEqual(AuditLog.objects.filter(message__icontains="completed source stock verification").count(), 1)
+        self.assertEqual(AuditLog.objects.filter(message__icontains="now requires manual action").count(), 1)
+
+    def test_complete_source_search_validates_state_route_status_and_remaining(self):
+        pending = self.create_source_stock_verification()
+        pending_response = self.complete_source_search(pending, operation_id="bad-pending")
+        self.begin_source_stock_verification(pending)
+        self.record_source_stock_found(pending, operation_id="complete-all")
+        zero_remaining = self.complete_source_search(pending, operation_id="bad-zero-remaining")
+
+        self.assertEqual(pending_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(zero_remaining.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_record_found_rejected_after_completed_unresolved(self):
+        verification = self.create_source_stock_verification()
+        self.begin_source_stock_verification(verification)
+        self.complete_source_search(verification)
+        movement_count = StockMovement.objects.count()
+
+        response = self.record_source_stock_found(verification, operation_id="after-unresolved")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["detail"], "This source stock verification has already been completed.")
+        self.assertEqual(StockMovement.objects.count(), movement_count)
+
+    def test_manual_decision_completes_source_verification_escalation_without_inventory_mutation(self):
+        verification = self.create_source_stock_verification()
+        self.begin_source_stock_verification(verification)
+        self.complete_source_search(verification)
+        verification.refresh_from_db()
+        reconciliation = verification.reconciliation
+        source_before = InventoryItem.objects.filter(
+            branch=self.source_branch,
+            location=self.wrong_branch_location,
+            product=self.product,
+        ).first()
+        source_quantity_before = source_before.quantity_on_hand if source_before else Decimal("0")
+        destination_before = InventoryItem.objects.get(
+            branch=self.destination_branch,
+            location=self.destination_location,
+            product=self.product,
+        ).quantity_on_hand
+        unconfirmed_before = InventoryItem.objects.get(location=self.unconfirmed_location, product=self.product).quantity_on_hand
+        movement_count = StockMovement.objects.count()
+
+        response = self.complete_manual_reconciliation(reconciliation)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        reconciliation.refresh_from_db()
+        verification.refresh_from_db()
+        decision = TransferDiscrepancyManualReconciliationDecision.objects.get(reconciliation=reconciliation)
+        self.assertEqual(decision.outcome, TransferDiscrepancyManualReconciliationDecision.Outcome.SOURCE_LOSS_CONFIRMED)
+        self.assertEqual(decision.decision_note, "Source search was completed and the remaining unit could not be located.")
+        self.assertEqual(reconciliation.status, TransferDiscrepancyReconciliation.Status.COMPLETED)
+        self.assertIsNotNone(reconciliation.completed_at)
+        self.assertEqual(reconciliation.completed_by_worker_code, "WORKER-1")
+        self.assertEqual(reconciliation.route, TransferDiscrepancyReconciliation.Route.SOURCE_STOCK_VERIFICATION)
+        self.assertEqual(verification.status, TransferDiscrepancySourceStockVerification.Status.COMPLETED_UNRESOLVED)
+        source_after = InventoryItem.objects.filter(
+            branch=self.source_branch,
+            location=self.wrong_branch_location,
+            product=self.product,
+        ).first()
+        self.assertEqual(source_after.quantity_on_hand if source_after else Decimal("0"), source_quantity_before)
+        self.assertEqual(
+            InventoryItem.objects.get(branch=self.destination_branch, location=self.destination_location, product=self.product).quantity_on_hand,
+            destination_before,
+        )
+        self.assertEqual(InventoryItem.objects.get(location=self.unconfirmed_location, product=self.product).quantity_on_hand, unconfirmed_before)
+        self.assertEqual(StockMovement.objects.count(), movement_count)
+        self.assertEqual(AuditLog.objects.filter(message__icontains="with final outcome: Source loss confirmed").count(), 1)
+
+    def test_manual_decision_supports_original_manual_route(self):
+        reconciliation = self.create_acknowledged_manual_reconciliation()
+        movement_count = StockMovement.objects.count()
+
+        response = self.complete_manual_reconciliation(
+            reconciliation,
+            outcome=TransferDiscrepancyManualReconciliationDecision.Outcome.UNRESOLVED_LOSS_CLOSED,
+            note="Available evidence does not establish where the missing unit was lost.",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        reconciliation.refresh_from_db()
+        decision = TransferDiscrepancyManualReconciliationDecision.objects.get(reconciliation=reconciliation)
+        self.assertEqual(reconciliation.route, TransferDiscrepancyReconciliation.Route.MANUAL_RECONCILIATION)
+        self.assertEqual(reconciliation.status, TransferDiscrepancyReconciliation.Status.COMPLETED)
+        self.assertEqual(decision.outcome, TransferDiscrepancyManualReconciliationDecision.Outcome.UNRESOLVED_LOSS_CLOSED)
+        self.assertEqual(StockMovement.objects.count(), movement_count)
+
+    def test_manual_decision_can_record_administrative_error(self):
+        reconciliation = self.create_acknowledged_manual_reconciliation()
+
+        response = self.complete_manual_reconciliation(
+            reconciliation,
+            outcome=TransferDiscrepancyManualReconciliationDecision.Outcome.ADMINISTRATIVE_ERROR,
+            note="Evidence indicates a process discrepancy requiring no automatic inventory action.",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        decision = TransferDiscrepancyManualReconciliationDecision.objects.get(reconciliation=reconciliation)
+        self.assertEqual(decision.outcome, TransferDiscrepancyManualReconciliationDecision.Outcome.ADMINISTRATIVE_ERROR)
+
+    def test_manual_decision_validates_route_status_outcome_and_note(self):
+        verification = self.create_source_stock_verification()
+        pending_reconciliation = verification.reconciliation
+        pending_response = self.complete_manual_reconciliation(pending_reconciliation, operation_id="bad-pending")
+        invalid_outcome = self.complete_manual_reconciliation(
+            pending_reconciliation,
+            outcome="transit_loss_confirmed",
+            operation_id="bad-outcome",
+        )
+        empty_note = self.complete_manual_reconciliation(
+            pending_reconciliation,
+            note="",
+            operation_id="bad-note",
+        )
+
+        self.assertEqual(pending_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(invalid_outcome.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(empty_note.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(TransferDiscrepancyManualReconciliationDecision.objects.exists())
+
+    def test_manual_decision_rejects_transit_route(self):
+        discrepancy = self.create_shortage_discrepancy()
+        self.print_report(discrepancy)
+        self.confirm_shortage(discrepancy)
+        review = TransferDiscrepancySourceReview.objects.get(discrepancy=discrepancy)
+        self.begin_source_review(review)
+        self.complete_source_review(
+            review,
+            finding=TransferDiscrepancySourceReview.Finding.DISPATCH_EVIDENCE_MATCHES,
+            operation_id="transit-route-review",
+        )
+        reconciliation = TransferDiscrepancyReconciliation.objects.get(discrepancy=discrepancy)
+        self.acknowledge_reconciliation(reconciliation)
+
+        response = self.complete_manual_reconciliation(reconciliation)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["detail"], "This reconciliation requires transit investigation.")
+        self.assertFalse(TransferDiscrepancyManualReconciliationDecision.objects.exists())
+
+    def test_manual_decision_retry_does_not_overwrite_or_duplicate_audit(self):
+        verification = self.create_source_stock_verification()
+        self.begin_source_stock_verification(verification)
+        self.complete_source_search(verification)
+        reconciliation = verification.reconciliation
+
+        first = self.complete_manual_reconciliation(reconciliation, note="Original decision.", operation_id="same-manual")
+        second = self.complete_manual_reconciliation(reconciliation, note="Changed decision.", operation_id="same-manual")
+        third = self.complete_manual_reconciliation(reconciliation, note="Another decision.", operation_id="different-manual")
+
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(third.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(TransferDiscrepancyManualReconciliationDecision.objects.count(), 1)
+        decision = TransferDiscrepancyManualReconciliationDecision.objects.get()
+        self.assertEqual(decision.decision_note, "Original decision.")
+        self.assertEqual(AuditLog.objects.filter(message__icontains="with final outcome").count(), 1)
+
+    def test_stage_eight_full_source_recovery_still_needs_no_manual_decision(self):
+        verification = self.create_source_stock_verification()
+        self.begin_source_stock_verification(verification)
+        self.record_source_stock_found(verification)
+
+        verification.refresh_from_db()
+        verification.reconciliation.refresh_from_db()
+        self.assertEqual(verification.status, TransferDiscrepancySourceStockVerification.Status.COMPLETED)
+        self.assertEqual(verification.reconciliation.status, TransferDiscrepancyReconciliation.Status.COMPLETED)
+        self.assertFalse(
+            TransferDiscrepancyManualReconciliationDecision.objects.filter(reconciliation=verification.reconciliation).exists()
+        )
+
     def test_seed_demo_pallet_exists_and_seed_is_idempotent(self):
         output = StringIO()
         call_command("seed_demo_data", stdout=output)
@@ -1191,6 +2263,246 @@ class ScannerReceivingWorkflowTests(APITestCase):
         self.assertEqual(discrepancy_pallet.items.count(), 2)
         self.assertFalse(PalletReceivingSession.objects.filter(pallet=pallet).exists())
         self.assertFalse(TransferDiscrepancy.objects.filter(pallet__in=[pallet, discrepancy_pallet]).exists())
+
+    def test_seed_after_demo_report_posting_resets_unconfirmed_stock(self):
+        output = StringIO()
+        call_command("seed_demo_data", stdout=output)
+        start = self.client.post(
+            "/api/scanner/receiving/start/",
+            {"pallet_code": "PAL-GDA-GDY-DISC-001", "worker_code": "DEMO"},
+            format="json",
+        )
+        session_id = start.data["receiving_session"]["id"]
+        self.client.post(
+            "/api/scanner/receiving/scan-product/",
+            {"receiving_session_id": session_id, "product_code": "FILTR-001", "quantity": "4"},
+            format="json",
+        )
+        self.client.post(
+            "/api/scanner/receiving/put-away/",
+            {"receiving_session_id": session_id, "location_code": "A-01-01"},
+            format="json",
+        )
+        self.client.post(
+            "/api/scanner/receiving/scan-product/",
+            {"receiving_session_id": session_id, "product_code": "OLEJ-001", "quantity": "2"},
+            format="json",
+        )
+        self.client.post(
+            "/api/scanner/receiving/put-away/",
+            {"receiving_session_id": session_id, "location_code": "A-01-01"},
+            format="json",
+        )
+        close = self.client.post(
+            "/api/scanner/receiving/close/",
+            {"receiving_session_id": session_id},
+            format="json",
+        )
+        discrepancy_id = close.data["receiving_session"]["discrepancy"]["id"]
+        self.client.post(
+            f"/api/transfer-discrepancies/{discrepancy_id}/print-report/",
+            {"printer_code": "ZEBRA-01", "worker_code": "DEMO"},
+            format="json",
+        )
+        self.client.post(
+            f"/api/transfer-discrepancies/{discrepancy_id}/recover-item/",
+            {
+                "product_code": "FILTR-001",
+                "destination_location_code": "A-03-01",
+                "quantity": "1",
+                "worker_code": "DEMO",
+                "client_operation_id": "seed-recovery-test",
+            },
+            format="json",
+        )
+        self.assertTrue(InventoryItem.objects.filter(location__code="A-03-01", quantity_on_hand__gt=0).exists())
+
+        call_command("seed_demo_data", stdout=output)
+
+        self.assertFalse(InventoryItem.objects.filter(location__code="UNCONFIRMED", quantity_on_hand__gt=0).exists())
+        self.assertFalse(
+            InventoryItem.objects.filter(
+                location__code="A-03-01",
+                location__branch__code="GDY",
+                quantity_on_hand__gt=0,
+            ).exists()
+        )
+
+    def test_seed_after_demo_shortage_confirmation_resets_stage_five_state(self):
+        output = StringIO()
+        call_command("seed_demo_data", stdout=output)
+        start = self.client.post(
+            "/api/scanner/receiving/start/",
+            {"pallet_code": "PAL-GDA-GDY-DISC-001", "worker_code": "DEMO"},
+            format="json",
+        )
+        session_id = start.data["receiving_session"]["id"]
+        self.client.post(
+            "/api/scanner/receiving/scan-product/",
+            {"receiving_session_id": session_id, "product_code": "FILTR-001", "quantity": "4"},
+            format="json",
+        )
+        self.client.post(
+            "/api/scanner/receiving/put-away/",
+            {"receiving_session_id": session_id, "location_code": "A-01-01"},
+            format="json",
+        )
+        self.client.post(
+            "/api/scanner/receiving/scan-product/",
+            {"receiving_session_id": session_id, "product_code": "OLEJ-001", "quantity": "2"},
+            format="json",
+        )
+        self.client.post(
+            "/api/scanner/receiving/put-away/",
+            {"receiving_session_id": session_id, "location_code": "A-01-01"},
+            format="json",
+        )
+        close = self.client.post(
+            "/api/scanner/receiving/close/",
+            {"receiving_session_id": session_id},
+            format="json",
+        )
+        discrepancy_id = close.data["receiving_session"]["discrepancy"]["id"]
+        self.client.post(
+            f"/api/transfer-discrepancies/{discrepancy_id}/print-report/",
+            {"printer_code": "ZEBRA-01", "worker_code": "DEMO"},
+            format="json",
+        )
+        confirm = self.client.post(
+            f"/api/transfer-discrepancies/{discrepancy_id}/confirm-shortage/",
+            {
+                "product_code": "FILTR-001",
+                "quantity": "1",
+                "worker_code": "DEMO",
+                "client_operation_id": "seed-shortage-test",
+            },
+            format="json",
+        )
+        self.assertEqual(confirm.status_code, status.HTTP_200_OK)
+        self.assertTrue(TransferDiscrepancyShortageConfirmation.objects.exists())
+        self.assertTrue(StockMovement.objects.filter(movement_type=StockMovement.MovementType.DISCREPANCY_SHORTAGE).exists())
+
+        call_command("seed_demo_data", stdout=output)
+
+        self.assertFalse(TransferDiscrepancyShortageConfirmation.objects.exists())
+        self.assertFalse(TransferDiscrepancySourceReview.objects.exists())
+        self.assertFalse(StockMovement.objects.filter(movement_type=StockMovement.MovementType.DISCREPANCY_SHORTAGE).exists())
+        self.assertFalse(InventoryItem.objects.filter(location__code="UNCONFIRMED", quantity_on_hand__gt=0).exists())
+
+    def test_seed_after_completed_source_review_resets_stage_six_state(self):
+        output = StringIO()
+        call_command("seed_demo_data", stdout=output)
+        start = self.client.post(
+            "/api/scanner/receiving/start/",
+            {"pallet_code": "PAL-GDA-GDY-DISC-001", "worker_code": "DEMO"},
+            format="json",
+        )
+        session_id = start.data["receiving_session"]["id"]
+        self.client.post(
+            "/api/scanner/receiving/scan-product/",
+            {"receiving_session_id": session_id, "product_code": "FILTR-001", "quantity": "4"},
+            format="json",
+        )
+        self.client.post(
+            "/api/scanner/receiving/put-away/",
+            {"receiving_session_id": session_id, "location_code": "A-01-01"},
+            format="json",
+        )
+        self.client.post(
+            "/api/scanner/receiving/scan-product/",
+            {"receiving_session_id": session_id, "product_code": "OLEJ-001", "quantity": "2"},
+            format="json",
+        )
+        self.client.post(
+            "/api/scanner/receiving/put-away/",
+            {"receiving_session_id": session_id, "location_code": "A-01-01"},
+            format="json",
+        )
+        close = self.client.post("/api/scanner/receiving/close/", {"receiving_session_id": session_id}, format="json")
+        discrepancy_id = close.data["receiving_session"]["discrepancy"]["id"]
+        self.client.post(
+            f"/api/transfer-discrepancies/{discrepancy_id}/print-report/",
+            {"printer_code": "ZEBRA-01", "worker_code": "DEMO"},
+            format="json",
+        )
+        self.client.post(
+            f"/api/transfer-discrepancies/{discrepancy_id}/confirm-shortage/",
+            {
+                "product_code": "FILTR-001",
+                "quantity": "1",
+                "worker_code": "DEMO",
+                "client_operation_id": "seed-source-review-shortage",
+            },
+            format="json",
+        )
+        review = TransferDiscrepancySourceReview.objects.get()
+        self.begin_source_review(review, worker_code="DEMO")
+        self.complete_source_review(review, operation_id="seed-source-review-complete")
+        self.assertEqual(TransferDiscrepancySourceReview.objects.count(), 1)
+
+        call_command("seed_demo_data", stdout=output)
+
+        self.assertFalse(TransferDiscrepancySourceReview.objects.exists())
+        self.assertFalse(TransferDiscrepancyReconciliation.objects.exists())
+        self.assertFalse(TransferDiscrepancy.objects.filter(pallet__scan_code="PAL-GDA-GDY-DISC-001").exists())
+
+    def test_seed_after_acknowledged_reconciliation_resets_stage_seven_state(self):
+        output = StringIO()
+        call_command("seed_demo_data", stdout=output)
+        start = self.client.post(
+            "/api/scanner/receiving/start/",
+            {"pallet_code": "PAL-GDA-GDY-DISC-001", "worker_code": "DEMO"},
+            format="json",
+        )
+        session_id = start.data["receiving_session"]["id"]
+        self.client.post(
+            "/api/scanner/receiving/scan-product/",
+            {"receiving_session_id": session_id, "product_code": "FILTR-001", "quantity": "4"},
+            format="json",
+        )
+        self.client.post(
+            "/api/scanner/receiving/put-away/",
+            {"receiving_session_id": session_id, "location_code": "A-01-01"},
+            format="json",
+        )
+        self.client.post(
+            "/api/scanner/receiving/scan-product/",
+            {"receiving_session_id": session_id, "product_code": "OLEJ-001", "quantity": "2"},
+            format="json",
+        )
+        self.client.post(
+            "/api/scanner/receiving/put-away/",
+            {"receiving_session_id": session_id, "location_code": "A-01-01"},
+            format="json",
+        )
+        close = self.client.post("/api/scanner/receiving/close/", {"receiving_session_id": session_id}, format="json")
+        discrepancy_id = close.data["receiving_session"]["discrepancy"]["id"]
+        self.client.post(
+            f"/api/transfer-discrepancies/{discrepancy_id}/print-report/",
+            {"printer_code": "ZEBRA-01", "worker_code": "DEMO"},
+            format="json",
+        )
+        self.client.post(
+            f"/api/transfer-discrepancies/{discrepancy_id}/confirm-shortage/",
+            {
+                "product_code": "FILTR-001",
+                "quantity": "1",
+                "worker_code": "DEMO",
+                "client_operation_id": "seed-reconciliation-shortage",
+            },
+            format="json",
+        )
+        review = TransferDiscrepancySourceReview.objects.get()
+        self.begin_source_review(review, worker_code="DEMO")
+        self.complete_source_review(review, operation_id="seed-reconciliation-review")
+        reconciliation = TransferDiscrepancyReconciliation.objects.get()
+        self.acknowledge_reconciliation(reconciliation, worker_code="DEMO")
+        self.assertEqual(TransferDiscrepancyReconciliation.objects.count(), 1)
+
+        call_command("seed_demo_data", stdout=output)
+
+        self.assertFalse(TransferDiscrepancyReconciliation.objects.exists())
+        self.assertFalse(TransferDiscrepancySourceReview.objects.exists())
 
 
 class ScannerLookupAndQuickTransferTests(APITestCase):

@@ -2,6 +2,7 @@ from decimal import Decimal
 from dataclasses import dataclass
 
 from operations.models import CartPickedItem, CartWorkSession, ScannerCart, ScannerCustomerLabel, TransferPallet
+from operations.services import discrepancy_line_remaining, get_source_verification_totals, reconciliation_next_action
 from warehouse.models import InventoryItem, Location
 
 
@@ -150,6 +151,10 @@ def _customer_label_contents(label: ScannerCustomerLabel):
 
 def _pallet_contents(pallet: TransferPallet):
     discrepancy = getattr(pallet, "discrepancy", None)
+    source_review = getattr(discrepancy, "source_review", None) if discrepancy else None
+    reconciliation = getattr(discrepancy, "reconciliation", None) if discrepancy else None
+    manual_decision = getattr(reconciliation, "manual_decision", None) if reconciliation else None
+    source_verification = getattr(reconciliation, "source_stock_verification", None) if reconciliation else None
     discrepancy_items = {item.pallet_item_id: item for item in discrepancy.items.all()} if discrepancy else {}
     items = []
     for item in pallet.items.select_related("product").order_by("product__sku"):
@@ -165,6 +170,16 @@ def _pallet_contents(pallet: TransferPallet):
                 "received_quantity": piece_quantity(item.received_quantity),
                 "remaining_quantity": piece_quantity(remaining),
                 "missing_quantity": piece_quantity(discrepancy_item.discrepancy_quantity) if discrepancy_item else 0,
+                "posted_to_unconfirmed_quantity": piece_quantity(discrepancy_item.posted_to_unconfirmed_quantity)
+                if discrepancy_item
+                else 0,
+                "recovered_quantity": piece_quantity(discrepancy_item.recovered_quantity) if discrepancy_item else 0,
+                "confirmed_shortage_quantity": piece_quantity(discrepancy_item.confirmed_shortage_quantity)
+                if discrepancy_item
+                else 0,
+                "investigation_remaining_quantity": piece_quantity(discrepancy_line_remaining(discrepancy_item))
+                if discrepancy_item
+                else 0,
                 "discrepancy_type": discrepancy_item.discrepancy_type if discrepancy_item else None,
             }
         )
@@ -182,6 +197,53 @@ def _pallet_contents(pallet: TransferPallet):
                 + (f" / Discrepancy: {discrepancy.reference}" if discrepancy else "")
             ),
             "discrepancy_reference": discrepancy.reference if discrepancy else None,
+            "discrepancy_status": discrepancy.status if discrepancy else None,
+            "report_printed": bool(discrepancy and discrepancy.report_printed_at),
+            "shortage_posted": bool(discrepancy and discrepancy.shortage_posted_at),
+            "source_review": {
+                "id": source_review.id,
+                "reference": source_review.reference,
+                "status": source_review.status,
+                "finding": source_review.finding,
+                "finding_display": source_review.get_finding_display() if source_review.finding else "",
+            }
+            if source_review
+            else None,
+            "reconciliation": {
+                "id": reconciliation.id,
+                "reference": reconciliation.reference,
+                "route": reconciliation.route,
+                "route_label": reconciliation.get_route_display(),
+                "status": reconciliation.status,
+                "next_action_label": reconciliation_next_action(
+                    reconciliation.route,
+                    reconciliation.status,
+                    manual_decision is not None,
+                ),
+                "manual_decision": {
+                    "outcome": manual_decision.outcome,
+                    "outcome_label": manual_decision.get_outcome_display(),
+                    "decided_at": manual_decision.decided_at.isoformat() if manual_decision.decided_at else None,
+                    "decided_by_worker_code": manual_decision.decided_by_worker_code,
+                }
+                if manual_decision
+                else None,
+            }
+            if reconciliation
+            else None,
+            "source_stock_verification": {
+                "id": source_verification.id,
+                "reference": source_verification.reference,
+                "status": source_verification.status,
+                "total_target_quantity": piece_quantity(get_source_verification_totals(source_verification)["target"]),
+                "total_found_quantity": piece_quantity(get_source_verification_totals(source_verification)["found"]),
+                "total_remaining_quantity": piece_quantity(get_source_verification_totals(source_verification)["remaining"]),
+                "total_unresolved_quantity": piece_quantity(
+                    get_source_verification_totals(source_verification)["unresolved"]
+                ),
+            }
+            if source_verification
+            else None,
             "items": items,
         },
     )

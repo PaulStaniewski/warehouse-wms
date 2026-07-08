@@ -273,6 +273,10 @@ export type ScannerContentsItem = {
   prepared_quantity?: number;
   remaining_quantity?: number;
   missing_quantity?: number;
+  posted_to_unconfirmed_quantity?: number;
+  recovered_quantity?: number;
+  confirmed_shortage_quantity?: number;
+  investigation_remaining_quantity?: number;
   discrepancy_type?: string | null;
   order_reference?: string;
   customer_name?: string;
@@ -285,6 +289,12 @@ export type ScannerContentsResponse = {
   status: string;
   description: string;
   discrepancy_reference?: string | null;
+  discrepancy_status?: string | null;
+  report_printed?: boolean;
+  shortage_posted?: boolean;
+  source_review?: TransferDiscrepancySourceReviewSummary | null;
+  reconciliation?: TransferDiscrepancyReconciliationSummary | null;
+  source_stock_verification?: TransferDiscrepancySourceStockVerificationSummary | null;
   items: ScannerContentsItem[];
 };
 
@@ -353,8 +363,20 @@ export type TransferDiscrepancySummary = {
   id: number;
   reference: string;
   status: string;
+  report_printed_at: string | null;
+  report_print_count: number;
+  last_report_printer_code: string;
+  shortage_posted_at: string | null;
+  resolved_at: string | null;
+  resolved_by_worker_code: string;
+  confirmed_shortage_at: string | null;
+  confirmed_shortage_by_worker_code: string;
   line_count: number;
   total_discrepancy_quantity: number;
+  total_posted_to_unconfirmed_quantity: number;
+  total_recovered_quantity: number;
+  total_confirmed_shortage_quantity: number;
+  total_remaining_quantity: number;
   items: TransferDiscrepancySummaryItem[];
 };
 
@@ -368,6 +390,10 @@ export type TransferDiscrepancySummaryItem = {
   received_quantity: number;
   difference_quantity: number;
   discrepancy_quantity: number;
+  posted_to_unconfirmed_quantity: number;
+  recovered_quantity: number;
+  confirmed_shortage_quantity: number;
+  remaining_quantity: number;
 };
 
 export type TransferDiscrepancyScanHistory = {
@@ -390,6 +416,13 @@ export type TransferDiscrepancyItem = {
   received_quantity: string;
   difference_quantity: string;
   discrepancy_quantity: string;
+  posted_to_unconfirmed_quantity: string;
+  posted_to_unconfirmed_at: string | null;
+  recovered_quantity: string;
+  last_recovered_at: string | null;
+  confirmed_shortage_quantity: string;
+  last_confirmed_shortage_at: string | null;
+  remaining_quantity: string;
   scan_history: TransferDiscrepancyScanHistory[];
 };
 
@@ -406,11 +439,355 @@ export type TransferDiscrepancy = {
   created_by_worker_code: string;
   notes: string;
   closed_at: string | null;
+  report_printed_at: string | null;
+  report_print_count: number;
+  last_report_printer_code: string;
+  shortage_posted_at: string | null;
+  resolved_at: string | null;
+  resolved_by_worker_code: string;
+  confirmed_shortage_at: string | null;
+  confirmed_shortage_by_worker_code: string;
   line_count: number;
   total_discrepancy_quantity: string;
+  total_posted_to_unconfirmed_quantity: string;
+  total_recovered_quantity: string;
+  total_confirmed_shortage_quantity: string;
+  total_remaining_quantity: string;
   items: TransferDiscrepancyItem[];
+  recoveries: TransferDiscrepancyRecovery[];
+  shortage_confirmations: TransferDiscrepancyShortageConfirmation[];
+  source_review: TransferDiscrepancySourceReviewSummary | null;
+  reconciliation: TransferDiscrepancyReconciliationSummary | null;
   created_at: string;
   updated_at: string;
+};
+
+export type TransferDiscrepancySourceReviewSummary = {
+  id: number;
+  reference: string;
+  status: string;
+  finding: string;
+  finding_display: string;
+  completed_at: string | null;
+};
+
+export type TransferDiscrepancyReconciliationSummary = {
+  id: number;
+  reference: string;
+  route: string;
+  route_label: string;
+  status: string;
+  next_action_label: string;
+  manual_decision_required?: boolean;
+  manual_decision?: TransferDiscrepancyManualDecision | null;
+  source_stock_verification?: TransferDiscrepancySourceStockVerificationSummary | null;
+};
+
+export type TransferDiscrepancyPrintResponse = {
+  message: string;
+  first_print: boolean;
+  posted_quantity: string;
+  discrepancy: TransferDiscrepancy;
+};
+
+export type TransferDiscrepancyRecovery = {
+  id: number;
+  product_sku: string;
+  product_name: string;
+  quantity: string;
+  source_location_code: string;
+  destination_location_code: string;
+  worker_code: string;
+  recovered_at: string;
+  client_operation_id: string;
+};
+
+export type TransferDiscrepancyShortageConfirmation = {
+  id: number;
+  product_sku: string;
+  product_name: string;
+  quantity: string;
+  unconfirmed_location_code: string;
+  worker_code: string;
+  confirmed_at: string;
+  client_operation_id: string;
+};
+
+export type TransferDiscrepancyRecoverResponse = {
+  message: string;
+  recovery: {
+    discrepancy_reference: string;
+    status: string;
+    product_code: string;
+    recovered_quantity: string;
+    line_recovered_quantity: string;
+    line_confirmed_shortage_quantity: string;
+    line_remaining_quantity: string;
+    total_remaining_quantity: string;
+    destination_location_code: string;
+    recovery_id: number;
+  };
+};
+
+export type TransferDiscrepancyConfirmShortageResponse = {
+  message: string;
+  confirmation: {
+    discrepancy_reference: string;
+    status: string;
+    product_code: string;
+    confirmed_quantity: string;
+    line_recovered_quantity: string;
+    line_confirmed_shortage_quantity: string;
+    line_remaining_quantity: string;
+    total_recovered_quantity: string;
+    total_confirmed_shortage_quantity: string;
+    total_remaining_quantity: string;
+    unconfirmed_location_code: string;
+    confirmation_id: number;
+  };
+};
+
+export type TransferDiscrepancySourceReviewLine = {
+  id: number;
+  product_sku: string;
+  product_name: string;
+  expected_quantity: string;
+  received_quantity: string;
+  missing_quantity: string;
+  recovered_quantity: string;
+  confirmed_shortage_quantity: string;
+  remaining_quantity: string;
+};
+
+export type TransferDiscrepancySourceReviewEvidence = {
+  product_sku: string;
+  product_name: string;
+  expected_quantity?: string;
+  quantity?: string;
+  pallet_code?: string;
+  released_at?: string | null;
+  destination_location_code?: string;
+  worker_code?: string;
+  scanned_at?: string;
+};
+
+export type TransferDiscrepancySourceReview = {
+  id: number;
+  reference: string;
+  status: string;
+  finding: string;
+  finding_display: string;
+  started_at: string | null;
+  started_by_worker_code: string;
+  completed_at: string | null;
+  completed_by_worker_code: string;
+  finding_note: string;
+  created_at: string;
+  updated_at: string;
+  discrepancy: number;
+  discrepancy_reference: string;
+  discrepancy_status: string;
+  discrepancy_created_at: string;
+  discrepancy_confirmed_shortage_at: string | null;
+  discrepancy_confirmed_shortage_by_worker_code: string;
+  transfer_reference: string;
+  source_branch: number;
+  source_branch_code: string;
+  source_branch_name: string;
+  destination_branch_code: string;
+  destination_branch_name: string;
+  pallet_code: string;
+  pallet_closed_at: string | null;
+  total_expected_quantity: string;
+  total_received_quantity: string;
+  total_missing_quantity: string;
+  total_posted_to_unconfirmed_quantity: string;
+  total_recovered_quantity: string;
+  total_confirmed_shortage_quantity: string;
+  total_remaining_quantity: string;
+  lines: TransferDiscrepancySourceReviewLine[];
+  source_dispatch_evidence: TransferDiscrepancySourceReviewEvidence[];
+  destination_receiving_evidence: TransferDiscrepancySourceReviewEvidence[];
+  recoveries: TransferDiscrepancyRecovery[];
+  shortage_confirmations: TransferDiscrepancyShortageConfirmation[];
+  reconciliation: TransferDiscrepancyReconciliationSummary | null;
+};
+
+export type TransferDiscrepancySourceReviewResponse = {
+  message: string;
+  source_review: TransferDiscrepancySourceReview;
+  reconciliation_id?: number | null;
+};
+
+export type TransferDiscrepancyReconciliationLine = {
+  id: number;
+  product_sku: string;
+  product_name: string;
+  missing_quantity: string;
+  recovered_quantity: string;
+  confirmed_shortage_quantity: string;
+  remaining_quantity: string;
+};
+
+export type TransferDiscrepancyReconciliation = {
+  id: number;
+  reference: string;
+  route: string;
+  route_label: string;
+  status: string;
+  status_label: string;
+  next_action_label: string;
+  manual_decision_required: boolean;
+  manual_decision: TransferDiscrepancyManualDecision | null;
+  created_at: string;
+  updated_at: string;
+  acknowledged_at: string | null;
+  acknowledged_by_worker_code: string;
+  completed_at: string | null;
+  completed_by_worker_code: string;
+  source_stock_verification: TransferDiscrepancySourceStockVerificationSummary | null;
+  discrepancy: number;
+  discrepancy_reference: string;
+  discrepancy_status: string;
+  discrepancy_confirmed_shortage_at: string | null;
+  discrepancy_confirmed_shortage_by_worker_code: string;
+  source_review: number;
+  source_review_reference: string;
+  source_review_status: string;
+  source_review_finding: string;
+  source_review_finding_display: string;
+  source_review_finding_note: string;
+  source_review_completed_at: string | null;
+  source_review_completed_by_worker_code: string;
+  transfer_reference: string;
+  source_branch_code: string;
+  source_branch_name: string;
+  destination_branch_code: string;
+  destination_branch_name: string;
+  pallet_code: string;
+  total_posted_to_unconfirmed_quantity: string;
+  total_recovered_quantity: string;
+  total_confirmed_shortage_quantity: string;
+  total_remaining_quantity: string;
+  lines: TransferDiscrepancyReconciliationLine[];
+};
+
+export type TransferDiscrepancyManualDecision = {
+  id: number;
+  outcome: string;
+  outcome_label: string;
+  decision_note: string;
+  decided_at: string;
+  decided_by_worker_code: string;
+};
+
+export type TransferDiscrepancyReconciliationResponse = {
+  message: string;
+  reconciliation: TransferDiscrepancyReconciliation;
+  source_stock_verification_id?: number | null;
+  source_stock_verification_created?: boolean;
+  manual_decision?: TransferDiscrepancyManualDecision;
+};
+
+export type TransferDiscrepancySourceStockVerificationSummary = {
+  id: number;
+  reference: string;
+  status: string;
+  status_label?: string;
+  total_target_quantity: string | number;
+  total_found_quantity: string | number;
+  total_remaining_quantity: string | number;
+  total_unresolved_quantity: string | number;
+  search_completed_at?: string | null;
+  search_completed_by_worker_code?: string;
+  search_completion_note?: string;
+};
+
+export type TransferDiscrepancySourceStockVerificationItem = {
+  id: number;
+  product_sku: string;
+  product_name: string;
+  target_quantity: string;
+  found_quantity: string;
+  remaining_quantity: string;
+  unresolved_quantity: string;
+  last_found_at: string | null;
+};
+
+export type TransferDiscrepancySourceStockRecovery = {
+  id: number;
+  product_sku: string;
+  product_name: string;
+  quantity: string;
+  destination_location_code: string;
+  destination_location_name: string;
+  worker_code: string;
+  recovered_at: string;
+  client_operation_id: string;
+};
+
+export type TransferDiscrepancySourceStockVerification = {
+  id: number;
+  reference: string;
+  status: string;
+  status_label: string;
+  next_action_label: string;
+  created_at: string;
+  updated_at: string;
+  started_at: string | null;
+  started_by_worker_code: string;
+  completed_at: string | null;
+  completed_by_worker_code: string;
+  search_completed_at: string | null;
+  search_completed_by_worker_code: string;
+  search_completion_note: string;
+  search_completion_operation_id: string | null;
+  reconciliation: number;
+  reconciliation_reference: string;
+  reconciliation_status: string;
+  reconciliation_route: string;
+  reconciliation_route_label: string;
+  reconciliation_manual_decision: TransferDiscrepancyManualDecision | null;
+  source_review_reference: string;
+  source_review_finding: string;
+  source_review_finding_display: string;
+  discrepancy_reference: string;
+  discrepancy_status: string;
+  transfer_reference: string;
+  source_branch_code: string;
+  source_branch_name: string;
+  destination_branch_code: string;
+  destination_branch_name: string;
+  pallet_code: string;
+  total_target_quantity: string;
+  total_found_quantity: string;
+  total_remaining_quantity: string;
+  total_unresolved_quantity: string;
+  items: TransferDiscrepancySourceStockVerificationItem[];
+  recoveries: TransferDiscrepancySourceStockRecovery[];
+};
+
+export type TransferDiscrepancySourceStockVerificationResponse = {
+  message: string;
+  verification: TransferDiscrepancySourceStockVerification;
+};
+
+export type TransferDiscrepancySourceStockRecoveryResponse = {
+  message: string;
+  recovery: {
+    verification_reference: string;
+    verification_status: string;
+    reconciliation_reference: string;
+    reconciliation_status: string;
+    product_code: string;
+    found_quantity: string;
+    line_found_quantity: string;
+    line_remaining_quantity: string;
+    total_found_quantity: string;
+    total_remaining_quantity: string;
+    destination_location_code: string;
+    recovery_id: number;
+  };
 };
 
 export type ScannerProforma = {

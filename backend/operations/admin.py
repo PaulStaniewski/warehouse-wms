@@ -22,6 +22,14 @@ from operations.models import (
     StockMovement,
     TransferDiscrepancy,
     TransferDiscrepancyItem,
+    TransferDiscrepancyManualReconciliationDecision,
+    TransferDiscrepancyReconciliation,
+    TransferDiscrepancyRecovery,
+    TransferDiscrepancyShortageConfirmation,
+    TransferDiscrepancySourceStockRecovery,
+    TransferDiscrepancySourceStockVerification,
+    TransferDiscrepancySourceStockVerificationItem,
+    TransferDiscrepancySourceReview,
     TransferPallet,
     TransferPalletItem,
 )
@@ -230,9 +238,90 @@ class TransferDiscrepancyItemAdmin(admin.ModelAdmin):
         "received_quantity",
         "difference_quantity",
         "discrepancy_quantity",
+        "recovered_quantity",
+        "confirmed_shortage_quantity",
     ]
     list_filter = ["discrepancy_type", "product"]
     search_fields = ["discrepancy__reference", "product__sku", "product__name"]
+
+
+@admin.register(TransferDiscrepancyRecovery)
+class TransferDiscrepancyRecoveryAdmin(admin.ModelAdmin):
+    list_display = ["discrepancy", "product", "quantity", "source_location", "destination_location", "worker_code", "recovered_at"]
+    list_filter = ["product", "source_location", "destination_location"]
+    search_fields = ["discrepancy__reference", "product__sku", "destination_location__code", "client_operation_id"]
+
+
+@admin.register(TransferDiscrepancyShortageConfirmation)
+class TransferDiscrepancyShortageConfirmationAdmin(admin.ModelAdmin):
+    list_display = ["discrepancy", "product", "quantity", "unconfirmed_location", "worker_code", "confirmed_at"]
+    list_filter = ["product", "unconfirmed_location"]
+    search_fields = ["discrepancy__reference", "product__sku", "unconfirmed_location__code", "client_operation_id"]
+
+
+@admin.register(TransferDiscrepancySourceReview)
+class TransferDiscrepancySourceReviewAdmin(admin.ModelAdmin):
+    list_display = ["reference", "discrepancy", "source_branch", "status", "finding", "created_at"]
+    list_filter = ["status", "finding", "source_branch"]
+    search_fields = [
+        "reference",
+        "discrepancy__reference",
+        "discrepancy__pallet__scan_code",
+        "discrepancy__transfer__reference",
+    ]
+
+
+@admin.register(TransferDiscrepancyReconciliation)
+class TransferDiscrepancyReconciliationAdmin(admin.ModelAdmin):
+    list_display = ["reference", "discrepancy", "source_review", "route", "status", "created_at"]
+    list_filter = ["route", "status", "discrepancy__transfer__source_branch", "discrepancy__transfer__destination_branch"]
+    search_fields = [
+        "reference",
+        "source_review__reference",
+        "discrepancy__reference",
+        "discrepancy__pallet__scan_code",
+        "discrepancy__transfer__reference",
+    ]
+
+
+@admin.register(TransferDiscrepancyManualReconciliationDecision)
+class TransferDiscrepancyManualReconciliationDecisionAdmin(admin.ModelAdmin):
+    list_display = ["reconciliation", "outcome", "decided_by_worker_code", "decided_at"]
+    list_filter = ["outcome", "decided_at"]
+    search_fields = ["reconciliation__reference", "decision_note", "client_operation_id"]
+
+
+class TransferDiscrepancySourceStockVerificationItemInline(admin.TabularInline):
+    model = TransferDiscrepancySourceStockVerificationItem
+    extra = 0
+
+
+@admin.register(TransferDiscrepancySourceStockVerification)
+class TransferDiscrepancySourceStockVerificationAdmin(admin.ModelAdmin):
+    list_display = [
+        "reference",
+        "reconciliation",
+        "status",
+        "started_at",
+        "completed_at",
+        "search_completed_at",
+        "created_at",
+    ]
+    list_filter = ["status", "reconciliation__discrepancy__transfer__source_branch"]
+    search_fields = [
+        "reference",
+        "reconciliation__reference",
+        "reconciliation__discrepancy__reference",
+        "reconciliation__discrepancy__pallet__scan_code",
+    ]
+    inlines = [TransferDiscrepancySourceStockVerificationItemInline]
+
+
+@admin.register(TransferDiscrepancySourceStockRecovery)
+class TransferDiscrepancySourceStockRecoveryAdmin(admin.ModelAdmin):
+    list_display = ["verification", "product", "quantity", "destination_location", "worker_code", "recovered_at"]
+    list_filter = ["product", "destination_location"]
+    search_fields = ["verification__reference", "product__sku", "destination_location__code", "client_operation_id"]
 
 
 @admin.register(StockMovement)

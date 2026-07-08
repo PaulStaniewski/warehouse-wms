@@ -61,6 +61,13 @@ function renderItemDetail(item: ScannerContentsItem, objectType: ScannerContents
         Expected {formatQuantity(item.expected_quantity ?? item.quantity)} · Received {formatQuantity(item.received_quantity)} · Remaining{" "}
         {formatQuantity(item.remaining_quantity)}
         {item.missing_quantity ? ` · Missing ${formatQuantity(item.missing_quantity)}` : ""}
+        {item.recovered_quantity ? ` · Recovered ${formatQuantity(item.recovered_quantity)}` : ""}
+        {item.confirmed_shortage_quantity
+          ? ` · Confirmed shortage ${formatQuantity(item.confirmed_shortage_quantity)}`
+          : ""}
+        {item.investigation_remaining_quantity !== undefined && item.missing_quantity
+          ? ` · Investigation remaining ${formatQuantity(item.investigation_remaining_quantity)}`
+          : ""}
       </small>
     );
   }
@@ -159,6 +166,33 @@ export function ScannerContentsPage() {
             <span>{formatObjectType(lookup.data.object_type)}</span>
             <h1>{lookup.data.code}</h1>
             <p>{lookup.data.description}</p>
+            {lookup.data.object_type === "pallet" && lookup.data.discrepancy_reference && (
+              <small>
+                Status: {lookup.data.discrepancy_status || "-"} · Report:{" "}
+                {lookup.data.report_printed ? "Printed" : "Not printed"} · UNCONFIRMED:{" "}
+                {lookup.data.shortage_posted ? "Posted" : "Not posted"}
+              </small>
+            )}
+            {lookup.data.object_type === "pallet" && lookup.data.source_review && (
+              <small>
+                Source review: {lookup.data.source_review.reference} / {lookup.data.source_review.status}
+                {lookup.data.source_review.finding_display ? ` / ${lookup.data.source_review.finding_display}` : ""}
+              </small>
+            )}
+            {lookup.data.object_type === "pallet" && lookup.data.reconciliation && (
+              <small>
+                Reconciliation: {lookup.data.reconciliation.route_label} / {lookup.data.reconciliation.status}
+                {lookup.data.reconciliation.manual_decision ? ` / ${lookup.data.reconciliation.manual_decision.outcome_label}` : ""}
+              </small>
+            )}
+            {lookup.data.object_type === "pallet" && lookup.data.source_stock_verification && (
+              <small>
+                Source verification: {lookup.data.source_stock_verification.status} / Found at source{" "}
+                {formatQuantity(Number(lookup.data.source_stock_verification.total_found_quantity))} / Remaining{" "}
+                {formatQuantity(Number(lookup.data.source_stock_verification.total_remaining_quantity))} / Unresolved{" "}
+                {formatQuantity(Number(lookup.data.source_stock_verification.total_unresolved_quantity))}
+              </small>
+            )}
             <small>{objectLineCount(lookup.data)}</small>
           </section>
 

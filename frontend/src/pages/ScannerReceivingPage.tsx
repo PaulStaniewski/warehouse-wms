@@ -10,13 +10,24 @@ import {
   useScannerReceivingPutAway,
   useScannerReceivingScanProduct,
   useScannerReceivingStart,
+  useConfirmTransferDiscrepancyShortage,
+  usePrintTransferDiscrepancyReport,
+  useRecoverTransferDiscrepancyItem,
 } from "../api/queries";
 import { CameraBarcodeScanner } from "../components/scanner/CameraBarcodeScanner";
 import type { ScannerReceivingSession, TransferPalletManifestItem } from "../types/api";
 
 const RECEIVING_SESSION_KEY = "warehouse-wms-receiving-session-id";
 
-type CameraMode = "pallet" | "product" | "location" | null;
+type CameraMode =
+  | "pallet"
+  | "product"
+  | "location"
+  | "printer"
+  | "recovery-product"
+  | "recovery-location"
+  | "shortage-product"
+  | null;
 
 function getStoredReceivingSessionId() {
   const rawValue = window.localStorage.getItem(RECEIVING_SESSION_KEY);
@@ -85,6 +96,14 @@ export function ScannerReceivingPage() {
   const [productCode, setProductCode] = useState("");
   const [quantity, setQuantity] = useState("1");
   const [locationCode, setLocationCode] = useState("");
+  const [printerCode, setPrinterCode] = useState("ZEBRA-01");
+  const [recoveryProductCode, setRecoveryProductCode] = useState("");
+  const [recoveryLocationCode, setRecoveryLocationCode] = useState("");
+  const [recoveryQuantity, setRecoveryQuantity] = useState("1");
+  const [shortageProductCode, setShortageProductCode] = useState("");
+  const [shortageQuantity, setShortageQuantity] = useState("1");
+  const [shortageReview, setShortageReview] = useState(false);
+  const [shortageOperationId, setShortageOperationId] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [cameraMode, setCameraMode] = useState<CameraMode>(null);
@@ -97,6 +116,9 @@ export function ScannerReceivingPage() {
   const scanProduct = useScannerReceivingScanProduct();
   const putAway = useScannerReceivingPutAway();
   const closeReceiving = useScannerReceivingClose();
+  const printReport = usePrintTransferDiscrepancyReport();
+  const recoverItem = useRecoverTransferDiscrepancyItem();
+  const confirmShortage = useConfirmTransferDiscrepancyShortage();
   const session = currentSession.data?.receiving_session;
   const [closeResult, setCloseResult] = useState<{
     result?: "exact" | "discrepancy";
@@ -239,12 +261,153 @@ export function ScannerReceivingPage() {
     }
   }
 
+  async function handlePrintReport(event?: FormEvent<HTMLFormElement>, scannedCode?: string) {
+    event?.preventDefault();
+    const discrepancy = closeResult?.session.discrepancy;
+    const code = (scannedCode ?? printerCode).trim();
+    if (!discrepancy || !code) {
+      return;
+    }
+    setMessage(null);
+    setErrorMessage(null);
+    try {
+      const response = await printReport.mutateAsync({
+        discrepancyId: discrepancy.id,
+        printerCode: code,
+        workerCode,
+      });
+      setPrinterCode(code);
+      setMessage(
+        response.first_print
+          ? "Report printed. Shortage posted to UNCONFIRMED."
+          : "Report reprinted. UNCONFIRMED was not posted again.",
+      );
+      setCloseResult({
+        result: "discrepancy",
+        session: {
+          ...closeResult.session,
+          discrepancy: {
+            ...discrepancy,
+            status: response.discrepancy.status,
+            report_printed_at: response.discrepancy.report_printed_at,
+            report_print_count: response.discrepancy.report_print_count,
+            last_report_printer_code: response.discrepancy.last_report_printer_code,
+            shortage_posted_at: response.discrepancy.shortage_posted_at,
+          },
+        },
+        message: response.message,
+      });
+    } catch (error) {
+      setErrorMessage(getErrorMessage(error, "Could not print discrepancy report."));
+    }
+  }
+
+  async function handleRecoverItem(event?: FormEvent<HTMLFormElement>) {
+    event?.preventDefault();
+    const discrepancy = closeResult?.session.discrepancy;
+    if (!discrepancy) {
+      return;
+    }
+    setMessage(null);
+    setErrorMessage(null);
+    try {
+      const response = await recoverItem.mutateAsync({
+        clientOperationId: crypto.randomUUID(),
+        destinationLocationCode: recoveryLocationCode.trim(),
+        discrepancyId: discrepancy.id,
+        productCode: recoveryProductCode.trim(),
+        quantity: recoveryQuantity,
+        workerCode,
+      });
+      setMessage(
+        Number(response.recovery.total_remaining_quantity) === 0
+          ? "Item recovered. All missing quantity has been recovered."
+          : `Item recovered. Remaining discrepancy quantity ${response.recovery.total_remaining_quantity}.`,
+      );
+      setRecoveryProductCode("");
+      setRecoveryLocationCode("");
+      setRecoveryQuantity("1");
+      setCloseResult({
+        ...closeResult,
+        session: {
+          ...closeResult.session,
+          discrepancy: discrepancy
+            ? {
+                ...discrepancy,
+                status: response.recovery.status,
+              }
+            : null,
+        },
+      });
+    } catch (error) {
+      setErrorMessage(getErrorMessage(error, "Could not record recovered item."));
+    }
+  }
+
+  function handleReviewShortage(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!shortageProductCode.trim() || !shortageQuantity.trim()) {
+      return;
+    }
+    setShortageOperationId((current) => current ?? crypto.randomUUID());
+    setShortageReview(true);
+    setMessage(null);
+    setErrorMessage(null);
+  }
+
+  async function handleConfirmShortage() {
+    const discrepancy = closeResult?.session.discrepancy;
+    if (!discrepancy || !shortageOperationId) {
+      return;
+    }
+    setMessage(null);
+    setErrorMessage(null);
+    try {
+      const response = await confirmShortage.mutateAsync({
+        clientOperationId: shortageOperationId,
+        discrepancyId: discrepancy.id,
+        productCode: shortageProductCode.trim(),
+        quantity: shortageQuantity,
+        workerCode,
+      });
+      const isFinal = Number(response.confirmation.total_remaining_quantity) === 0;
+      setMessage(
+        isFinal
+          ? `Shortage confirmed. Status ${response.confirmation.status}.`
+          : `Shortage recorded. Remaining investigation quantity ${response.confirmation.total_remaining_quantity}.`,
+      );
+      setShortageProductCode("");
+      setShortageQuantity("1");
+      setShortageReview(false);
+      setShortageOperationId(null);
+      setCloseResult({
+        ...closeResult,
+        session: {
+          ...closeResult.session,
+          discrepancy: {
+            ...discrepancy,
+            status: response.confirmation.status,
+            total_recovered_quantity: Number(response.confirmation.total_recovered_quantity),
+            total_confirmed_shortage_quantity: Number(response.confirmation.total_confirmed_shortage_quantity),
+            total_remaining_quantity: Number(response.confirmation.total_remaining_quantity),
+          },
+        },
+      });
+    } catch (error) {
+      setErrorMessage(getErrorMessage(error, "Could not confirm shortage."));
+    }
+  }
+
   function handleResetSession() {
     setReceivingSessionId(null);
     setPalletCode("");
     setProductCode("");
     setLocationCode("");
     setCloseResult(null);
+    setShortageProductCode("");
+    setShortageQuantity("1");
+    setShortageReview(false);
+    setShortageOperationId(null);
     setMessage(null);
     setErrorMessage(null);
   }
@@ -262,12 +425,31 @@ export function ScannerReceivingPage() {
       if (mode === "location") {
         await handlePutAway(undefined, code);
       }
+      if (mode === "printer") {
+        await handlePrintReport(undefined, code);
+      }
+      if (mode === "recovery-product") {
+        setRecoveryProductCode(code);
+      }
+      if (mode === "recovery-location") {
+        setRecoveryLocationCode(code);
+      }
+      if (mode === "shortage-product") {
+        setShortageProductCode(code);
+      }
     },
-    [cameraMode, palletCode, productCode, quantity, session, workerCode],
+    [cameraMode, closeResult, palletCode, printerCode, productCode, quantity, session, workerCode],
   );
 
   const isBusy =
-    startReceiving.isPending || scanProduct.isPending || putAway.isPending || closeReceiving.isPending || currentSession.isFetching;
+    startReceiving.isPending ||
+    scanProduct.isPending ||
+    putAway.isPending ||
+    closeReceiving.isPending ||
+    printReport.isPending ||
+    recoverItem.isPending ||
+    confirmShortage.isPending ||
+    currentSession.isFetching;
 
   return (
     <>
@@ -338,7 +520,191 @@ export function ScannerReceivingPage() {
         </section>
       )}
 
-      {!session && !isRestoringSession && (
+      {closeResult?.session.discrepancy && (
+        <form className="scanner-workflow-panel" onSubmit={handlePrintReport}>
+          <header>
+            <span>4</span>
+            <h2>
+              {closeResult.session.discrepancy.report_printed_at
+                ? "Report printed"
+                : "Discrepancy report required"}
+            </h2>
+          </header>
+          {closeResult.session.discrepancy.report_printed_at ? (
+            <section className="scanner-confirmed-product">
+              <CheckCircle2 size={24} />
+              <div>
+                <strong>{closeResult.session.discrepancy.reference}</strong>
+                <span>
+                  Printer {closeResult.session.discrepancy.last_report_printer_code || "-"} - Status{" "}
+                  {closeResult.session.discrepancy.status}
+                </span>
+              </div>
+            </section>
+          ) : (
+            <p className="scanner-inline-hint">Scan printer to print the report and post the shortage to UNCONFIRMED.</p>
+          )}
+          <label htmlFor="discrepancy-printer-code">
+            <span>Printer code</span>
+            <input
+              autoComplete="off"
+              id="discrepancy-printer-code"
+              onChange={(event) => setPrinterCode(event.target.value)}
+              value={printerCode}
+            />
+          </label>
+          <button disabled={!printerCode.trim() || printReport.isPending} type="submit">
+            {printReport.isPending
+              ? "Printing..."
+              : closeResult.session.discrepancy.report_printed_at
+                ? "Reprint report"
+                : "Print discrepancy report"}
+          </button>
+          <button className="scanner-camera-button" onClick={() => setCameraMode("printer")} type="button">
+            <Camera size={19} />
+            Scan with camera
+          </button>
+          <Link className="scanner-secondary-button" to={`/wms/discrepancies/${closeResult.session.discrepancy.id}`}>
+            View discrepancy
+          </Link>
+        </form>
+      )}
+
+      {closeResult?.session.discrepancy?.report_printed_at &&
+        closeResult.session.discrepancy.status === "investigating" && (
+          <>
+            <form className="scanner-workflow-panel" onSubmit={handleRecoverItem}>
+              <header>
+                <span>5</span>
+                <h2>Continue investigation</h2>
+              </header>
+              <label htmlFor="recovery-product-code">
+                <span>Scan found product</span>
+                <input
+                  autoComplete="off"
+                  id="recovery-product-code"
+                  onChange={(event) => setRecoveryProductCode(event.target.value)}
+                  placeholder="FILTR-001"
+                  value={recoveryProductCode}
+                />
+              </label>
+              <button className="scanner-camera-button" onClick={() => setCameraMode("recovery-product")} type="button">
+                <Camera size={19} />
+                Scan product with camera
+              </button>
+              <label htmlFor="recovery-location-code">
+                <span>Scan where the item was found</span>
+                <input
+                  autoComplete="off"
+                  id="recovery-location-code"
+                  onChange={(event) => setRecoveryLocationCode(event.target.value)}
+                  placeholder="A-03-01"
+                  value={recoveryLocationCode}
+                />
+              </label>
+              <button className="scanner-camera-button" onClick={() => setCameraMode("recovery-location")} type="button">
+                <Camera size={19} />
+                Scan location with camera
+              </button>
+              <label htmlFor="recovery-quantity">
+                <span>Quantity</span>
+                <input
+                  id="recovery-quantity"
+                  inputMode="numeric"
+                  min="1"
+                  onChange={(event) => setRecoveryQuantity(event.target.value)}
+                  type="number"
+                  value={recoveryQuantity}
+                />
+              </label>
+              <button
+                disabled={!recoveryProductCode.trim() || !recoveryLocationCode.trim() || recoverItem.isPending}
+                type="submit"
+              >
+                {recoverItem.isPending ? "Confirming..." : "Confirm recovered item"}
+              </button>
+            </form>
+
+            <form className="scanner-workflow-panel" onSubmit={handleReviewShortage}>
+              <header>
+                <span>6</span>
+                <h2>Confirm shortage</h2>
+              </header>
+              <p className="scanner-helper-text">
+                Use this only when the remaining product cannot be found. The confirmed quantity will be removed from
+                UNCONFIRMED inventory.
+              </p>
+              <label htmlFor="shortage-product-code">
+                <span>Scan missing product</span>
+                <input
+                  autoComplete="off"
+                  id="shortage-product-code"
+                  onChange={(event) => {
+                    setShortageProductCode(event.target.value);
+                    setShortageReview(false);
+                    setShortageOperationId(null);
+                  }}
+                  placeholder="FILTR-001"
+                  value={shortageProductCode}
+                />
+              </label>
+              <button className="scanner-camera-button" onClick={() => setCameraMode("shortage-product")} type="button">
+                <Camera size={19} />
+                Scan product with camera
+              </button>
+              <label htmlFor="shortage-quantity">
+                <span>Quantity to confirm as missing</span>
+                <input
+                  id="shortage-quantity"
+                  inputMode="numeric"
+                  min="1"
+                  onChange={(event) => {
+                    setShortageQuantity(event.target.value);
+                    setShortageReview(false);
+                    setShortageOperationId(null);
+                  }}
+                  type="number"
+                  value={shortageQuantity}
+                />
+              </label>
+              {!shortageReview ? (
+                <button disabled={!shortageProductCode.trim() || !shortageQuantity.trim()} type="submit">
+                  Review shortage confirmation
+                </button>
+              ) : (
+                <div className="scanner-warning-panel">
+                  <strong>Confirm shortage</strong>
+                  <span>Product: {shortageProductCode}</span>
+                  <span>Quantity: {shortageQuantity}</span>
+                  <p>
+                    This quantity will be removed from UNCONFIRMED inventory and recorded as a confirmed shortage.
+                  </p>
+                  <button disabled={confirmShortage.isPending} onClick={handleConfirmShortage} type="button">
+                    {confirmShortage.isPending ? "Recording..." : "Confirm shortage"}
+                  </button>
+                  <button
+                    className="scanner-secondary-button"
+                    onClick={() => {
+                      setShortageReview(false);
+                      setShortageOperationId(null);
+                    }}
+                    type="button"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
+            </form>
+          </>
+        )}
+
+      {closeResult && (
+        <button className="scanner-confirm-button" onClick={handleResetSession} type="button">
+          Scan another pallet
+        </button>
+      )}
+
+      {!session && !isRestoringSession && !closeResult && (
         <form className="scanner-workflow-panel" onSubmit={handleStart}>
           <header>
             <span>1</span>

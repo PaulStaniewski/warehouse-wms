@@ -649,6 +649,14 @@ class TransferDiscrepancy(TimestampedModel):
     created_by_worker_code = models.CharField(max_length=64, blank=True)
     notes = models.TextField(blank=True)
     closed_at = models.DateTimeField(blank=True, null=True)
+    report_printed_at = models.DateTimeField(blank=True, null=True)
+    report_print_count = models.PositiveIntegerField(default=0)
+    last_report_printer_code = models.CharField(max_length=64, blank=True)
+    shortage_posted_at = models.DateTimeField(blank=True, null=True)
+    resolved_at = models.DateTimeField(blank=True, null=True)
+    resolved_by_worker_code = models.CharField(max_length=64, blank=True)
+    confirmed_shortage_at = models.DateTimeField(blank=True, null=True)
+    confirmed_shortage_by_worker_code = models.CharField(max_length=64, blank=True)
 
     class Meta:
         ordering = ["-created_at"]
@@ -676,6 +684,12 @@ class TransferDiscrepancyItem(TimestampedModel):
     received_quantity = models.DecimalField(max_digits=12, decimal_places=3)
     difference_quantity = models.DecimalField(max_digits=12, decimal_places=3)
     discrepancy_quantity = models.DecimalField(max_digits=12, decimal_places=3)
+    posted_to_unconfirmed_quantity = models.DecimalField(max_digits=12, decimal_places=3, default=0)
+    posted_to_unconfirmed_at = models.DateTimeField(blank=True, null=True)
+    recovered_quantity = models.DecimalField(max_digits=12, decimal_places=3, default=0)
+    last_recovered_at = models.DateTimeField(blank=True, null=True)
+    confirmed_shortage_quantity = models.DecimalField(max_digits=12, decimal_places=3, default=0)
+    last_confirmed_shortage_at = models.DateTimeField(blank=True, null=True)
 
     class Meta:
         ordering = ["product__sku"]
@@ -700,6 +714,10 @@ class StockMovement(TimestampedModel):
         RETURN = "return", "Return"
         ADJUSTMENT = "adjustment", "Adjustment"
         TRANSFER = "transfer", "Transfer"
+        RECEIVING_DISCREPANCY = "receiving_discrepancy", "Receiving discrepancy"
+        DISCREPANCY_RECOVERY = "discrepancy_recovery", "Discrepancy recovery"
+        DISCREPANCY_SHORTAGE = "discrepancy_shortage", "Discrepancy shortage"
+        SOURCE_DISCREPANCY_RECOVERY = "source_discrepancy_recovery", "Source discrepancy recovery"
 
     branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="stock_movements")
     product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name="stock_movements")
@@ -749,6 +767,328 @@ class StockMovement(TimestampedModel):
 
     def __str__(self) -> str:
         return f"{self.movement_type} {self.product.sku} x {self.quantity}"
+
+
+class TransferDiscrepancyRecovery(TimestampedModel):
+    discrepancy = models.ForeignKey(TransferDiscrepancy, on_delete=models.PROTECT, related_name="recoveries")
+    discrepancy_item = models.ForeignKey(TransferDiscrepancyItem, on_delete=models.PROTECT, related_name="recoveries")
+    product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name="transfer_discrepancy_recoveries")
+    quantity = models.DecimalField(max_digits=12, decimal_places=3)
+    source_location = models.ForeignKey(Location, on_delete=models.PROTECT, related_name="discrepancy_recovery_sources")
+    destination_location = models.ForeignKey(Location, on_delete=models.PROTECT, related_name="discrepancy_recovery_destinations")
+    worker_code = models.CharField(max_length=64, blank=True)
+    recovered_at = models.DateTimeField(default=timezone.now)
+    client_operation_id = models.CharField(max_length=128, unique=True)
+    stock_movement = models.ForeignKey(
+        StockMovement,
+        on_delete=models.PROTECT,
+        related_name="discrepancy_recoveries",
+        blank=True,
+        null=True,
+    )
+
+    class Meta:
+        ordering = ["-recovered_at"]
+        indexes = [
+            models.Index(fields=["discrepancy"]),
+            models.Index(fields=["discrepancy_item"]),
+            models.Index(fields=["product"]),
+            models.Index(fields=["client_operation_id"]),
+        ]
+        constraints = [
+            models.CheckConstraint(check=models.Q(quantity__gt=0), name="transfer_discrepancy_recovery_quantity_positive"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.discrepancy.reference} / {self.product.sku} / {self.quantity}"
+
+
+class TransferDiscrepancyShortageConfirmation(TimestampedModel):
+    discrepancy = models.ForeignKey(TransferDiscrepancy, on_delete=models.PROTECT, related_name="shortage_confirmations")
+    discrepancy_item = models.ForeignKey(
+        TransferDiscrepancyItem,
+        on_delete=models.PROTECT,
+        related_name="shortage_confirmations",
+    )
+    product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name="transfer_discrepancy_shortage_confirmations")
+    quantity = models.DecimalField(max_digits=12, decimal_places=3)
+    unconfirmed_location = models.ForeignKey(
+        Location,
+        on_delete=models.PROTECT,
+        related_name="discrepancy_shortage_confirmations",
+    )
+    worker_code = models.CharField(max_length=64, blank=True)
+    confirmed_at = models.DateTimeField(default=timezone.now)
+    client_operation_id = models.CharField(max_length=128, unique=True)
+    stock_movement = models.ForeignKey(
+        StockMovement,
+        on_delete=models.PROTECT,
+        related_name="discrepancy_shortage_confirmations",
+        blank=True,
+        null=True,
+    )
+
+    class Meta:
+        ordering = ["-confirmed_at"]
+        indexes = [
+            models.Index(fields=["discrepancy"]),
+            models.Index(fields=["discrepancy_item"]),
+            models.Index(fields=["product"]),
+            models.Index(fields=["client_operation_id"]),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                check=models.Q(quantity__gt=0),
+                name="transfer_discrepancy_shortage_confirmation_quantity_positive",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.discrepancy.reference} / {self.product.sku} / {self.quantity}"
+
+
+class TransferDiscrepancySourceReview(TimestampedModel):
+    class Status(models.TextChoices):
+        PENDING_REVIEW = "pending_review", "Pending review"
+        INVESTIGATING = "investigating", "Investigating"
+        COMPLETED = "completed", "Completed"
+
+    class Finding(models.TextChoices):
+        SOURCE_SHORTAGE_FOUND = "source_shortage_found", "Source shortage found"
+        DISPATCH_EVIDENCE_MATCHES = "dispatch_evidence_matches", "Dispatch evidence matches expected quantity"
+        INCONCLUSIVE = "inconclusive", "Inconclusive"
+
+    reference = models.CharField(max_length=64, unique=True, blank=True)
+    discrepancy = models.OneToOneField(
+        TransferDiscrepancy,
+        on_delete=models.PROTECT,
+        related_name="source_review",
+    )
+    source_branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="transfer_discrepancy_source_reviews")
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.PENDING_REVIEW)
+    finding = models.CharField(max_length=64, choices=Finding.choices, blank=True)
+    started_at = models.DateTimeField(blank=True, null=True)
+    started_by_worker_code = models.CharField(max_length=64, blank=True)
+    completed_at = models.DateTimeField(blank=True, null=True)
+    completed_by_worker_code = models.CharField(max_length=64, blank=True)
+    finding_note = models.TextField(blank=True)
+    client_operation_id = models.CharField(max_length=128, unique=True, blank=True, null=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["reference"]),
+            models.Index(fields=["status"]),
+            models.Index(fields=["source_branch", "status"]),
+            models.Index(fields=["client_operation_id"]),
+        ]
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        if not self.reference:
+            self.reference = f"SRV-{self.id:06d}"
+            super().save(update_fields=["reference", "updated_at"])
+
+    def __str__(self) -> str:
+        return self.reference or f"Source review {self.id}"
+
+
+class TransferDiscrepancyReconciliation(TimestampedModel):
+    class Route(models.TextChoices):
+        SOURCE_STOCK_VERIFICATION = "source_stock_verification", "Source stock verification required"
+        TRANSIT_INVESTIGATION = "transit_investigation", "Transit investigation required"
+        MANUAL_RECONCILIATION = "manual_reconciliation", "Manual reconciliation required"
+
+    class Status(models.TextChoices):
+        PENDING_ACTION = "pending_action", "Pending action"
+        IN_PROGRESS = "in_progress", "In progress"
+        COMPLETED = "completed", "Completed"
+        MANUAL_ACTION_REQUIRED = "manual_action_required", "Manual action required"
+
+    reference = models.CharField(max_length=64, unique=True, blank=True)
+    discrepancy = models.OneToOneField(
+        TransferDiscrepancy,
+        on_delete=models.PROTECT,
+        related_name="reconciliation",
+    )
+    source_review = models.OneToOneField(
+        TransferDiscrepancySourceReview,
+        on_delete=models.PROTECT,
+        related_name="reconciliation",
+    )
+    route = models.CharField(max_length=64, choices=Route.choices)
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.PENDING_ACTION)
+    acknowledged_at = models.DateTimeField(blank=True, null=True)
+    acknowledged_by_worker_code = models.CharField(max_length=64, blank=True)
+    completed_at = models.DateTimeField(blank=True, null=True)
+    completed_by_worker_code = models.CharField(max_length=64, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["reference"]),
+            models.Index(fields=["route"]),
+            models.Index(fields=["status"]),
+            models.Index(fields=["route", "status"]),
+        ]
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        if not self.reference:
+            self.reference = f"REC-{self.id:06d}"
+            super().save(update_fields=["reference", "updated_at"])
+
+    def __str__(self) -> str:
+        return self.reference or f"Reconciliation {self.id}"
+
+
+class TransferDiscrepancyManualReconciliationDecision(TimestampedModel):
+    class Outcome(models.TextChoices):
+        SOURCE_LOSS_CONFIRMED = "source_loss_confirmed", "Source loss confirmed"
+        UNRESOLVED_LOSS_CLOSED = "unresolved_loss_closed", "Unresolved loss - cause not determined"
+        ADMINISTRATIVE_ERROR = "administrative_error", "Administrative or process error"
+
+    reconciliation = models.OneToOneField(
+        TransferDiscrepancyReconciliation,
+        on_delete=models.PROTECT,
+        related_name="manual_decision",
+    )
+    outcome = models.CharField(max_length=64, choices=Outcome.choices)
+    decision_note = models.TextField()
+    decided_at = models.DateTimeField(default=timezone.now)
+    decided_by_worker_code = models.CharField(max_length=64)
+    client_operation_id = models.CharField(max_length=128, unique=True)
+
+    class Meta:
+        ordering = ["-decided_at"]
+        indexes = [
+            models.Index(fields=["outcome"]),
+            models.Index(fields=["decided_at"]),
+            models.Index(fields=["client_operation_id"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.reconciliation.reference} / {self.get_outcome_display()}"
+
+
+class TransferDiscrepancySourceStockVerification(TimestampedModel):
+    class Status(models.TextChoices):
+        PENDING_VERIFICATION = "pending_verification", "Pending verification"
+        INVESTIGATING = "investigating", "Investigating"
+        COMPLETED = "completed", "Completed"
+        COMPLETED_UNRESOLVED = "completed_unresolved", "Completed with unresolved stock"
+
+    reference = models.CharField(max_length=64, unique=True, blank=True)
+    reconciliation = models.OneToOneField(
+        TransferDiscrepancyReconciliation,
+        on_delete=models.PROTECT,
+        related_name="source_stock_verification",
+    )
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.PENDING_VERIFICATION)
+    started_at = models.DateTimeField(blank=True, null=True)
+    started_by_worker_code = models.CharField(max_length=64, blank=True)
+    completed_at = models.DateTimeField(blank=True, null=True)
+    completed_by_worker_code = models.CharField(max_length=64, blank=True)
+    search_completed_at = models.DateTimeField(blank=True, null=True)
+    search_completed_by_worker_code = models.CharField(max_length=64, blank=True)
+    search_completion_note = models.TextField(blank=True)
+    search_completion_operation_id = models.CharField(max_length=128, unique=True, blank=True, null=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["reference"]),
+            models.Index(fields=["status"]),
+            models.Index(fields=["created_at"]),
+            models.Index(fields=["search_completion_operation_id"]),
+        ]
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        if not self.reference:
+            self.reference = f"SSV-{self.id:06d}"
+            super().save(update_fields=["reference", "updated_at"])
+
+    def __str__(self) -> str:
+        return self.reference or f"Source stock verification {self.id}"
+
+
+class TransferDiscrepancySourceStockVerificationItem(TimestampedModel):
+    verification = models.ForeignKey(
+        TransferDiscrepancySourceStockVerification,
+        on_delete=models.CASCADE,
+        related_name="items",
+    )
+    discrepancy_item = models.ForeignKey(
+        TransferDiscrepancyItem,
+        on_delete=models.PROTECT,
+        related_name="source_stock_verification_items",
+    )
+    product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name="source_stock_verification_items")
+    target_quantity = models.DecimalField(max_digits=12, decimal_places=3)
+    found_quantity = models.DecimalField(max_digits=12, decimal_places=3, default=0)
+    last_found_at = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        ordering = ["product__sku"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["verification", "discrepancy_item"],
+                name="unique_source_stock_verification_item_per_discrepancy_item",
+            ),
+            models.CheckConstraint(check=models.Q(target_quantity__gt=0), name="source_stock_verification_target_positive"),
+            models.CheckConstraint(check=models.Q(found_quantity__gte=0), name="source_stock_verification_found_non_negative"),
+        ]
+        indexes = [
+            models.Index(fields=["verification"]),
+            models.Index(fields=["product"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.verification.reference} / {self.product.sku}"
+
+
+class TransferDiscrepancySourceStockRecovery(TimestampedModel):
+    verification = models.ForeignKey(
+        TransferDiscrepancySourceStockVerification,
+        on_delete=models.PROTECT,
+        related_name="recoveries",
+    )
+    verification_item = models.ForeignKey(
+        TransferDiscrepancySourceStockVerificationItem,
+        on_delete=models.PROTECT,
+        related_name="recoveries",
+    )
+    discrepancy = models.ForeignKey(TransferDiscrepancy, on_delete=models.PROTECT, related_name="source_stock_recoveries")
+    product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name="source_stock_recoveries")
+    quantity = models.DecimalField(max_digits=12, decimal_places=3)
+    destination_location = models.ForeignKey(Location, on_delete=models.PROTECT, related_name="source_stock_recoveries")
+    worker_code = models.CharField(max_length=64, blank=True)
+    recovered_at = models.DateTimeField(default=timezone.now)
+    client_operation_id = models.CharField(max_length=128, unique=True)
+    stock_movement = models.ForeignKey(
+        StockMovement,
+        on_delete=models.PROTECT,
+        related_name="source_stock_recoveries",
+        blank=True,
+        null=True,
+    )
+
+    class Meta:
+        ordering = ["-recovered_at"]
+        indexes = [
+            models.Index(fields=["verification"]),
+            models.Index(fields=["verification_item"]),
+            models.Index(fields=["discrepancy"]),
+            models.Index(fields=["product"]),
+            models.Index(fields=["client_operation_id"]),
+        ]
+        constraints = [
+            models.CheckConstraint(check=models.Q(quantity__gt=0), name="source_stock_recovery_quantity_positive"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.verification.reference} / {self.product.sku} / {self.quantity}"
 
 
 class AuditLog(models.Model):

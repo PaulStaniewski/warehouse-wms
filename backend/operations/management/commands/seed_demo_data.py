@@ -26,6 +26,14 @@ from operations.models import (
     StockMovement,
     TransferDiscrepancy,
     TransferDiscrepancyItem,
+    TransferDiscrepancyManualReconciliationDecision,
+    TransferDiscrepancyReconciliation,
+    TransferDiscrepancyRecovery,
+    TransferDiscrepancyShortageConfirmation,
+    TransferDiscrepancySourceReview,
+    TransferDiscrepancySourceStockRecovery,
+    TransferDiscrepancySourceStockVerification,
+    TransferDiscrepancySourceStockVerificationItem,
     TransferPallet,
     TransferPalletItem,
 )
@@ -106,14 +114,31 @@ class Command(BaseCommand):
 
         demo_pallets = TransferPallet.objects.filter(scan_code__in=demo_pallet_codes)
         demo_discrepancies = TransferDiscrepancy.objects.filter(pallet__in=demo_pallets)
+        demo_reconciliations = TransferDiscrepancyReconciliation.objects.filter(discrepancy__in=demo_discrepancies)
+        demo_verifications = TransferDiscrepancySourceStockVerification.objects.filter(
+            reconciliation__in=demo_reconciliations
+        )
+        TransferDiscrepancySourceStockRecovery.objects.filter(verification__in=demo_verifications).delete()
+        TransferDiscrepancySourceStockVerificationItem.objects.filter(verification__in=demo_verifications).delete()
+        demo_verifications.delete()
+        TransferDiscrepancyManualReconciliationDecision.objects.filter(reconciliation__in=demo_reconciliations).delete()
+        TransferDiscrepancyReconciliation.objects.filter(discrepancy__in=demo_discrepancies).delete()
+        TransferDiscrepancySourceReview.objects.filter(discrepancy__in=demo_discrepancies).delete()
+        TransferDiscrepancyShortageConfirmation.objects.filter(discrepancy__in=demo_discrepancies).delete()
+        TransferDiscrepancyRecovery.objects.filter(discrepancy__in=demo_discrepancies).delete()
         TransferDiscrepancyItem.objects.filter(discrepancy__in=demo_discrepancies).delete()
         demo_discrepancies.delete()
         PalletReceivingScan.objects.filter(pallet__in=demo_pallets).delete()
         PalletReceivingSession.objects.filter(pallet__in=demo_pallets).delete()
         TransferPalletItem.objects.filter(pallet__in=demo_pallets).delete()
         StockMovement.objects.filter(reference__in=demo_pallet_codes).delete()
+        StockMovement.objects.filter(reference__startswith="DIS-").delete()
+        StockMovement.objects.filter(reference__startswith="SSV-").delete()
         demo_pallets.delete()
         InterBranchTransfer.objects.filter(reference__in=demo_transfer_refs).delete()
+        InventoryItem.objects.filter(location__code__iexact="UNCONFIRMED", location__branch__code="GDY").delete()
+        InventoryItem.objects.filter(location__code__iexact="A-03-01", location__branch__code="GDY").delete()
+        InventoryItem.objects.filter(location__code__iexact="A-03-01", location__branch__code="GDA").delete()
 
     def create_branches(self):
         branch_data = [
@@ -140,10 +165,13 @@ class Command(BaseCommand):
             ("GDY", "A-01-01", Location.LocationType.STORAGE),
             ("GDY", "A-01-02", Location.LocationType.STORAGE),
             ("GDY", "A-02-01", Location.LocationType.PICKING),
+            ("GDY", "A-03-01", Location.LocationType.STORAGE),
             ("GDY", "RET-01", Location.LocationType.RETURNS),
             ("GDY", "PACK-01", Location.LocationType.SHIPPING),
+            ("GDY", "UNCONFIRMED", Location.LocationType.RECEIVING),
             ("GDA", "B-01-01", Location.LocationType.STORAGE),
             ("GDA", "B-01-02", Location.LocationType.PICKING),
+            ("GDA", "A-03-01", Location.LocationType.STORAGE),
             ("GDA", "RET-01", Location.LocationType.RETURNS),
             ("GDA", "PACK-01", Location.LocationType.SHIPPING),
         ]
@@ -193,6 +221,7 @@ class Command(BaseCommand):
             ("GDY", "RET-01", "WYCIER-001", "3", "0"),
             ("GDA", "B-01-01", "FILTR-001", "8", "0"),
             ("GDA", "B-01-02", "OLEJ-001", "12", "0"),
+            ("GDA", "A-03-01", "FILTR-001", "4", "0"),
         ]
 
         inventory_items = {}

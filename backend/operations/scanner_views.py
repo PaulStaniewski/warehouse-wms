@@ -31,7 +31,12 @@ from operations.models import (
 )
 from operations.contents import ContentsLookupError, resolve_contents_code
 from operations.serializers import PickingTaskSerializer, RouteRunSerializer
-from operations.services import TERMINAL_ROUTE_STATUSES, recalculate_route_readiness
+from operations.services import (
+    TERMINAL_ROUTE_STATUSES,
+    discrepancy_line_remaining,
+    get_discrepancy_investigation_totals,
+    recalculate_route_readiness,
+)
 from warehouse.models import InventoryItem, Location, Product
 
 
@@ -313,6 +318,10 @@ def _discrepancy_item_data(item: TransferDiscrepancyItem):
         "received_quantity": _piece_value(item.received_quantity),
         "difference_quantity": _piece_value(item.difference_quantity),
         "discrepancy_quantity": _piece_value(item.discrepancy_quantity),
+        "posted_to_unconfirmed_quantity": _piece_value(item.posted_to_unconfirmed_quantity),
+        "recovered_quantity": _piece_value(item.recovered_quantity),
+        "confirmed_shortage_quantity": _piece_value(item.confirmed_shortage_quantity),
+        "remaining_quantity": _piece_value(discrepancy_line_remaining(item)),
     }
 
 
@@ -320,12 +329,21 @@ def _discrepancy_data(discrepancy: TransferDiscrepancy | None):
     if discrepancy is None:
         return None
     items = list(discrepancy.items.select_related("product").order_by("product__sku"))
+    totals = get_discrepancy_investigation_totals(discrepancy)
     return {
         "id": discrepancy.id,
         "reference": discrepancy.reference,
         "status": discrepancy.status,
+        "report_printed_at": discrepancy.report_printed_at.isoformat() if discrepancy.report_printed_at else None,
+        "report_print_count": discrepancy.report_print_count,
+        "last_report_printer_code": discrepancy.last_report_printer_code,
+        "shortage_posted_at": discrepancy.shortage_posted_at.isoformat() if discrepancy.shortage_posted_at else None,
         "line_count": len(items),
         "total_discrepancy_quantity": _piece_value(sum((item.discrepancy_quantity for item in items), Decimal("0"))),
+        "total_posted_to_unconfirmed_quantity": _piece_value(totals["posted"]),
+        "total_recovered_quantity": _piece_value(totals["recovered"]),
+        "total_confirmed_shortage_quantity": _piece_value(totals["confirmed_shortage"]),
+        "total_remaining_quantity": _piece_value(totals["remaining"]),
         "items": [_discrepancy_item_data(item) for item in items],
     }
 

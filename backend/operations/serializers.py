@@ -14,6 +14,21 @@ from operations.models import (
     StockMovement,
     TransferDiscrepancy,
     TransferDiscrepancyItem,
+    TransferDiscrepancyManualReconciliationDecision,
+    TransferDiscrepancyReconciliation,
+    TransferDiscrepancyRecovery,
+    TransferDiscrepancyShortageConfirmation,
+    TransferDiscrepancySourceStockRecovery,
+    TransferDiscrepancySourceStockVerification,
+    TransferDiscrepancySourceReview,
+)
+from operations.services import (
+    discrepancy_line_remaining,
+    get_discrepancy_investigation_totals,
+    reconciliation_next_action,
+    get_source_verification_totals,
+    source_verification_item_remaining,
+    source_verification_next_action,
 )
 from operations.services import is_route_late, is_route_work_fully_prepared, route_close_result
 
@@ -362,6 +377,7 @@ class TransferDiscrepancyItemSerializer(serializers.ModelSerializer):
     product_sku = serializers.CharField(source="product.sku", read_only=True)
     product_name = serializers.CharField(source="product.name", read_only=True)
     scan_history = serializers.SerializerMethodField()
+    remaining_quantity = serializers.SerializerMethodField()
 
     def get_scan_history(self, obj: TransferDiscrepancyItem) -> list[dict]:
         scans = obj.discrepancy.pallet.receiving_scans.select_related("destination_location", "product").filter(
@@ -379,6 +395,9 @@ class TransferDiscrepancyItemSerializer(serializers.ModelSerializer):
             for scan in scans.order_by("scanned_at", "id")
         ]
 
+    def get_remaining_quantity(self, obj: TransferDiscrepancyItem) -> str:
+        return str(discrepancy_line_remaining(obj))
+
     class Meta:
         model = TransferDiscrepancyItem
         fields = [
@@ -392,6 +411,13 @@ class TransferDiscrepancyItemSerializer(serializers.ModelSerializer):
             "received_quantity",
             "difference_quantity",
             "discrepancy_quantity",
+            "posted_to_unconfirmed_quantity",
+            "posted_to_unconfirmed_at",
+            "recovered_quantity",
+            "last_recovered_at",
+            "confirmed_shortage_quantity",
+            "last_confirmed_shortage_at",
+            "remaining_quantity",
             "scan_history",
             "created_at",
             "updated_at",
@@ -405,7 +431,15 @@ class TransferDiscrepancySerializer(serializers.ModelSerializer):
     destination_branch_code = serializers.CharField(source="transfer.destination_branch.code", read_only=True)
     line_count = serializers.SerializerMethodField()
     total_discrepancy_quantity = serializers.SerializerMethodField()
+    total_recovered_quantity = serializers.SerializerMethodField()
+    total_posted_to_unconfirmed_quantity = serializers.SerializerMethodField()
+    total_confirmed_shortage_quantity = serializers.SerializerMethodField()
+    total_remaining_quantity = serializers.SerializerMethodField()
     items = TransferDiscrepancyItemSerializer(many=True, read_only=True)
+    recoveries = serializers.SerializerMethodField()
+    shortage_confirmations = serializers.SerializerMethodField()
+    source_review = serializers.SerializerMethodField()
+    reconciliation = serializers.SerializerMethodField()
 
     def get_line_count(self, obj: TransferDiscrepancy) -> int:
         return obj.items.count()
@@ -413,6 +447,124 @@ class TransferDiscrepancySerializer(serializers.ModelSerializer):
     def get_total_discrepancy_quantity(self, obj: TransferDiscrepancy) -> str:
         total = sum((item.discrepancy_quantity for item in obj.items.all()), Decimal("0"))
         return str(total)
+
+    def get_total_recovered_quantity(self, obj: TransferDiscrepancy) -> str:
+        return str(get_discrepancy_investigation_totals(obj)["recovered"])
+
+    def get_total_posted_to_unconfirmed_quantity(self, obj: TransferDiscrepancy) -> str:
+        return str(get_discrepancy_investigation_totals(obj)["posted"])
+
+    def get_total_confirmed_shortage_quantity(self, obj: TransferDiscrepancy) -> str:
+        return str(get_discrepancy_investigation_totals(obj)["confirmed_shortage"])
+
+    def get_total_remaining_quantity(self, obj: TransferDiscrepancy) -> str:
+        return str(get_discrepancy_investigation_totals(obj)["remaining"])
+
+    def get_recoveries(self, obj: TransferDiscrepancy) -> list[dict]:
+        recoveries = obj.recoveries.select_related("product", "source_location", "destination_location").order_by("-recovered_at")
+        return [
+            {
+                "id": recovery.id,
+                "product_sku": recovery.product.sku,
+                "product_name": recovery.product.name,
+                "quantity": str(recovery.quantity),
+                "source_location_code": recovery.source_location.code,
+                "destination_location_code": recovery.destination_location.code,
+                "worker_code": recovery.worker_code,
+                "recovered_at": recovery.recovered_at.isoformat(),
+                "client_operation_id": recovery.client_operation_id,
+            }
+            for recovery in recoveries
+        ]
+
+    def get_shortage_confirmations(self, obj: TransferDiscrepancy) -> list[dict]:
+        confirmations = obj.shortage_confirmations.select_related("product", "unconfirmed_location").order_by("-confirmed_at")
+        return [
+            {
+                "id": confirmation.id,
+                "product_sku": confirmation.product.sku,
+                "product_name": confirmation.product.name,
+                "quantity": str(confirmation.quantity),
+                "unconfirmed_location_code": confirmation.unconfirmed_location.code,
+                "worker_code": confirmation.worker_code,
+                "confirmed_at": confirmation.confirmed_at.isoformat(),
+                "client_operation_id": confirmation.client_operation_id,
+            }
+            for confirmation in confirmations
+        ]
+
+    def get_source_review(self, obj: TransferDiscrepancy) -> dict | None:
+        review = getattr(obj, "source_review", None)
+        if review is None:
+            return None
+        return {
+            "id": review.id,
+            "reference": review.reference,
+            "status": review.status,
+            "finding": review.finding,
+            "finding_display": review.get_finding_display() if review.finding else "",
+            "completed_at": review.completed_at.isoformat() if review.completed_at else None,
+        }
+
+    def get_reconciliation(self, obj: TransferDiscrepancy) -> dict | None:
+        reconciliation = getattr(obj, "reconciliation", None)
+        if reconciliation is None:
+            return None
+        manual_decision = self._manual_decision_summary(reconciliation)
+        return {
+            "id": reconciliation.id,
+            "reference": reconciliation.reference,
+            "route": reconciliation.route,
+            "route_label": reconciliation.get_route_display(),
+            "status": reconciliation.status,
+            "next_action_label": reconciliation_next_action(
+                reconciliation.route,
+                reconciliation.status,
+                manual_decision is not None,
+            ),
+            "manual_decision_required": self._manual_decision_required(reconciliation),
+            "manual_decision": manual_decision,
+            "source_stock_verification": self._source_verification_summary(reconciliation),
+        }
+
+    def _manual_decision_required(self, reconciliation) -> bool:
+        if reconciliation.route == TransferDiscrepancyReconciliation.Route.MANUAL_RECONCILIATION:
+            return reconciliation.status == TransferDiscrepancyReconciliation.Status.IN_PROGRESS
+        if reconciliation.route == TransferDiscrepancyReconciliation.Route.SOURCE_STOCK_VERIFICATION:
+            return reconciliation.status == TransferDiscrepancyReconciliation.Status.MANUAL_ACTION_REQUIRED
+        return False
+
+    def _manual_decision_summary(self, reconciliation) -> dict | None:
+        decision = getattr(reconciliation, "manual_decision", None)
+        if decision is None:
+            return None
+        return {
+            "id": decision.id,
+            "outcome": decision.outcome,
+            "outcome_label": decision.get_outcome_display(),
+            "decision_note": decision.decision_note,
+            "decided_at": decision.decided_at.isoformat() if decision.decided_at else None,
+            "decided_by_worker_code": decision.decided_by_worker_code,
+        }
+
+    def _source_verification_summary(self, reconciliation) -> dict | None:
+        verification = getattr(reconciliation, "source_stock_verification", None)
+        if verification is None:
+            return None
+        totals = get_source_verification_totals(verification)
+        return {
+            "id": verification.id,
+            "reference": verification.reference,
+            "status": verification.status,
+            "status_label": verification.get_status_display(),
+            "total_target_quantity": str(totals["target"]),
+            "total_found_quantity": str(totals["found"]),
+            "total_remaining_quantity": str(totals["remaining"]),
+            "total_unresolved_quantity": str(totals["unresolved"]),
+            "search_completed_at": verification.search_completed_at.isoformat() if verification.search_completed_at else None,
+            "search_completed_by_worker_code": verification.search_completed_by_worker_code,
+            "search_completion_note": verification.search_completion_note,
+        }
 
     class Meta:
         model = TransferDiscrepancy
@@ -429,9 +581,475 @@ class TransferDiscrepancySerializer(serializers.ModelSerializer):
             "created_by_worker_code",
             "notes",
             "closed_at",
+            "report_printed_at",
+            "report_print_count",
+            "last_report_printer_code",
+            "shortage_posted_at",
+            "resolved_at",
+            "resolved_by_worker_code",
+            "confirmed_shortage_at",
+            "confirmed_shortage_by_worker_code",
             "line_count",
             "total_discrepancy_quantity",
+            "total_posted_to_unconfirmed_quantity",
+            "total_recovered_quantity",
+            "total_confirmed_shortage_quantity",
+            "total_remaining_quantity",
             "items",
+            "recoveries",
+            "shortage_confirmations",
+            "source_review",
+            "reconciliation",
             "created_at",
             "updated_at",
+        ]
+
+
+class TransferDiscrepancySourceReviewSerializer(serializers.ModelSerializer):
+    discrepancy_reference = serializers.CharField(source="discrepancy.reference", read_only=True)
+    discrepancy_status = serializers.CharField(source="discrepancy.status", read_only=True)
+    discrepancy_created_at = serializers.DateTimeField(source="discrepancy.created_at", read_only=True)
+    discrepancy_confirmed_shortage_at = serializers.DateTimeField(
+        source="discrepancy.confirmed_shortage_at",
+        read_only=True,
+    )
+    discrepancy_confirmed_shortage_by_worker_code = serializers.CharField(
+        source="discrepancy.confirmed_shortage_by_worker_code",
+        read_only=True,
+    )
+    transfer_reference = serializers.CharField(source="discrepancy.transfer.reference", read_only=True)
+    source_branch_code = serializers.CharField(source="source_branch.code", read_only=True)
+    source_branch_name = serializers.CharField(source="source_branch.name", read_only=True)
+    destination_branch_code = serializers.CharField(source="discrepancy.transfer.destination_branch.code", read_only=True)
+    destination_branch_name = serializers.CharField(source="discrepancy.transfer.destination_branch.name", read_only=True)
+    pallet_code = serializers.CharField(source="discrepancy.pallet.scan_code", read_only=True)
+    pallet_closed_at = serializers.DateTimeField(source="discrepancy.closed_at", read_only=True)
+    finding_display = serializers.CharField(source="get_finding_display", read_only=True)
+    total_expected_quantity = serializers.SerializerMethodField()
+    total_received_quantity = serializers.SerializerMethodField()
+    total_missing_quantity = serializers.SerializerMethodField()
+    total_posted_to_unconfirmed_quantity = serializers.SerializerMethodField()
+    total_recovered_quantity = serializers.SerializerMethodField()
+    total_confirmed_shortage_quantity = serializers.SerializerMethodField()
+    total_remaining_quantity = serializers.SerializerMethodField()
+    lines = serializers.SerializerMethodField()
+    source_dispatch_evidence = serializers.SerializerMethodField()
+    destination_receiving_evidence = serializers.SerializerMethodField()
+    recoveries = serializers.SerializerMethodField()
+    shortage_confirmations = serializers.SerializerMethodField()
+    reconciliation = serializers.SerializerMethodField()
+
+    def _items(self, obj: TransferDiscrepancySourceReview):
+        return list(obj.discrepancy.items.select_related("product", "pallet_item").order_by("product__sku"))
+
+    def get_total_expected_quantity(self, obj) -> str:
+        return str(sum((item.expected_quantity for item in self._items(obj)), Decimal("0")))
+
+    def get_total_received_quantity(self, obj) -> str:
+        return str(sum((item.received_quantity for item in self._items(obj)), Decimal("0")))
+
+    def get_total_missing_quantity(self, obj) -> str:
+        return str(sum((item.discrepancy_quantity for item in self._items(obj)), Decimal("0")))
+
+    def get_total_posted_to_unconfirmed_quantity(self, obj) -> str:
+        return str(get_discrepancy_investigation_totals(obj.discrepancy)["posted"])
+
+    def get_total_recovered_quantity(self, obj) -> str:
+        return str(get_discrepancy_investigation_totals(obj.discrepancy)["recovered"])
+
+    def get_total_confirmed_shortage_quantity(self, obj) -> str:
+        return str(get_discrepancy_investigation_totals(obj.discrepancy)["confirmed_shortage"])
+
+    def get_total_remaining_quantity(self, obj) -> str:
+        return str(get_discrepancy_investigation_totals(obj.discrepancy)["remaining"])
+
+    def get_lines(self, obj) -> list[dict]:
+        return [
+            {
+                "id": item.id,
+                "product_sku": item.product.sku,
+                "product_name": item.product.name,
+                "expected_quantity": str(item.expected_quantity),
+                "received_quantity": str(item.received_quantity),
+                "missing_quantity": str(item.discrepancy_quantity),
+                "recovered_quantity": str(item.recovered_quantity),
+                "confirmed_shortage_quantity": str(item.confirmed_shortage_quantity),
+                "remaining_quantity": str(discrepancy_line_remaining(item)),
+            }
+            for item in self._items(obj)
+        ]
+
+    def get_source_dispatch_evidence(self, obj) -> list[dict]:
+        return [
+            {
+                "product_sku": item.product.sku,
+                "product_name": item.product.name,
+                "expected_quantity": str(item.expected_quantity),
+                "pallet_code": obj.discrepancy.pallet.scan_code,
+                "released_at": obj.discrepancy.pallet.released_at.isoformat() if obj.discrepancy.pallet.released_at else None,
+            }
+            for item in obj.discrepancy.pallet.items.select_related("product").order_by("product__sku")
+        ]
+
+    def get_destination_receiving_evidence(self, obj) -> list[dict]:
+        scans = obj.discrepancy.pallet.receiving_scans.select_related("product", "destination_location").order_by("scanned_at")
+        return [
+            {
+                "product_sku": scan.product.sku,
+                "product_name": scan.product.name,
+                "quantity": str(scan.quantity),
+                "destination_location_code": scan.destination_location.code,
+                "worker_code": scan.worker_code,
+                "scanned_at": scan.scanned_at.isoformat(),
+            }
+            for scan in scans
+        ]
+
+    def get_recoveries(self, obj) -> list[dict]:
+        return TransferDiscrepancySerializer().get_recoveries(obj.discrepancy)
+
+    def get_shortage_confirmations(self, obj) -> list[dict]:
+        return TransferDiscrepancySerializer().get_shortage_confirmations(obj.discrepancy)
+
+    def get_reconciliation(self, obj) -> dict | None:
+        reconciliation = getattr(obj, "reconciliation", None)
+        if reconciliation is None:
+            return None
+        helper = TransferDiscrepancySerializer()
+        manual_decision = helper._manual_decision_summary(reconciliation)
+        return {
+            "id": reconciliation.id,
+            "reference": reconciliation.reference,
+            "route": reconciliation.route,
+            "route_label": reconciliation.get_route_display(),
+            "status": reconciliation.status,
+            "next_action_label": reconciliation_next_action(
+                reconciliation.route,
+                reconciliation.status,
+                manual_decision is not None,
+            ),
+            "manual_decision_required": helper._manual_decision_required(reconciliation),
+            "manual_decision": manual_decision,
+            "source_stock_verification": helper._source_verification_summary(reconciliation),
+        }
+
+    class Meta:
+        model = TransferDiscrepancySourceReview
+        fields = [
+            "id",
+            "reference",
+            "status",
+            "finding",
+            "finding_display",
+            "started_at",
+            "started_by_worker_code",
+            "completed_at",
+            "completed_by_worker_code",
+            "finding_note",
+            "created_at",
+            "updated_at",
+            "discrepancy",
+            "discrepancy_reference",
+            "discrepancy_status",
+            "discrepancy_created_at",
+            "discrepancy_confirmed_shortage_at",
+            "discrepancy_confirmed_shortage_by_worker_code",
+            "transfer_reference",
+            "source_branch",
+            "source_branch_code",
+            "source_branch_name",
+            "destination_branch_code",
+            "destination_branch_name",
+            "pallet_code",
+            "pallet_closed_at",
+            "total_expected_quantity",
+            "total_received_quantity",
+            "total_missing_quantity",
+            "total_posted_to_unconfirmed_quantity",
+            "total_recovered_quantity",
+            "total_confirmed_shortage_quantity",
+            "total_remaining_quantity",
+            "lines",
+            "source_dispatch_evidence",
+            "destination_receiving_evidence",
+            "recoveries",
+            "shortage_confirmations",
+            "reconciliation",
+        ]
+
+
+class TransferDiscrepancyReconciliationSerializer(serializers.ModelSerializer):
+    route_label = serializers.CharField(source="get_route_display", read_only=True)
+    status_label = serializers.CharField(source="get_status_display", read_only=True)
+    next_action_label = serializers.SerializerMethodField()
+    source_stock_verification = serializers.SerializerMethodField()
+    manual_decision_required = serializers.SerializerMethodField()
+    manual_decision = serializers.SerializerMethodField()
+    source_review_reference = serializers.CharField(source="source_review.reference", read_only=True)
+    source_review_status = serializers.CharField(source="source_review.status", read_only=True)
+    source_review_finding = serializers.CharField(source="source_review.finding", read_only=True)
+    source_review_finding_display = serializers.CharField(source="source_review.get_finding_display", read_only=True)
+    source_review_finding_note = serializers.CharField(source="source_review.finding_note", read_only=True)
+    source_review_completed_at = serializers.DateTimeField(source="source_review.completed_at", read_only=True)
+    source_review_completed_by_worker_code = serializers.CharField(
+        source="source_review.completed_by_worker_code",
+        read_only=True,
+    )
+    discrepancy_reference = serializers.CharField(source="discrepancy.reference", read_only=True)
+    discrepancy_status = serializers.CharField(source="discrepancy.status", read_only=True)
+    discrepancy_confirmed_shortage_at = serializers.DateTimeField(
+        source="discrepancy.confirmed_shortage_at",
+        read_only=True,
+    )
+    discrepancy_confirmed_shortage_by_worker_code = serializers.CharField(
+        source="discrepancy.confirmed_shortage_by_worker_code",
+        read_only=True,
+    )
+    transfer_reference = serializers.CharField(source="discrepancy.transfer.reference", read_only=True)
+    source_branch_code = serializers.CharField(source="discrepancy.transfer.source_branch.code", read_only=True)
+    source_branch_name = serializers.CharField(source="discrepancy.transfer.source_branch.name", read_only=True)
+    destination_branch_code = serializers.CharField(source="discrepancy.transfer.destination_branch.code", read_only=True)
+    destination_branch_name = serializers.CharField(source="discrepancy.transfer.destination_branch.name", read_only=True)
+    pallet_code = serializers.CharField(source="discrepancy.pallet.scan_code", read_only=True)
+    total_posted_to_unconfirmed_quantity = serializers.SerializerMethodField()
+    total_recovered_quantity = serializers.SerializerMethodField()
+    total_confirmed_shortage_quantity = serializers.SerializerMethodField()
+    total_remaining_quantity = serializers.SerializerMethodField()
+    lines = serializers.SerializerMethodField()
+
+    def get_next_action_label(self, obj) -> str:
+        return reconciliation_next_action(obj.route, obj.status, self.get_manual_decision(obj) is not None)
+
+    def get_manual_decision_required(self, obj) -> bool:
+        return TransferDiscrepancySerializer()._manual_decision_required(obj)
+
+    def get_manual_decision(self, obj) -> dict | None:
+        return TransferDiscrepancySerializer()._manual_decision_summary(obj)
+
+    def get_source_stock_verification(self, obj) -> dict | None:
+        verification = getattr(obj, "source_stock_verification", None)
+        if verification is None:
+            return None
+        totals = get_source_verification_totals(verification)
+        return {
+            "id": verification.id,
+            "reference": verification.reference,
+            "status": verification.status,
+            "status_label": verification.get_status_display(),
+            "total_target_quantity": str(totals["target"]),
+            "total_found_quantity": str(totals["found"]),
+            "total_remaining_quantity": str(totals["remaining"]),
+            "total_unresolved_quantity": str(totals["unresolved"]),
+            "search_completed_at": verification.search_completed_at.isoformat() if verification.search_completed_at else None,
+            "search_completed_by_worker_code": verification.search_completed_by_worker_code,
+            "search_completion_note": verification.search_completion_note,
+        }
+
+    def get_total_posted_to_unconfirmed_quantity(self, obj) -> str:
+        return str(get_discrepancy_investigation_totals(obj.discrepancy)["posted"])
+
+    def get_total_recovered_quantity(self, obj) -> str:
+        return str(get_discrepancy_investigation_totals(obj.discrepancy)["recovered"])
+
+    def get_total_confirmed_shortage_quantity(self, obj) -> str:
+        return str(get_discrepancy_investigation_totals(obj.discrepancy)["confirmed_shortage"])
+
+    def get_total_remaining_quantity(self, obj) -> str:
+        return str(get_discrepancy_investigation_totals(obj.discrepancy)["remaining"])
+
+    def get_lines(self, obj) -> list[dict]:
+        return [
+            {
+                "id": item.id,
+                "product_sku": item.product.sku,
+                "product_name": item.product.name,
+                "missing_quantity": str(item.discrepancy_quantity),
+                "recovered_quantity": str(item.recovered_quantity),
+                "confirmed_shortage_quantity": str(item.confirmed_shortage_quantity),
+                "remaining_quantity": str(discrepancy_line_remaining(item)),
+            }
+            for item in obj.discrepancy.items.select_related("product").order_by("product__sku")
+        ]
+
+    class Meta:
+        model = TransferDiscrepancyReconciliation
+        fields = [
+            "id",
+            "reference",
+            "route",
+            "route_label",
+            "status",
+            "status_label",
+            "next_action_label",
+            "manual_decision_required",
+            "manual_decision",
+            "created_at",
+            "updated_at",
+            "acknowledged_at",
+            "acknowledged_by_worker_code",
+            "completed_at",
+            "completed_by_worker_code",
+            "source_stock_verification",
+            "discrepancy",
+            "discrepancy_reference",
+            "discrepancy_status",
+            "discrepancy_confirmed_shortage_at",
+            "discrepancy_confirmed_shortage_by_worker_code",
+            "source_review",
+            "source_review_reference",
+            "source_review_status",
+            "source_review_finding",
+            "source_review_finding_display",
+            "source_review_finding_note",
+            "source_review_completed_at",
+            "source_review_completed_by_worker_code",
+            "transfer_reference",
+            "source_branch_code",
+            "source_branch_name",
+            "destination_branch_code",
+            "destination_branch_name",
+            "pallet_code",
+            "total_posted_to_unconfirmed_quantity",
+            "total_recovered_quantity",
+            "total_confirmed_shortage_quantity",
+            "total_remaining_quantity",
+            "lines",
+        ]
+
+
+class TransferDiscrepancySourceStockVerificationSerializer(serializers.ModelSerializer):
+    status_label = serializers.CharField(source="get_status_display", read_only=True)
+    next_action_label = serializers.SerializerMethodField()
+    reconciliation_reference = serializers.CharField(source="reconciliation.reference", read_only=True)
+    reconciliation_status = serializers.CharField(source="reconciliation.status", read_only=True)
+    reconciliation_route = serializers.CharField(source="reconciliation.route", read_only=True)
+    reconciliation_route_label = serializers.CharField(source="reconciliation.get_route_display", read_only=True)
+    reconciliation_manual_decision = serializers.SerializerMethodField()
+    source_review_reference = serializers.CharField(source="reconciliation.source_review.reference", read_only=True)
+    source_review_finding = serializers.CharField(source="reconciliation.source_review.finding", read_only=True)
+    source_review_finding_display = serializers.CharField(
+        source="reconciliation.source_review.get_finding_display",
+        read_only=True,
+    )
+    discrepancy_reference = serializers.CharField(source="reconciliation.discrepancy.reference", read_only=True)
+    discrepancy_status = serializers.CharField(source="reconciliation.discrepancy.status", read_only=True)
+    transfer_reference = serializers.CharField(source="reconciliation.discrepancy.transfer.reference", read_only=True)
+    source_branch_code = serializers.CharField(
+        source="reconciliation.discrepancy.transfer.source_branch.code",
+        read_only=True,
+    )
+    source_branch_name = serializers.CharField(
+        source="reconciliation.discrepancy.transfer.source_branch.name",
+        read_only=True,
+    )
+    destination_branch_code = serializers.CharField(
+        source="reconciliation.discrepancy.transfer.destination_branch.code",
+        read_only=True,
+    )
+    destination_branch_name = serializers.CharField(
+        source="reconciliation.discrepancy.transfer.destination_branch.name",
+        read_only=True,
+    )
+    pallet_code = serializers.CharField(source="reconciliation.discrepancy.pallet.scan_code", read_only=True)
+    total_target_quantity = serializers.SerializerMethodField()
+    total_found_quantity = serializers.SerializerMethodField()
+    total_remaining_quantity = serializers.SerializerMethodField()
+    total_unresolved_quantity = serializers.SerializerMethodField()
+    items = serializers.SerializerMethodField()
+    recoveries = serializers.SerializerMethodField()
+
+    def get_next_action_label(self, obj) -> str:
+        return source_verification_next_action(obj.status)
+
+    def get_reconciliation_manual_decision(self, obj) -> dict | None:
+        return TransferDiscrepancySerializer()._manual_decision_summary(obj.reconciliation)
+
+    def get_total_target_quantity(self, obj) -> str:
+        return str(get_source_verification_totals(obj)["target"])
+
+    def get_total_found_quantity(self, obj) -> str:
+        return str(get_source_verification_totals(obj)["found"])
+
+    def get_total_remaining_quantity(self, obj) -> str:
+        return str(get_source_verification_totals(obj)["remaining"])
+
+    def get_total_unresolved_quantity(self, obj) -> str:
+        return str(get_source_verification_totals(obj)["unresolved"])
+
+    def get_items(self, obj) -> list[dict]:
+        return [
+            {
+                "id": item.id,
+                "product_sku": item.product.sku,
+                "product_name": item.product.name,
+                "target_quantity": str(item.target_quantity),
+                "found_quantity": str(item.found_quantity),
+                "remaining_quantity": str(source_verification_item_remaining(item)),
+                "unresolved_quantity": str(
+                    source_verification_item_remaining(item)
+                    if obj.status == TransferDiscrepancySourceStockVerification.Status.COMPLETED_UNRESOLVED
+                    else Decimal("0")
+                ),
+                "last_found_at": item.last_found_at.isoformat() if item.last_found_at else None,
+            }
+            for item in obj.items.select_related("product").order_by("product__sku")
+        ]
+
+    def get_recoveries(self, obj) -> list[dict]:
+        return [
+            {
+                "id": recovery.id,
+                "product_sku": recovery.product.sku,
+                "product_name": recovery.product.name,
+                "quantity": str(recovery.quantity),
+                "destination_location_code": recovery.destination_location.code,
+                "destination_location_name": recovery.destination_location.name,
+                "worker_code": recovery.worker_code,
+                "recovered_at": recovery.recovered_at.isoformat(),
+                "client_operation_id": recovery.client_operation_id,
+            }
+            for recovery in obj.recoveries.select_related("product", "destination_location").order_by("-recovered_at")
+        ]
+
+    class Meta:
+        model = TransferDiscrepancySourceStockVerification
+        fields = [
+            "id",
+            "reference",
+            "status",
+            "status_label",
+            "next_action_label",
+            "created_at",
+            "updated_at",
+            "started_at",
+            "started_by_worker_code",
+            "completed_at",
+            "completed_by_worker_code",
+            "search_completed_at",
+            "search_completed_by_worker_code",
+            "search_completion_note",
+            "search_completion_operation_id",
+            "reconciliation",
+            "reconciliation_reference",
+            "reconciliation_status",
+            "reconciliation_route",
+            "reconciliation_route_label",
+            "reconciliation_manual_decision",
+            "source_review_reference",
+            "source_review_finding",
+            "source_review_finding_display",
+            "discrepancy_reference",
+            "discrepancy_status",
+            "transfer_reference",
+            "source_branch_code",
+            "source_branch_name",
+            "destination_branch_code",
+            "destination_branch_name",
+            "pallet_code",
+            "total_target_quantity",
+            "total_found_quantity",
+            "total_remaining_quantity",
+            "total_unresolved_quantity",
+            "items",
+            "recoveries",
         ]

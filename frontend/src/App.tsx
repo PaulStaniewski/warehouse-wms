@@ -7,6 +7,9 @@ import { CurrentEventsPage } from "./pages/CurrentEventsPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { DiscrepanciesPage } from "./pages/DiscrepanciesPage";
 import { DiscrepancyDetailPage } from "./pages/DiscrepancyDetailPage";
+import { DiscrepancyReconciliationDetailPage } from "./pages/DiscrepancyReconciliationDetailPage";
+import { DiscrepancyReconciliationsPage } from "./pages/DiscrepancyReconciliationsPage";
+import { DiscrepancyReportPage } from "./pages/DiscrepancyReportPage";
 import { InventoryPage } from "./pages/InventoryPage";
 import { LocationsPage } from "./pages/LocationsPage";
 import { OrdersPage } from "./pages/OrdersPage";
@@ -24,6 +27,10 @@ import { ScannerProductLookupPage } from "./pages/ScannerProductLookupPage";
 import { ScannerQuickTransferPage } from "./pages/ScannerQuickTransferPage";
 import { ScannerReceivingPage } from "./pages/ScannerReceivingPage";
 import { ScannerTasksPage } from "./pages/ScannerTasksPage";
+import { SourceDiscrepancyReviewDetailPage } from "./pages/SourceDiscrepancyReviewDetailPage";
+import { SourceDiscrepancyReviewsPage } from "./pages/SourceDiscrepancyReviewsPage";
+import { SourceStockVerificationDetailPage } from "./pages/SourceStockVerificationDetailPage";
+import { SourceStockVerificationsPage } from "./pages/SourceStockVerificationsPage";
 
 function App() {
   return (
@@ -39,6 +46,13 @@ function App() {
         <Route path="wms/routes/archive" element={<RouteArchivePage />} />
         <Route path="wms/discrepancies" element={<DiscrepanciesPage />} />
         <Route path="wms/discrepancies/:id" element={<DiscrepancyDetailPage />} />
+        <Route path="wms/discrepancies/:id/report" element={<DiscrepancyReportPage />} />
+        <Route path="wms/source-discrepancy-reviews" element={<SourceDiscrepancyReviewsPage />} />
+        <Route path="wms/source-discrepancy-reviews/:id" element={<SourceDiscrepancyReviewDetailPage />} />
+        <Route path="wms/discrepancy-reconciliations" element={<DiscrepancyReconciliationsPage />} />
+        <Route path="wms/discrepancy-reconciliations/:id" element={<DiscrepancyReconciliationDetailPage />} />
+        <Route path="wms/source-stock-verifications" element={<SourceStockVerificationsPage />} />
+        <Route path="wms/source-stock-verifications/:id" element={<SourceStockVerificationDetailPage />} />
         <Route path="wms/route-runs/:id/documents" element={<RouteDocumentsPage />} />
         <Route path="wms/events/current" element={<CurrentEventsPage />} />
         <Route path="wms/events/archive" element={<ArchiveEventsPage />} />

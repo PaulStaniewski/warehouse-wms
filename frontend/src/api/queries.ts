@@ -29,6 +29,16 @@ import type {
   ScannerSessionResponse,
   ScannerTaskStartResponse,
   TransferDiscrepancy,
+  TransferDiscrepancyConfirmShortageResponse,
+  TransferDiscrepancyPrintResponse,
+  TransferDiscrepancyRecoverResponse,
+  TransferDiscrepancyReconciliation,
+  TransferDiscrepancyReconciliationResponse,
+  TransferDiscrepancySourceStockRecoveryResponse,
+  TransferDiscrepancySourceStockVerification,
+  TransferDiscrepancySourceStockVerificationResponse,
+  TransferDiscrepancySourceReview,
+  TransferDiscrepancySourceReviewResponse,
 } from "../types/api";
 
 
@@ -580,6 +590,341 @@ export function useTransferDiscrepancy(id?: string) {
     queryKey: ["transfer-discrepancy", id],
     queryFn: async () => {
       const response = await apiClient.get<TransferDiscrepancy>(`/transfer-discrepancies/${id}/`);
+      return response.data;
+    },
+  });
+}
+
+export function usePrintTransferDiscrepancyReport() {
+  return useMutation({
+    mutationFn: async ({
+      discrepancyId,
+      printerCode,
+      workerCode,
+    }: {
+      discrepancyId: number;
+      printerCode: string;
+      workerCode: string;
+    }) => {
+      const response = await apiClient.post<TransferDiscrepancyPrintResponse>(
+        `/transfer-discrepancies/${discrepancyId}/print-report/`,
+        {
+          printer_code: printerCode,
+          worker_code: workerCode,
+        },
+      );
+      return response.data;
+    },
+  });
+}
+
+export function useRecoverTransferDiscrepancyItem() {
+  return useMutation({
+    mutationFn: async ({
+      clientOperationId,
+      destinationLocationCode,
+      discrepancyId,
+      productCode,
+      quantity,
+      workerCode,
+    }: {
+      clientOperationId: string;
+      destinationLocationCode: string;
+      discrepancyId: number;
+      productCode: string;
+      quantity: string;
+      workerCode: string;
+    }) => {
+      const response = await apiClient.post<TransferDiscrepancyRecoverResponse>(
+        `/transfer-discrepancies/${discrepancyId}/recover-item/`,
+        {
+          client_operation_id: clientOperationId,
+          destination_location_code: destinationLocationCode,
+          product_code: productCode,
+          quantity,
+          worker_code: workerCode,
+        },
+      );
+      return response.data;
+    },
+  });
+}
+
+export function useConfirmTransferDiscrepancyShortage() {
+  return useMutation({
+    mutationFn: async ({
+      clientOperationId,
+      discrepancyId,
+      productCode,
+      quantity,
+      workerCode,
+    }: {
+      clientOperationId: string;
+      discrepancyId: number;
+      productCode: string;
+      quantity: string;
+      workerCode: string;
+    }) => {
+      const response = await apiClient.post<TransferDiscrepancyConfirmShortageResponse>(
+        `/transfer-discrepancies/${discrepancyId}/confirm-shortage/`,
+        {
+          client_operation_id: clientOperationId,
+          product_code: productCode,
+          quantity,
+          worker_code: workerCode,
+        },
+      );
+      return response.data;
+    },
+  });
+}
+
+export function useTransferDiscrepancySourceReviews(status?: string, search?: string) {
+  return useQuery({
+    queryKey: ["transfer-discrepancy-source-reviews", status, search],
+    queryFn: () => {
+      const params = new URLSearchParams();
+      if (status) {
+        params.set("status", status);
+      }
+      if (search) {
+        params.set("search", search);
+      }
+      const query = params.toString();
+      return getList<TransferDiscrepancySourceReview>(
+        `/transfer-discrepancy-source-reviews/${query ? `?${query}` : ""}`,
+      );
+    },
+  });
+}
+
+export function useTransferDiscrepancySourceReview(id?: string) {
+  return useQuery({
+    enabled: Boolean(id),
+    queryKey: ["transfer-discrepancy-source-review", id],
+    queryFn: async () => {
+      const response = await apiClient.get<TransferDiscrepancySourceReview>(
+        `/transfer-discrepancy-source-reviews/${id}/`,
+      );
+      return response.data;
+    },
+  });
+}
+
+export function useBeginTransferDiscrepancySourceReview() {
+  return useMutation({
+    mutationFn: async ({ reviewId, workerCode }: { reviewId: number; workerCode: string }) => {
+      const response = await apiClient.post<TransferDiscrepancySourceReviewResponse>(
+        `/transfer-discrepancy-source-reviews/${reviewId}/begin/`,
+        { worker_code: workerCode },
+      );
+      return response.data;
+    },
+  });
+}
+
+export function useCompleteTransferDiscrepancySourceReview() {
+  return useMutation({
+    mutationFn: async ({
+      clientOperationId,
+      finding,
+      findingNote,
+      reviewId,
+      workerCode,
+    }: {
+      clientOperationId: string;
+      finding: string;
+      findingNote: string;
+      reviewId: number;
+      workerCode: string;
+    }) => {
+      const response = await apiClient.post<TransferDiscrepancySourceReviewResponse>(
+        `/transfer-discrepancy-source-reviews/${reviewId}/complete/`,
+        {
+          client_operation_id: clientOperationId,
+          finding,
+          finding_note: findingNote,
+          worker_code: workerCode,
+        },
+      );
+      return response.data;
+    },
+  });
+}
+
+export function useTransferDiscrepancyReconciliations(status?: string, route?: string, search?: string) {
+  return useQuery({
+    queryKey: ["transfer-discrepancy-reconciliations", status, route, search],
+    queryFn: () => {
+      const params = new URLSearchParams();
+      if (status) {
+        params.set("status", status);
+      }
+      if (route) {
+        params.set("route", route);
+      }
+      if (search) {
+        params.set("search", search);
+      }
+      const query = params.toString();
+      return getList<TransferDiscrepancyReconciliation>(
+        `/transfer-discrepancy-reconciliations/${query ? `?${query}` : ""}`,
+      );
+    },
+  });
+}
+
+export function useTransferDiscrepancyReconciliation(id?: string) {
+  return useQuery({
+    enabled: Boolean(id),
+    queryKey: ["transfer-discrepancy-reconciliation", id],
+    queryFn: async () => {
+      const response = await apiClient.get<TransferDiscrepancyReconciliation>(
+        `/transfer-discrepancy-reconciliations/${id}/`,
+      );
+      return response.data;
+    },
+  });
+}
+
+export function useAcknowledgeTransferDiscrepancyReconciliation() {
+  return useMutation({
+    mutationFn: async ({ reconciliationId, workerCode }: { reconciliationId: number; workerCode: string }) => {
+      const response = await apiClient.post<TransferDiscrepancyReconciliationResponse>(
+        `/transfer-discrepancy-reconciliations/${reconciliationId}/acknowledge/`,
+        { worker_code: workerCode },
+      );
+      return response.data;
+    },
+  });
+}
+
+export function useCompleteManualTransferDiscrepancyReconciliation() {
+  return useMutation({
+    mutationFn: async ({
+      clientOperationId,
+      decisionNote,
+      outcome,
+      reconciliationId,
+      workerCode,
+    }: {
+      clientOperationId: string;
+      decisionNote: string;
+      outcome: string;
+      reconciliationId: number;
+      workerCode: string;
+    }) => {
+      const response = await apiClient.post<TransferDiscrepancyReconciliationResponse>(
+        `/transfer-discrepancy-reconciliations/${reconciliationId}/complete-manual/`,
+        {
+          client_operation_id: clientOperationId,
+          decision_note: decisionNote,
+          outcome,
+          worker_code: workerCode,
+        },
+      );
+      return response.data;
+    },
+  });
+}
+
+export function useTransferDiscrepancySourceStockVerifications(status?: string, search?: string) {
+  return useQuery({
+    queryKey: ["transfer-discrepancy-source-stock-verifications", status, search],
+    queryFn: () => {
+      const params = new URLSearchParams();
+      if (status) {
+        params.set("status", status);
+      }
+      if (search) {
+        params.set("search", search);
+      }
+      const query = params.toString();
+      return getList<TransferDiscrepancySourceStockVerification>(
+        `/transfer-discrepancy-source-stock-verifications/${query ? `?${query}` : ""}`,
+      );
+    },
+  });
+}
+
+export function useTransferDiscrepancySourceStockVerification(id?: string) {
+  return useQuery({
+    enabled: Boolean(id),
+    queryKey: ["transfer-discrepancy-source-stock-verification", id],
+    queryFn: async () => {
+      const response = await apiClient.get<TransferDiscrepancySourceStockVerification>(
+        `/transfer-discrepancy-source-stock-verifications/${id}/`,
+      );
+      return response.data;
+    },
+  });
+}
+
+export function useBeginTransferDiscrepancySourceStockVerification() {
+  return useMutation({
+    mutationFn: async ({ verificationId, workerCode }: { verificationId: number; workerCode: string }) => {
+      const response = await apiClient.post<TransferDiscrepancySourceStockVerificationResponse>(
+        `/transfer-discrepancy-source-stock-verifications/${verificationId}/begin/`,
+        { worker_code: workerCode },
+      );
+      return response.data;
+    },
+  });
+}
+
+export function useRecordTransferDiscrepancySourceStockFound() {
+  return useMutation({
+    mutationFn: async ({
+      clientOperationId,
+      destinationLocationCode,
+      productCode,
+      quantity,
+      verificationId,
+      workerCode,
+    }: {
+      clientOperationId: string;
+      destinationLocationCode: string;
+      productCode: string;
+      quantity: string;
+      verificationId: number;
+      workerCode: string;
+    }) => {
+      const response = await apiClient.post<TransferDiscrepancySourceStockRecoveryResponse>(
+        `/transfer-discrepancy-source-stock-verifications/${verificationId}/record-found/`,
+        {
+          client_operation_id: clientOperationId,
+          destination_location_code: destinationLocationCode,
+          product_code: productCode,
+          quantity,
+          worker_code: workerCode,
+        },
+      );
+      return response.data;
+    },
+  });
+}
+
+export function useCompleteTransferDiscrepancySourceSearch() {
+  return useMutation({
+    mutationFn: async ({
+      clientOperationId,
+      searchCompletionNote,
+      verificationId,
+      workerCode,
+    }: {
+      clientOperationId: string;
+      searchCompletionNote: string;
+      verificationId: number;
+      workerCode: string;
+    }) => {
+      const response = await apiClient.post<TransferDiscrepancySourceStockVerificationResponse>(
+        `/transfer-discrepancy-source-stock-verifications/${verificationId}/complete-search/`,
+        {
+          client_operation_id: clientOperationId,
+          search_completion_note: searchCompletionNote,
+          worker_code: workerCode,
+        },
+      );
       return response.data;
     },
   });
