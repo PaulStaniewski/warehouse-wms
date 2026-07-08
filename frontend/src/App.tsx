@@ -31,6 +31,8 @@ import { SourceDiscrepancyReviewDetailPage } from "./pages/SourceDiscrepancyRevi
 import { SourceDiscrepancyReviewsPage } from "./pages/SourceDiscrepancyReviewsPage";
 import { SourceStockVerificationDetailPage } from "./pages/SourceStockVerificationDetailPage";
 import { SourceStockVerificationsPage } from "./pages/SourceStockVerificationsPage";
+import { TransitInvestigationDetailPage } from "./pages/TransitInvestigationDetailPage";
+import { TransitInvestigationsPage } from "./pages/TransitInvestigationsPage";
 
 function App() {
   return (
@@ -53,6 +55,8 @@ function App() {
         <Route path="wms/discrepancy-reconciliations/:id" element={<DiscrepancyReconciliationDetailPage />} />
         <Route path="wms/source-stock-verifications" element={<SourceStockVerificationsPage />} />
         <Route path="wms/source-stock-verifications/:id" element={<SourceStockVerificationDetailPage />} />
+        <Route path="wms/transit-investigations" element={<TransitInvestigationsPage />} />
+        <Route path="wms/transit-investigations/:id" element={<TransitInvestigationDetailPage />} />
         <Route path="wms/route-runs/:id/documents" element={<RouteDocumentsPage />} />
         <Route path="wms/events/current" element={<CurrentEventsPage />} />
         <Route path="wms/events/archive" element={<ArchiveEventsPage />} />

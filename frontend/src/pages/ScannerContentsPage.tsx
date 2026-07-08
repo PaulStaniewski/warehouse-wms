@@ -182,7 +182,8 @@ export function ScannerContentsPage() {
             )}
             {lookup.data.object_type === "pallet" && lookup.data.reconciliation && (
               <small>
-                Reconciliation: {lookup.data.reconciliation.route_label} / {lookup.data.reconciliation.status}
+                Reconciliation: {lookup.data.reconciliation.route_label} /{" "}
+                {lookup.data.reconciliation.status_label ?? lookup.data.reconciliation.status}
                 {lookup.data.reconciliation.manual_decision ? ` / ${lookup.data.reconciliation.manual_decision.outcome_label}` : ""}
               </small>
             )}
@@ -196,6 +197,12 @@ export function ScannerContentsPage() {
                 / Found at source {formatQuantity(Number(lookup.data.source_stock_verification.total_found_quantity))} / Source remaining{" "}
                 {formatQuantity(Number(lookup.data.source_stock_verification.total_remaining_quantity))} / Source unresolved{" "}
                 {formatQuantity(Number(lookup.data.source_stock_verification.total_unresolved_quantity))}
+              </small>
+            )}
+            {lookup.data.object_type === "pallet" && lookup.data.transit_investigation && (
+              <small>
+                Transit investigation: {lookup.data.transit_investigation.status_label}
+                {lookup.data.transit_investigation.finding_label ? ` / ${lookup.data.transit_investigation.finding_label}` : ""}
               </small>
             )}
             <small>{objectLineCount(lookup.data)}</small>

@@ -155,6 +155,7 @@ def _pallet_contents(pallet: TransferPallet):
     reconciliation = getattr(discrepancy, "reconciliation", None) if discrepancy else None
     manual_decision = getattr(reconciliation, "manual_decision", None) if reconciliation else None
     source_verification = getattr(reconciliation, "source_stock_verification", None) if reconciliation else None
+    transit_investigation = getattr(reconciliation, "transit_investigation", None) if reconciliation else None
     discrepancy_items = {item.pallet_item_id: item for item in discrepancy.items.all()} if discrepancy else {}
     items = []
     for item in pallet.items.select_related("product").order_by("product__sku"):
@@ -244,6 +245,16 @@ def _pallet_contents(pallet: TransferPallet):
                 ),
             }
             if source_verification
+            else None,
+            "transit_investigation": {
+                "id": transit_investigation.id,
+                "reference": transit_investigation.reference,
+                "status": transit_investigation.status,
+                "status_label": transit_investigation.get_status_display(),
+                "finding": transit_investigation.finding,
+                "finding_label": transit_investigation.get_finding_display() if transit_investigation.finding else "",
+            }
+            if transit_investigation
             else None,
             "items": items,
         },

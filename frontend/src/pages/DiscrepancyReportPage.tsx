@@ -189,7 +189,7 @@ export function DiscrepancyReportPage() {
               <h2>Reconciliation</h2>
               <p>
                 Reference: {data.reconciliation.reference} / Route: {data.reconciliation.route_label} / Status:{" "}
-                {data.reconciliation.status}
+                {data.reconciliation.status_label ?? data.reconciliation.status}
               </p>
             </>
           )}
@@ -217,6 +217,28 @@ export function DiscrepancyReportPage() {
               )}
               {data.reconciliation.source_stock_verification.search_completion_note && (
                 <p>Search note: {data.reconciliation.source_stock_verification.search_completion_note}</p>
+              )}
+            </>
+          )}
+
+          {data.reconciliation?.transit_investigation && (
+            <>
+              <h2>Transit investigation</h2>
+              <p>
+                Reference: {data.reconciliation.transit_investigation.reference} / Status:{" "}
+                {data.reconciliation.transit_investigation.status_label}
+                {data.reconciliation.transit_investigation.finding_label
+                  ? ` / Finding: ${data.reconciliation.transit_investigation.finding_label}`
+                  : ""}
+              </p>
+              {data.reconciliation.transit_investigation.completed_at && (
+                <p>
+                  Completed by: {data.reconciliation.transit_investigation.completed_by_worker_code || "-"} / Completed at:{" "}
+                  {formatDateTime(data.reconciliation.transit_investigation.completed_at)}
+                </p>
+              )}
+              {data.reconciliation.transit_investigation.finding_note && (
+                <p>Investigation note: {data.reconciliation.transit_investigation.finding_note}</p>
               )}
             </>
           )}

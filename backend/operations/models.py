@@ -945,6 +945,7 @@ class TransferDiscrepancyReconciliation(TimestampedModel):
 class TransferDiscrepancyManualReconciliationDecision(TimestampedModel):
     class Outcome(models.TextChoices):
         SOURCE_LOSS_CONFIRMED = "source_loss_confirmed", "Source loss confirmed"
+        TRANSIT_LOSS_CONFIRMED = "transit_loss_confirmed", "Transit loss confirmed"
         UNRESOLVED_LOSS_CLOSED = "unresolved_loss_closed", "Unresolved loss - cause not determined"
         ADMINISTRATIVE_ERROR = "administrative_error", "Administrative or process error"
 
@@ -969,6 +970,54 @@ class TransferDiscrepancyManualReconciliationDecision(TimestampedModel):
 
     def __str__(self) -> str:
         return f"{self.reconciliation.reference} / {self.get_outcome_display()}"
+
+
+class TransferDiscrepancyTransitInvestigation(TimestampedModel):
+    class Status(models.TextChoices):
+        PENDING_INVESTIGATION = "pending_investigation", "Pending investigation"
+        INVESTIGATING = "investigating", "Investigating"
+        COMPLETED = "completed", "Completed"
+
+    class Finding(models.TextChoices):
+        TRANSIT_IRREGULARITY_FOUND = "transit_irregularity_found", "Transit irregularity found"
+        NO_TRANSIT_IRREGULARITY_IDENTIFIED = (
+            "no_transit_irregularity_identified",
+            "No transit irregularity identified",
+        )
+        INCONCLUSIVE = "inconclusive", "Inconclusive"
+
+    reference = models.CharField(max_length=64, unique=True, blank=True)
+    reconciliation = models.OneToOneField(
+        TransferDiscrepancyReconciliation,
+        on_delete=models.PROTECT,
+        related_name="transit_investigation",
+    )
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.PENDING_INVESTIGATION)
+    finding = models.CharField(max_length=64, choices=Finding.choices, blank=True)
+    finding_note = models.TextField(blank=True)
+    started_at = models.DateTimeField(blank=True, null=True)
+    started_by_worker_code = models.CharField(max_length=64, blank=True)
+    completed_at = models.DateTimeField(blank=True, null=True)
+    completed_by_worker_code = models.CharField(max_length=64, blank=True)
+    completion_operation_id = models.CharField(max_length=128, unique=True, blank=True, null=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["reference"]),
+            models.Index(fields=["status"]),
+            models.Index(fields=["finding"]),
+            models.Index(fields=["completion_operation_id"]),
+        ]
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        if not self.reference:
+            self.reference = f"TRI-{self.id:06d}"
+            super().save(update_fields=["reference", "updated_at"])
+
+    def __str__(self) -> str:
+        return self.reference or f"Transit investigation {self.id}"
 
 
 class TransferDiscrepancySourceStockVerification(TimestampedModel):

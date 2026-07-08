@@ -14,6 +14,7 @@ from operations.models import (
     TransferDiscrepancySourceStockVerification,
     TransferDiscrepancySourceStockVerificationItem,
     TransferDiscrepancySourceReview,
+    TransferDiscrepancyTransitInvestigation,
 )
 from warehouse.models import Location
 
@@ -88,12 +89,29 @@ def reconciliation_route_for_finding(finding: str) -> str:
 
 def reconciliation_next_action(route: str, status: str | None = None, has_manual_decision: bool = False) -> str:
     if status == TransferDiscrepancyReconciliation.Status.MANUAL_ACTION_REQUIRED:
+        if route == TransferDiscrepancyReconciliation.Route.TRANSIT_INVESTIGATION:
+            return "Review the transit investigation finding and record the final reconciliation outcome."
         return "Review the unresolved source stock and record the final reconciliation outcome."
     if status == TransferDiscrepancyReconciliation.Status.COMPLETED and has_manual_decision:
         return "The reconciliation has been completed with a final manual outcome."
     if route == TransferDiscrepancyReconciliation.Route.MANUAL_RECONCILIATION and status == TransferDiscrepancyReconciliation.Status.IN_PROGRESS:
         return "Review the complete discrepancy evidence and record the final reconciliation outcome."
     return RECONCILIATION_NEXT_ACTIONS[route]
+
+
+TRANSIT_INVESTIGATION_NEXT_ACTIONS = {
+    TransferDiscrepancyTransitInvestigation.Status.PENDING_INVESTIGATION: "Begin transit investigation.",
+    TransferDiscrepancyTransitInvestigation.Status.INVESTIGATING: (
+        "Review the transfer, route and receiving evidence and record the transit investigation finding."
+    ),
+    TransferDiscrepancyTransitInvestigation.Status.COMPLETED: (
+        "The transit investigation is complete. A final manual reconciliation decision is required."
+    ),
+}
+
+
+def transit_investigation_next_action(status: str) -> str:
+    return TRANSIT_INVESTIGATION_NEXT_ACTIONS[status]
 
 
 def ensure_reconciliation_for_source_review(source_review):
@@ -193,6 +211,28 @@ def ensure_source_stock_verification_for_reconciliation(reconciliation):
             ),
         )
     return verification, created
+
+
+def ensure_transit_investigation_for_reconciliation(reconciliation):
+    if reconciliation.route != TransferDiscrepancyReconciliation.Route.TRANSIT_INVESTIGATION:
+        return None, False
+    if reconciliation.status != TransferDiscrepancyReconciliation.Status.IN_PROGRESS:
+        raise ValueError("Reconciliation must be in progress before transit investigation.")
+
+    investigation, created = TransferDiscrepancyTransitInvestigation.objects.get_or_create(
+        reconciliation=reconciliation,
+    )
+    if created:
+        AuditLog.objects.create(
+            action_type=AuditLog.ActionType.CREATE,
+            entity_name="TransferDiscrepancyTransitInvestigation",
+            entity_id=str(investigation.id),
+            message=(
+                f"Transit investigation {investigation.reference} was created for reconciliation "
+                f"{reconciliation.reference}."
+            ),
+        )
+    return investigation, created
 
 
 def complete_source_verification_if_finished(verification, worker_code: str) -> tuple[bool, bool]:

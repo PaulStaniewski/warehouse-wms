@@ -34,6 +34,7 @@ from operations.models import (
     TransferDiscrepancySourceStockRecovery,
     TransferDiscrepancySourceStockVerification,
     TransferDiscrepancySourceStockVerificationItem,
+    TransferDiscrepancyTransitInvestigation,
     TransferPallet,
     TransferPalletItem,
 )
@@ -121,6 +122,7 @@ class Command(BaseCommand):
         TransferDiscrepancySourceStockRecovery.objects.filter(verification__in=demo_verifications).delete()
         TransferDiscrepancySourceStockVerificationItem.objects.filter(verification__in=demo_verifications).delete()
         demo_verifications.delete()
+        TransferDiscrepancyTransitInvestigation.objects.filter(reconciliation__in=demo_reconciliations).delete()
         TransferDiscrepancyManualReconciliationDecision.objects.filter(reconciliation__in=demo_reconciliations).delete()
         TransferDiscrepancyReconciliation.objects.filter(discrepancy__in=demo_discrepancies).delete()
         TransferDiscrepancySourceReview.objects.filter(discrepancy__in=demo_discrepancies).delete()

@@ -39,6 +39,8 @@ import type {
   TransferDiscrepancySourceStockVerificationResponse,
   TransferDiscrepancySourceReview,
   TransferDiscrepancySourceReviewResponse,
+  TransferDiscrepancyTransitInvestigation,
+  TransferDiscrepancyTransitInvestigationResponse,
 } from "../types/api";
 
 
@@ -922,6 +924,79 @@ export function useCompleteTransferDiscrepancySourceSearch() {
         {
           client_operation_id: clientOperationId,
           search_completion_note: searchCompletionNote,
+          worker_code: workerCode,
+        },
+      );
+      return response.data;
+    },
+  });
+}
+
+export function useTransferDiscrepancyTransitInvestigations(status?: string, search?: string) {
+  return useQuery({
+    queryKey: ["transfer-discrepancy-transit-investigations", status, search],
+    queryFn: () => {
+      const params = new URLSearchParams();
+      if (status) {
+        params.set("status", status);
+      }
+      if (search) {
+        params.set("search", search);
+      }
+      const query = params.toString();
+      return getList<TransferDiscrepancyTransitInvestigation>(
+        `/transfer-discrepancy-transit-investigations/${query ? `?${query}` : ""}`,
+      );
+    },
+  });
+}
+
+export function useTransferDiscrepancyTransitInvestigation(id?: string) {
+  return useQuery({
+    enabled: Boolean(id),
+    queryKey: ["transfer-discrepancy-transit-investigation", id],
+    queryFn: async () => {
+      const response = await apiClient.get<TransferDiscrepancyTransitInvestigation>(
+        `/transfer-discrepancy-transit-investigations/${id}/`,
+      );
+      return response.data;
+    },
+  });
+}
+
+export function useBeginTransferDiscrepancyTransitInvestigation() {
+  return useMutation({
+    mutationFn: async ({ investigationId, workerCode }: { investigationId: number; workerCode: string }) => {
+      const response = await apiClient.post<TransferDiscrepancyTransitInvestigationResponse>(
+        `/transfer-discrepancy-transit-investigations/${investigationId}/begin/`,
+        { worker_code: workerCode },
+      );
+      return response.data;
+    },
+  });
+}
+
+export function useCompleteTransferDiscrepancyTransitInvestigation() {
+  return useMutation({
+    mutationFn: async ({
+      clientOperationId,
+      finding,
+      findingNote,
+      investigationId,
+      workerCode,
+    }: {
+      clientOperationId: string;
+      finding: string;
+      findingNote: string;
+      investigationId: number;
+      workerCode: string;
+    }) => {
+      const response = await apiClient.post<TransferDiscrepancyTransitInvestigationResponse>(
+        `/transfer-discrepancy-transit-investigations/${investigationId}/complete/`,
+        {
+          client_operation_id: clientOperationId,
+          finding,
+          finding_note: findingNote,
           worker_code: workerCode,
         },
       );

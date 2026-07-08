@@ -30,6 +30,7 @@ from operations.models import (
     TransferDiscrepancySourceStockVerification,
     TransferDiscrepancySourceStockVerificationItem,
     TransferDiscrepancySourceReview,
+    TransferDiscrepancyTransitInvestigation,
 )
 from operations.serializers import (
     AuditLogSerializer,
@@ -45,6 +46,7 @@ from operations.serializers import (
     TransferDiscrepancySerializer,
     TransferDiscrepancySourceStockVerificationSerializer,
     TransferDiscrepancySourceReviewSerializer,
+    TransferDiscrepancyTransitInvestigationSerializer,
 )
 from operations.services import is_route_late, is_route_work_fully_prepared, recalculate_route_readiness
 from operations.services import (
@@ -53,6 +55,7 @@ from operations.services import (
     discrepancy_line_remaining,
     ensure_reconciliation_for_source_review,
     ensure_source_stock_verification_for_reconciliation,
+    ensure_transit_investigation_for_reconciliation,
     finalize_discrepancy_if_complete,
     get_discrepancy_investigation_totals,
     get_source_verification_totals,
@@ -1143,10 +1146,16 @@ class TransferDiscrepancyReconciliationViewSet(ReadOnlyModelViewSet):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             if reconciliation.status == TransferDiscrepancyReconciliation.Status.IN_PROGRESS:
+                verification, verification_created = ensure_source_stock_verification_for_reconciliation(reconciliation)
+                investigation, investigation_created = ensure_transit_investigation_for_reconciliation(reconciliation)
                 return Response(
                     {
                         "message": "Reconciliation case already acknowledged.",
                         "reconciliation": self.get_serializer(reconciliation).data,
+                        "source_stock_verification_id": verification.id if verification else None,
+                        "source_stock_verification_created": verification_created if verification else False,
+                        "transit_investigation_id": investigation.id if investigation else None,
+                        "transit_investigation_created": investigation_created if investigation else False,
                     }
                 )
 
@@ -1157,6 +1166,7 @@ class TransferDiscrepancyReconciliationViewSet(ReadOnlyModelViewSet):
                 update_fields=["status", "acknowledged_at", "acknowledged_by_worker_code", "updated_at"]
             )
             verification, verification_created = ensure_source_stock_verification_for_reconciliation(reconciliation)
+            investigation, investigation_created = ensure_transit_investigation_for_reconciliation(reconciliation)
             AuditLog.objects.create(
                 action_type=AuditLog.ActionType.UPDATE,
                 entity_name="TransferDiscrepancyReconciliation",
@@ -1170,6 +1180,8 @@ class TransferDiscrepancyReconciliationViewSet(ReadOnlyModelViewSet):
                 "reconciliation": self.get_serializer(reconciliation).data,
                 "source_stock_verification_id": verification.id if verification else None,
                 "source_stock_verification_created": verification_created if verification else False,
+                "transit_investigation_id": investigation.id if investigation else None,
+                "transit_investigation_created": investigation_created if investigation else False,
             }
         )
 
@@ -1222,6 +1234,21 @@ class TransferDiscrepancyReconciliationViewSet(ReadOnlyModelViewSet):
         if len(decision_note) > 2000:
             return Response({"detail": "decision_note must be 2000 characters or fewer."}, status=status.HTTP_400_BAD_REQUEST)
 
+        source_outcomes = {
+            TransferDiscrepancyManualReconciliationDecision.Outcome.SOURCE_LOSS_CONFIRMED,
+            TransferDiscrepancyManualReconciliationDecision.Outcome.UNRESOLVED_LOSS_CLOSED,
+            TransferDiscrepancyManualReconciliationDecision.Outcome.ADMINISTRATIVE_ERROR,
+        }
+        original_manual_outcomes = {
+            TransferDiscrepancyManualReconciliationDecision.Outcome.UNRESOLVED_LOSS_CLOSED,
+            TransferDiscrepancyManualReconciliationDecision.Outcome.ADMINISTRATIVE_ERROR,
+        }
+        transit_outcomes = {
+            TransferDiscrepancyManualReconciliationDecision.Outcome.TRANSIT_LOSS_CONFIRMED,
+            TransferDiscrepancyManualReconciliationDecision.Outcome.UNRESOLVED_LOSS_CLOSED,
+            TransferDiscrepancyManualReconciliationDecision.Outcome.ADMINISTRATIVE_ERROR,
+        }
+
         with transaction.atomic():
             reconciliation = (
                 TransferDiscrepancyReconciliation.objects.select_for_update()
@@ -1247,6 +1274,7 @@ class TransferDiscrepancyReconciliationViewSet(ReadOnlyModelViewSet):
                     "reconciliation__discrepancy__transfer__source_branch",
                     "reconciliation__discrepancy__transfer__destination_branch",
                     "reconciliation__source_review",
+                    "reconciliation__transit_investigation",
                 ).get(reconciliation=reconciliation, client_operation_id=client_operation_id)
                 return Response(self._manual_decision_response(decision))
 
@@ -1260,14 +1288,13 @@ class TransferDiscrepancyReconciliationViewSet(ReadOnlyModelViewSet):
                     {"detail": "Reconciliation must be acknowledged before manual completion."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-            if reconciliation.route == TransferDiscrepancyReconciliation.Route.TRANSIT_INVESTIGATION:
-                return Response(
-                    {"detail": "This reconciliation requires transit investigation."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
             verification = None
             if reconciliation.route == TransferDiscrepancyReconciliation.Route.SOURCE_STOCK_VERIFICATION:
+                if outcome not in source_outcomes:
+                    return Response(
+                        {"detail": "This outcome is not allowed for source stock verification."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
                 if reconciliation.status != TransferDiscrepancyReconciliation.Status.MANUAL_ACTION_REQUIRED:
                     return Response(
                         {"detail": "Source verification reconciliation must require manual action."},
@@ -1294,7 +1321,48 @@ class TransferDiscrepancyReconciliationViewSet(ReadOnlyModelViewSet):
                         {"detail": "Source stock verification has no unresolved quantity."},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
+            elif reconciliation.route == TransferDiscrepancyReconciliation.Route.TRANSIT_INVESTIGATION:
+                if outcome not in transit_outcomes:
+                    return Response(
+                        {"detail": "This outcome is not allowed for transit investigation."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                if reconciliation.status != TransferDiscrepancyReconciliation.Status.MANUAL_ACTION_REQUIRED:
+                    return Response(
+                        {"detail": "Transit reconciliation must require manual action."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                investigation = (
+                    TransferDiscrepancyTransitInvestigation.objects.select_for_update()
+                    .filter(reconciliation=reconciliation)
+                    .first()
+                )
+                if investigation is None:
+                    return Response(
+                        {"detail": "Completed transit investigation is required before manual completion."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                if investigation.status != TransferDiscrepancyTransitInvestigation.Status.COMPLETED:
+                    return Response(
+                        {"detail": "Transit investigation must be completed before manual completion."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                if not investigation.finding or not investigation.finding_note.strip():
+                    return Response(
+                        {"detail": "Transit investigation finding and note are required before manual completion."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                if investigation.reconciliation_id != reconciliation.id:
+                    return Response(
+                        {"detail": "Transit investigation does not match this reconciliation."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
             elif reconciliation.route == TransferDiscrepancyReconciliation.Route.MANUAL_RECONCILIATION:
+                if outcome not in original_manual_outcomes:
+                    return Response(
+                        {"detail": "This outcome is not allowed for manual reconciliation."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
                 if reconciliation.status != TransferDiscrepancyReconciliation.Status.IN_PROGRESS:
                     return Response(
                         {"detail": "Manual reconciliation must be in progress before completion."},
@@ -1352,6 +1420,241 @@ class TransferDiscrepancySourceStockVerificationFilter(django_filters.FilterSet)
             | models.Q(reconciliation__discrepancy__transfer__reference__icontains=value)
             | models.Q(items__product__sku__icontains=value)
         ).distinct()
+
+
+class TransferDiscrepancyTransitInvestigationFilter(django_filters.FilterSet):
+    source_branch = django_filters.NumberFilter(field_name="reconciliation__discrepancy__transfer__source_branch_id")
+    destination_branch = django_filters.NumberFilter(field_name="reconciliation__discrepancy__transfer__destination_branch_id")
+    search = django_filters.CharFilter(method="filter_search")
+
+    class Meta:
+        model = TransferDiscrepancyTransitInvestigation
+        fields = ["status", "source_branch", "destination_branch"]
+
+    def filter_search(self, queryset, name, value):
+        return queryset.filter(
+            models.Q(reference__icontains=value)
+            | models.Q(reconciliation__reference__icontains=value)
+            | models.Q(reconciliation__source_review__reference__icontains=value)
+            | models.Q(reconciliation__discrepancy__reference__icontains=value)
+            | models.Q(reconciliation__discrepancy__pallet__scan_code__icontains=value)
+            | models.Q(reconciliation__discrepancy__transfer__reference__icontains=value)
+        ).distinct()
+
+
+class TransferDiscrepancyTransitInvestigationViewSet(ReadOnlyModelViewSet):
+    queryset = TransferDiscrepancyTransitInvestigation.objects.select_related(
+        "reconciliation",
+        "reconciliation__source_review",
+        "reconciliation__discrepancy",
+        "reconciliation__discrepancy__pallet",
+        "reconciliation__discrepancy__transfer",
+        "reconciliation__discrepancy__transfer__source_branch",
+        "reconciliation__discrepancy__transfer__destination_branch",
+    ).prefetch_related(
+        "reconciliation__discrepancy__items",
+        "reconciliation__discrepancy__items__product",
+        "reconciliation__discrepancy__pallet__items",
+        "reconciliation__discrepancy__pallet__items__product",
+        "reconciliation__discrepancy__pallet__receiving_scans",
+        "reconciliation__discrepancy__pallet__receiving_scans__product",
+        "reconciliation__discrepancy__pallet__receiving_scans__destination_location",
+    )
+    serializer_class = TransferDiscrepancyTransitInvestigationSerializer
+    filterset_class = TransferDiscrepancyTransitInvestigationFilter
+    search_fields = [
+        "reference",
+        "reconciliation__reference",
+        "reconciliation__source_review__reference",
+        "reconciliation__discrepancy__reference",
+        "reconciliation__discrepancy__pallet__scan_code",
+        "reconciliation__discrepancy__transfer__reference",
+    ]
+    ordering_fields = ["reference", "status", "finding", "created_at", "updated_at", "completed_at"]
+
+    def _validate_transit_workflow(self, investigation):
+        reconciliation = investigation.reconciliation
+        if reconciliation.route != TransferDiscrepancyReconciliation.Route.TRANSIT_INVESTIGATION:
+            return Response(
+                {"detail": "This reconciliation does not require transit investigation."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if reconciliation.source_review.status != TransferDiscrepancySourceReview.Status.COMPLETED:
+            return Response({"detail": "Transit investigation requires a completed source review."}, status=status.HTTP_400_BAD_REQUEST)
+        if reconciliation.source_review.finding != TransferDiscrepancySourceReview.Finding.DISPATCH_EVIDENCE_MATCHES:
+            return Response(
+                {"detail": "Transit investigation requires dispatch evidence matching expected quantity."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if reconciliation.discrepancy.status != TransferDiscrepancy.Status.CONFIRMED_SHORTAGE:
+            return Response(
+                {"detail": "Transit investigation requires a confirmed-shortage discrepancy."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return None
+
+    @action(detail=True, methods=["post"], url_path="begin")
+    def begin(self, request, pk=None):
+        worker_code = str(request.data.get("worker_code", "")).strip() or "DEMO"
+        with transaction.atomic():
+            investigation = (
+                TransferDiscrepancyTransitInvestigation.objects.select_for_update()
+                .select_related("reconciliation", "reconciliation__source_review", "reconciliation__discrepancy")
+                .get(pk=pk)
+            )
+            if investigation.status == TransferDiscrepancyTransitInvestigation.Status.COMPLETED:
+                return Response(
+                    {"detail": "This transit investigation has already been completed."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            validation = self._validate_transit_workflow(investigation)
+            if validation is not None:
+                return validation
+            if investigation.reconciliation.status != TransferDiscrepancyReconciliation.Status.IN_PROGRESS:
+                return Response(
+                    {"detail": "Transit investigation requires an in-progress reconciliation."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if investigation.status == TransferDiscrepancyTransitInvestigation.Status.INVESTIGATING:
+                return Response(
+                    {
+                        "message": "Transit investigation already started.",
+                        "transit_investigation": self.get_serializer(investigation).data,
+                    }
+                )
+            investigation.status = TransferDiscrepancyTransitInvestigation.Status.INVESTIGATING
+            investigation.started_at = timezone.now()
+            investigation.started_by_worker_code = worker_code
+            investigation.save(update_fields=["status", "started_at", "started_by_worker_code", "updated_at"])
+            AuditLog.objects.create(
+                action_type=AuditLog.ActionType.UPDATE,
+                entity_name="TransferDiscrepancyTransitInvestigation",
+                entity_id=str(investigation.id),
+                message=f"Worker {worker_code} began transit investigation {investigation.reference}.",
+            )
+
+        return Response(
+            {"message": "Transit investigation started.", "transit_investigation": self.get_serializer(investigation).data}
+        )
+
+    @action(detail=True, methods=["post"], url_path="complete")
+    def complete(self, request, pk=None):
+        finding = str(request.data.get("finding", "")).strip()
+        finding_note = str(request.data.get("finding_note", "")).strip()
+        worker_code = str(request.data.get("worker_code", "")).strip() or "DEMO"
+        client_operation_id = str(request.data.get("client_operation_id", "")).strip()
+
+        if not client_operation_id:
+            return Response({"detail": "client_operation_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+        existing = (
+            TransferDiscrepancyTransitInvestigation.objects.select_related("reconciliation")
+            .filter(pk=pk, completion_operation_id=client_operation_id)
+            .first()
+        )
+        if existing is not None and existing.status == TransferDiscrepancyTransitInvestigation.Status.COMPLETED:
+            return Response(
+                {
+                    "message": "Transit investigation completion already recorded.",
+                    "transit_investigation": self.get_serializer(existing).data,
+                }
+            )
+        valid_findings = {choice.value for choice in TransferDiscrepancyTransitInvestigation.Finding}
+        if finding not in valid_findings:
+            return Response({"detail": "Invalid transit investigation finding."}, status=status.HTTP_400_BAD_REQUEST)
+        if not finding_note:
+            return Response({"detail": "finding_note is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            investigation = (
+                TransferDiscrepancyTransitInvestigation.objects.select_for_update()
+                .select_related(
+                    "reconciliation",
+                    "reconciliation__source_review",
+                    "reconciliation__discrepancy",
+                    "reconciliation__discrepancy__pallet",
+                    "reconciliation__discrepancy__transfer",
+                    "reconciliation__discrepancy__transfer__source_branch",
+                    "reconciliation__discrepancy__transfer__destination_branch",
+                )
+                .get(pk=pk)
+            )
+            reconciliation = TransferDiscrepancyReconciliation.objects.select_for_update().get(pk=investigation.reconciliation_id)
+            investigation.reconciliation = reconciliation
+            if (
+                investigation.completion_operation_id == client_operation_id
+                and investigation.status == TransferDiscrepancyTransitInvestigation.Status.COMPLETED
+            ):
+                return Response(
+                    {
+                        "message": "Transit investigation completion already recorded.",
+                        "transit_investigation": self.get_serializer(investigation).data,
+                    }
+                )
+            if investigation.status == TransferDiscrepancyTransitInvestigation.Status.COMPLETED:
+                return Response(
+                    {"detail": "This transit investigation has already been completed."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if investigation.status != TransferDiscrepancyTransitInvestigation.Status.INVESTIGATING:
+                return Response(
+                    {"detail": "Transit investigation can be completed only while investigating."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            validation = self._validate_transit_workflow(investigation)
+            if validation is not None:
+                return validation
+            if reconciliation.status != TransferDiscrepancyReconciliation.Status.IN_PROGRESS:
+                return Response(
+                    {"detail": "Transit investigation completion requires an in-progress reconciliation."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            now = timezone.now()
+            investigation.finding = finding
+            investigation.finding_note = finding_note
+            investigation.status = TransferDiscrepancyTransitInvestigation.Status.COMPLETED
+            investigation.completed_at = now
+            investigation.completed_by_worker_code = worker_code
+            investigation.completion_operation_id = client_operation_id
+            investigation.save(
+                update_fields=[
+                    "finding",
+                    "finding_note",
+                    "status",
+                    "completed_at",
+                    "completed_by_worker_code",
+                    "completion_operation_id",
+                    "updated_at",
+                ]
+            )
+            reconciliation.status = TransferDiscrepancyReconciliation.Status.MANUAL_ACTION_REQUIRED
+            reconciliation.save(update_fields=["status", "updated_at"])
+            AuditLog.objects.create(
+                action_type=AuditLog.ActionType.STATUS_CHANGE,
+                entity_name="TransferDiscrepancyTransitInvestigation",
+                entity_id=str(investigation.id),
+                message=(
+                    f"Worker {worker_code} completed transit investigation {investigation.reference} "
+                    f"with finding: {investigation.get_finding_display()}."
+                ),
+            )
+            AuditLog.objects.create(
+                action_type=AuditLog.ActionType.STATUS_CHANGE,
+                entity_name="TransferDiscrepancyReconciliation",
+                entity_id=str(reconciliation.id),
+                message=(
+                    f"Reconciliation {reconciliation.reference} now requires manual action after transit investigation "
+                    f"{investigation.reference} was completed."
+                ),
+            )
+            investigation.refresh_from_db()
+
+        return Response(
+            {
+                "message": "Transit investigation completed.",
+                "transit_investigation": self.get_serializer(investigation).data,
+            }
+        )
 
 
 class TransferDiscrepancySourceStockVerificationViewSet(ReadOnlyModelViewSet):

@@ -295,6 +295,7 @@ export type ScannerContentsResponse = {
   source_review?: TransferDiscrepancySourceReviewSummary | null;
   reconciliation?: TransferDiscrepancyReconciliationSummary | null;
   source_stock_verification?: TransferDiscrepancySourceStockVerificationSummary | null;
+  transit_investigation?: TransferDiscrepancyTransitInvestigationSummary | null;
   items: ScannerContentsItem[];
 };
 
@@ -477,10 +478,12 @@ export type TransferDiscrepancyReconciliationSummary = {
   route: string;
   route_label: string;
   status: string;
+  status_label?: string;
   next_action_label: string;
   manual_decision_required?: boolean;
   manual_decision?: TransferDiscrepancyManualDecision | null;
   source_stock_verification?: TransferDiscrepancySourceStockVerificationSummary | null;
+  transit_investigation?: TransferDiscrepancyTransitInvestigationSummary | null;
 };
 
 export type TransferDiscrepancyPrintResponse = {
@@ -646,6 +649,7 @@ export type TransferDiscrepancyReconciliation = {
   completed_at: string | null;
   completed_by_worker_code: string;
   source_stock_verification: TransferDiscrepancySourceStockVerificationSummary | null;
+  transit_investigation: TransferDiscrepancyTransitInvestigationSummary | null;
   discrepancy: number;
   discrepancy_reference: string;
   discrepancy_status: string;
@@ -686,7 +690,77 @@ export type TransferDiscrepancyReconciliationResponse = {
   reconciliation: TransferDiscrepancyReconciliation;
   source_stock_verification_id?: number | null;
   source_stock_verification_created?: boolean;
+  transit_investigation_id?: number | null;
+  transit_investigation_created?: boolean;
   manual_decision?: TransferDiscrepancyManualDecision;
+};
+
+export type TransferDiscrepancyTransitInvestigationSummary = {
+  id: number;
+  reference: string;
+  status: string;
+  status_label: string;
+  finding: string;
+  finding_label: string;
+  finding_note?: string;
+  started_at: string | null;
+  started_by_worker_code: string;
+  completed_at: string | null;
+  completed_by_worker_code: string;
+};
+
+export type TransitRouteEvidence = {
+  label: string;
+  reference: string;
+  timestamp: string | null;
+};
+
+export type TransferDiscrepancyTransitInvestigation = TransferDiscrepancyTransitInvestigationSummary & {
+  next_action_label: string;
+  created_at: string;
+  updated_at: string;
+  completion_operation_id: string | null;
+  reconciliation: number;
+  reconciliation_reference: string;
+  reconciliation_status: string;
+  reconciliation_status_label: string;
+  reconciliation_route: string;
+  reconciliation_route_label: string;
+  reconciliation_manual_decision: TransferDiscrepancyManualDecision | null;
+  source_review_reference: string;
+  source_review_finding: string;
+  source_review_finding_display: string;
+  source_review_finding_note: string;
+  discrepancy_reference: string;
+  discrepancy_status: string;
+  transfer_reference: string;
+  transfer_status: string;
+  source_branch_code: string;
+  source_branch_name: string;
+  destination_branch_code: string;
+  destination_branch_name: string;
+  pallet_code: string;
+  pallet_status: string;
+  transfer_summary: Record<string, string | null>;
+  source_dispatch_evidence: TransferDiscrepancySourceReviewEvidence[];
+  transit_route_evidence: TransitRouteEvidence[];
+  destination_receiving_evidence: TransferDiscrepancySourceReviewEvidence[];
+  destination_investigation_outcome: {
+    discrepancy_reference: string;
+    discrepancy_status: string;
+    posted_to_unconfirmed: string;
+    destination_recovered: string;
+    confirmed_shortage: string;
+    destination_remaining: string;
+    recoveries: TransferDiscrepancyRecovery[];
+    shortage_confirmations: TransferDiscrepancyShortageConfirmation[];
+  };
+  final_accounting_lines: TransferDiscrepancyReconciliationLine[];
+};
+
+export type TransferDiscrepancyTransitInvestigationResponse = {
+  message: string;
+  transit_investigation: TransferDiscrepancyTransitInvestigation;
 };
 
 export type TransferDiscrepancySourceStockVerificationSummary = {
@@ -745,6 +819,7 @@ export type TransferDiscrepancySourceStockVerification = {
   reconciliation: number;
   reconciliation_reference: string;
   reconciliation_status: string;
+  reconciliation_status_label: string;
   reconciliation_route: string;
   reconciliation_route_label: string;
   reconciliation_manual_decision: TransferDiscrepancyManualDecision | null;

@@ -185,7 +185,7 @@ export function DiscrepancyDetailPage() {
               {data.reconciliation && (
                 <article className="summary-card">
                   <span>Reconciliation</span>
-                  <strong>{data.reconciliation.status}</strong>
+                  <strong>{data.reconciliation.status_label ?? data.reconciliation.status}</strong>
                   <small>
                     {data.reconciliation.reference} / {data.reconciliation.route_label}
                     {data.reconciliation.manual_decision ? ` / ${data.reconciliation.manual_decision.outcome_label}` : ""}
@@ -206,6 +206,13 @@ export function DiscrepancyDetailPage() {
                     {formatQuantity(String(data.reconciliation.source_stock_verification.total_remaining_quantity))} / Source unresolved{" "}
                     {formatQuantity(String(data.reconciliation.source_stock_verification.total_unresolved_quantity))}
                   </small>
+                </article>
+              )}
+              {data.reconciliation?.transit_investigation && (
+                <article className="summary-card">
+                  <span>Transit investigation</span>
+                  <strong>{data.reconciliation.transit_investigation.status_label}</strong>
+                  <small>{data.reconciliation.transit_investigation.finding_label || data.reconciliation.transit_investigation.reference}</small>
                 </article>
               )}
               {data.resolved_at && (
@@ -240,6 +247,11 @@ export function DiscrepancyDetailPage() {
               {data.reconciliation?.source_stock_verification && (
                 <Link to={`/wms/source-stock-verifications/${data.reconciliation.source_stock_verification.id}`}>
                   View source stock verification
+                </Link>
+              )}
+              {data.reconciliation?.transit_investigation && (
+                <Link to={`/wms/transit-investigations/${data.reconciliation.transit_investigation.id}`}>
+                  View transit investigation
                 </Link>
               )}
             </div>

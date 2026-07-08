@@ -197,7 +197,7 @@ export function SourceDiscrepancyReviewDetailPage() {
                   <strong>{data.reconciliation.reference}</strong>
                 </p>
                 <p>Route: {data.reconciliation.route_label}</p>
-                <p>Status: {data.reconciliation.status}</p>
+                <p>Status: {data.reconciliation.status_label ?? data.reconciliation.status}</p>
                 {data.reconciliation.manual_decision && <p>Final outcome: {data.reconciliation.manual_decision.outcome_label}</p>}
                 <p>{data.reconciliation.next_action_label}</p>
                 <Link to={`/wms/discrepancy-reconciliations/${data.reconciliation.id}`}>View reconciliation</Link>
@@ -225,6 +225,22 @@ export function SourceDiscrepancyReviewDetailPage() {
                 </p>
                 <Link to={`/wms/source-stock-verifications/${data.reconciliation.source_stock_verification.id}`}>
                   View source stock verification
+                </Link>
+              </section>
+            )}
+
+            {data.reconciliation?.transit_investigation && (
+              <section className="panel">
+                <h2>Transit investigation</h2>
+                <p>
+                  <strong>{data.reconciliation.transit_investigation.reference}</strong>
+                </p>
+                <p>Status: {data.reconciliation.transit_investigation.status_label}</p>
+                {data.reconciliation.transit_investigation.finding_label && (
+                  <p>Finding: {data.reconciliation.transit_investigation.finding_label}</p>
+                )}
+                <Link to={`/wms/transit-investigations/${data.reconciliation.transit_investigation.id}`}>
+                  View transit investigation
                 </Link>
               </section>
             )}

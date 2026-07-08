@@ -13,6 +13,7 @@ from operations.viewsets import (
     TransferDiscrepancyReconciliationViewSet,
     TransferDiscrepancySourceStockVerificationViewSet,
     TransferDiscrepancySourceReviewViewSet,
+    TransferDiscrepancyTransitInvestigationViewSet,
     TransferDiscrepancyViewSet,
 )
 from warehouse.viewsets import BranchViewSet, InventoryItemViewSet, LocationViewSet, ProductViewSet
@@ -47,4 +48,9 @@ router.register(
     "transfer-discrepancy-source-stock-verifications",
     TransferDiscrepancySourceStockVerificationViewSet,
     basename="transfer-discrepancy-source-stock-verification",
+)
+router.register(
+    "transfer-discrepancy-transit-investigations",
+    TransferDiscrepancyTransitInvestigationViewSet,
+    basename="transfer-discrepancy-transit-investigation",
 )

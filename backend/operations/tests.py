@@ -34,6 +34,7 @@ from operations.models import (
     TransferDiscrepancySourceStockRecovery,
     TransferDiscrepancySourceStockVerification,
     TransferDiscrepancySourceStockVerificationItem,
+    TransferDiscrepancyTransitInvestigation,
     TransferPallet,
     TransferPalletItem,
 )
@@ -870,6 +871,35 @@ class ScannerReceivingWorkflowTests(APITestCase):
             received_quantity=Decimal("0"),
         )
 
+    def create_transfer_pallet_fixture(self, suffix=None):
+        suffix = suffix or f"{TransferPallet.objects.count() + 1:03d}"
+        transfer = InterBranchTransfer.objects.create(
+            reference=f"IBT-TEST-{suffix}",
+            source_branch=self.source_branch,
+            destination_branch=self.destination_branch,
+            status=InterBranchTransfer.Status.IN_TRANSIT,
+            released_at=timezone.now(),
+        )
+        pallet = TransferPallet.objects.create(
+            transfer=transfer,
+            scan_code=f"PAL-TEST-{suffix}",
+            status=TransferPallet.Status.IN_TRANSIT,
+            released_at=timezone.now(),
+        )
+        TransferPalletItem.objects.create(
+            pallet=pallet,
+            product=self.product,
+            expected_quantity=Decimal("3"),
+            received_quantity=Decimal("0"),
+        )
+        TransferPalletItem.objects.create(
+            pallet=pallet,
+            product=self.second_product,
+            expected_quantity=Decimal("2"),
+            received_quantity=Decimal("0"),
+        )
+        return pallet
+
     def start_receiving(self, pallet_code="PAL-TEST-001"):
         return self.client.post(
             "/api/scanner/receiving/start/",
@@ -1026,21 +1056,75 @@ class ScannerReceivingWorkflowTests(APITestCase):
     def create_acknowledged_manual_reconciliation(self):
         discrepancy = self.create_shortage_discrepancy()
         self.print_report(discrepancy)
-        self.confirm_shortage(discrepancy)
+        self.confirm_shortage(discrepancy, operation_id=f"manual-shortage-{discrepancy.id}")
         review = TransferDiscrepancySourceReview.objects.get(discrepancy=discrepancy)
         self.begin_source_review(review)
         self.complete_source_review(
             review,
             finding=TransferDiscrepancySourceReview.Finding.INCONCLUSIVE,
-            operation_id="manual-route-review",
+            operation_id=f"manual-route-review-{discrepancy.id}",
         )
         reconciliation = TransferDiscrepancyReconciliation.objects.get(discrepancy=discrepancy)
         self.acknowledge_reconciliation(reconciliation)
         reconciliation.refresh_from_db()
         return reconciliation
 
+    def create_acknowledged_transit_reconciliation(self):
+        discrepancy = self.create_shortage_discrepancy()
+        self.print_report(discrepancy)
+        self.confirm_shortage(discrepancy, operation_id=f"transit-shortage-{discrepancy.id}")
+        review = TransferDiscrepancySourceReview.objects.get(discrepancy=discrepancy)
+        self.begin_source_review(review)
+        self.complete_source_review(
+            review,
+            finding=TransferDiscrepancySourceReview.Finding.DISPATCH_EVIDENCE_MATCHES,
+            operation_id=f"transit-review-complete-{discrepancy.id}",
+        )
+        reconciliation = TransferDiscrepancyReconciliation.objects.get(discrepancy=discrepancy)
+        self.acknowledge_reconciliation(reconciliation)
+        reconciliation.refresh_from_db()
+        return reconciliation
+
+    def begin_transit_investigation(self, investigation, worker_code="WORKER-1"):
+        return self.client.post(
+            f"/api/transfer-discrepancy-transit-investigations/{investigation.id}/begin/",
+            {"worker_code": worker_code},
+            format="json",
+        )
+
+    def complete_transit_investigation(
+        self,
+        investigation,
+        finding=TransferDiscrepancyTransitInvestigation.Finding.TRANSIT_IRREGULARITY_FOUND,
+        note="The route history contains an unexplained interruption before destination arrival.",
+        operation_id="transit-complete-1",
+    ):
+        return self.client.post(
+            f"/api/transfer-discrepancy-transit-investigations/{investigation.id}/complete/",
+            {
+                "finding": finding,
+                "finding_note": note,
+                "worker_code": "WORKER-1",
+                "client_operation_id": operation_id,
+            },
+            format="json",
+        )
+
+    def create_completed_transit_investigation(self):
+        reconciliation = self.create_acknowledged_transit_reconciliation()
+        investigation = TransferDiscrepancyTransitInvestigation.objects.get(reconciliation=reconciliation)
+        self.begin_transit_investigation(investigation)
+        self.complete_transit_investigation(investigation, operation_id=f"transit-complete-{investigation.id}")
+        reconciliation.refresh_from_db()
+        investigation.refresh_from_db()
+        return reconciliation, investigation
+
     def create_shortage_discrepancy(self):
-        session_id = self.start_receiving().data["receiving_session"]["id"]
+        self.pallet.refresh_from_db()
+        if self.pallet.status != TransferPallet.Status.IN_TRANSIT:
+            self.pallet = self.create_transfer_pallet_fixture()
+            self.transfer = self.pallet.transfer
+        session_id = self.start_receiving(self.pallet.scan_code).data["receiving_session"]["id"]
         self.scan_product(session_id, self.product.sku, "2")
         self.put_away(session_id)
         self.scan_product(session_id, self.second_product.sku, "2")
@@ -2225,7 +2309,7 @@ class ScannerReceivingWorkflowTests(APITestCase):
         self.assertEqual(empty_note.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertFalse(TransferDiscrepancyManualReconciliationDecision.objects.exists())
 
-    def test_manual_decision_rejects_transit_route(self):
+    def test_manual_decision_rejects_transit_route_before_completed_investigation(self):
         discrepancy = self.create_shortage_discrepancy()
         self.print_report(discrepancy)
         self.confirm_shortage(discrepancy)
@@ -2239,10 +2323,29 @@ class ScannerReceivingWorkflowTests(APITestCase):
         reconciliation = TransferDiscrepancyReconciliation.objects.get(discrepancy=discrepancy)
         self.acknowledge_reconciliation(reconciliation)
 
-        response = self.complete_manual_reconciliation(reconciliation)
+        response = self.complete_manual_reconciliation(
+            reconciliation,
+            outcome=TransferDiscrepancyManualReconciliationDecision.Outcome.TRANSIT_LOSS_CONFIRMED,
+        )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(response.data["detail"], "This reconciliation requires transit investigation.")
+        self.assertEqual(response.data["detail"], "Transit reconciliation must require manual action.")
+        self.assertFalse(TransferDiscrepancyManualReconciliationDecision.objects.exists())
+
+    def test_source_route_rejects_transit_loss_outcome(self):
+        verification = self.create_source_stock_verification()
+        self.begin_source_stock_verification(verification)
+        self.complete_source_search(verification)
+        reconciliation = verification.reconciliation
+
+        response = self.complete_manual_reconciliation(
+            reconciliation,
+            outcome=TransferDiscrepancyManualReconciliationDecision.Outcome.TRANSIT_LOSS_CONFIRMED,
+            operation_id="bad-source-transit-outcome",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["detail"], "This outcome is not allowed for source stock verification.")
         self.assertFalse(TransferDiscrepancyManualReconciliationDecision.objects.exists())
 
     def test_manual_decision_retry_does_not_overwrite_or_duplicate_audit(self):
@@ -2275,6 +2378,285 @@ class ScannerReceivingWorkflowTests(APITestCase):
         self.assertFalse(
             TransferDiscrepancyManualReconciliationDecision.objects.filter(reconciliation=verification.reconciliation).exists()
         )
+
+    def test_transit_investigation_created_once_on_transit_acknowledgement(self):
+        discrepancy = self.create_shortage_discrepancy()
+        self.print_report(discrepancy)
+        self.confirm_shortage(discrepancy)
+        review = TransferDiscrepancySourceReview.objects.get(discrepancy=discrepancy)
+        self.begin_source_review(review)
+        self.complete_source_review(
+            review,
+            finding=TransferDiscrepancySourceReview.Finding.DISPATCH_EVIDENCE_MATCHES,
+            operation_id="transit-create-review",
+        )
+        reconciliation = TransferDiscrepancyReconciliation.objects.get(discrepancy=discrepancy)
+        self.assertFalse(TransferDiscrepancyTransitInvestigation.objects.filter(reconciliation=reconciliation).exists())
+
+        first = self.acknowledge_reconciliation(reconciliation)
+        second = self.acknowledge_reconciliation(reconciliation)
+
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(TransferDiscrepancyTransitInvestigation.objects.filter(reconciliation=reconciliation).count(), 1)
+        investigation = TransferDiscrepancyTransitInvestigation.objects.get(reconciliation=reconciliation)
+        self.assertEqual(investigation.status, TransferDiscrepancyTransitInvestigation.Status.PENDING_INVESTIGATION)
+        self.assertEqual(investigation.finding, "")
+        self.assertEqual(
+            AuditLog.objects.filter(
+                entity_name="TransferDiscrepancyTransitInvestigation",
+                message__icontains="was created",
+            ).count(),
+            1,
+        )
+
+    def test_source_and_manual_routes_do_not_create_transit_investigation(self):
+        source_verification = self.create_source_stock_verification()
+        self.assertFalse(
+            TransferDiscrepancyTransitInvestigation.objects.filter(reconciliation=source_verification.reconciliation).exists()
+        )
+
+    def test_begin_transit_investigation_is_idempotent_and_inventory_neutral(self):
+        reconciliation = self.create_acknowledged_transit_reconciliation()
+        investigation = TransferDiscrepancyTransitInvestigation.objects.get(reconciliation=reconciliation)
+        movement_count = StockMovement.objects.count()
+
+        first = self.begin_transit_investigation(investigation)
+        second = self.begin_transit_investigation(investigation)
+
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        investigation.refresh_from_db()
+        self.assertEqual(investigation.status, TransferDiscrepancyTransitInvestigation.Status.INVESTIGATING)
+        self.assertEqual(investigation.started_by_worker_code, "WORKER-1")
+        self.assertEqual(StockMovement.objects.count(), movement_count)
+        self.assertEqual(AuditLog.objects.filter(message__icontains="began transit investigation").count(), 1)
+
+    def test_complete_transit_investigation_requires_manual_action_without_inventory_mutation(self):
+        reconciliation = self.create_acknowledged_transit_reconciliation()
+        investigation = TransferDiscrepancyTransitInvestigation.objects.get(reconciliation=reconciliation)
+        self.begin_transit_investigation(investigation)
+        source_before = InventoryItem.objects.filter(
+            branch=self.source_branch,
+            location=self.wrong_branch_location,
+            product=self.product,
+        ).first()
+        source_quantity_before = source_before.quantity_on_hand if source_before else Decimal("0")
+        destination_before = InventoryItem.objects.get(
+            branch=self.destination_branch,
+            location=self.destination_location,
+            product=self.product,
+        ).quantity_on_hand
+        unconfirmed_before = InventoryItem.objects.get(location=self.unconfirmed_location, product=self.product).quantity_on_hand
+        movement_count = StockMovement.objects.count()
+
+        response = self.complete_transit_investigation(investigation)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        investigation.refresh_from_db()
+        reconciliation.refresh_from_db()
+        self.assertEqual(investigation.status, TransferDiscrepancyTransitInvestigation.Status.COMPLETED)
+        self.assertEqual(investigation.finding, TransferDiscrepancyTransitInvestigation.Finding.TRANSIT_IRREGULARITY_FOUND)
+        self.assertEqual(reconciliation.route, TransferDiscrepancyReconciliation.Route.TRANSIT_INVESTIGATION)
+        self.assertEqual(reconciliation.status, TransferDiscrepancyReconciliation.Status.MANUAL_ACTION_REQUIRED)
+        source_after = InventoryItem.objects.filter(
+            branch=self.source_branch,
+            location=self.wrong_branch_location,
+            product=self.product,
+        ).first()
+        self.assertEqual(source_after.quantity_on_hand if source_after else Decimal("0"), source_quantity_before)
+        self.assertEqual(
+            InventoryItem.objects.get(branch=self.destination_branch, location=self.destination_location, product=self.product).quantity_on_hand,
+            destination_before,
+        )
+        self.assertEqual(InventoryItem.objects.get(location=self.unconfirmed_location, product=self.product).quantity_on_hand, unconfirmed_before)
+        self.assertEqual(StockMovement.objects.count(), movement_count)
+        self.assertEqual(AuditLog.objects.filter(message__icontains="completed transit investigation").count(), 1)
+        self.assertEqual(AuditLog.objects.filter(message__icontains="now requires manual action after transit investigation").count(), 1)
+
+    def test_complete_transit_investigation_supports_all_findings_and_idempotency(self):
+        reconciliation = self.create_acknowledged_transit_reconciliation()
+        investigation = TransferDiscrepancyTransitInvestigation.objects.get(reconciliation=reconciliation)
+        self.begin_transit_investigation(investigation)
+
+        first = self.complete_transit_investigation(
+            investigation,
+            finding=TransferDiscrepancyTransitInvestigation.Finding.NO_TRANSIT_IRREGULARITY_IDENTIFIED,
+            note="No irregularity was identified in available transfer evidence.",
+            operation_id="same-transit",
+        )
+        second = self.complete_transit_investigation(
+            investigation,
+            finding=TransferDiscrepancyTransitInvestigation.Finding.INCONCLUSIVE,
+            note="Changed note.",
+            operation_id="same-transit",
+        )
+        third = self.complete_transit_investigation(investigation, operation_id="different-transit")
+
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(third.status_code, status.HTTP_400_BAD_REQUEST)
+        investigation.refresh_from_db()
+        self.assertEqual(investigation.finding, TransferDiscrepancyTransitInvestigation.Finding.NO_TRANSIT_IRREGULARITY_IDENTIFIED)
+        self.assertEqual(investigation.finding_note, "No irregularity was identified in available transfer evidence.")
+        self.assertEqual(AuditLog.objects.filter(message__icontains="completed transit investigation").count(), 1)
+
+    def test_complete_transit_investigation_validates_state_finding_and_note(self):
+        reconciliation = self.create_acknowledged_transit_reconciliation()
+        investigation = TransferDiscrepancyTransitInvestigation.objects.get(reconciliation=reconciliation)
+
+        pending = self.complete_transit_investigation(investigation, operation_id="bad-pending")
+        invalid_finding = self.complete_transit_investigation(investigation, finding="transit_loss_confirmed", operation_id="bad-finding")
+        empty_note = self.complete_transit_investigation(investigation, note="", operation_id="bad-note")
+
+        self.assertEqual(pending.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(invalid_finding.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(empty_note.status_code, status.HTTP_400_BAD_REQUEST)
+        investigation.refresh_from_db()
+        reconciliation.refresh_from_db()
+        self.assertEqual(investigation.status, TransferDiscrepancyTransitInvestigation.Status.PENDING_INVESTIGATION)
+        self.assertEqual(reconciliation.status, TransferDiscrepancyReconciliation.Status.IN_PROGRESS)
+
+    def test_completed_transit_investigation_allows_final_manual_transit_decision(self):
+        reconciliation, investigation = self.create_completed_transit_investigation()
+        source_before = InventoryItem.objects.filter(
+            branch=self.source_branch,
+            location=self.wrong_branch_location,
+            product=self.product,
+        ).first()
+        source_quantity_before = source_before.quantity_on_hand if source_before else Decimal("0")
+        destination_before = InventoryItem.objects.get(
+            branch=self.destination_branch,
+            location=self.destination_location,
+            product=self.product,
+        ).quantity_on_hand
+        unconfirmed_before = InventoryItem.objects.get(location=self.unconfirmed_location, product=self.product).quantity_on_hand
+        movement_count = StockMovement.objects.count()
+
+        response = self.complete_manual_reconciliation(
+            reconciliation,
+            outcome=TransferDiscrepancyManualReconciliationDecision.Outcome.TRANSIT_LOSS_CONFIRMED,
+            note="Transit investigation identified an irregularity and the missing quantity was not recovered.",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        reconciliation.refresh_from_db()
+        investigation.refresh_from_db()
+        decision = TransferDiscrepancyManualReconciliationDecision.objects.get(reconciliation=reconciliation)
+        self.assertEqual(decision.outcome, TransferDiscrepancyManualReconciliationDecision.Outcome.TRANSIT_LOSS_CONFIRMED)
+        self.assertEqual(decision.get_outcome_display(), "Transit loss confirmed")
+        self.assertEqual(reconciliation.status, TransferDiscrepancyReconciliation.Status.COMPLETED)
+        self.assertEqual(reconciliation.route, TransferDiscrepancyReconciliation.Route.TRANSIT_INVESTIGATION)
+        self.assertEqual(investigation.status, TransferDiscrepancyTransitInvestigation.Status.COMPLETED)
+        self.assertEqual(investigation.finding, TransferDiscrepancyTransitInvestigation.Finding.TRANSIT_IRREGULARITY_FOUND)
+        source_after = InventoryItem.objects.filter(
+            branch=self.source_branch,
+            location=self.wrong_branch_location,
+            product=self.product,
+        ).first()
+        self.assertEqual(source_after.quantity_on_hand if source_after else Decimal("0"), source_quantity_before)
+        self.assertEqual(
+            InventoryItem.objects.get(branch=self.destination_branch, location=self.destination_location, product=self.product).quantity_on_hand,
+            destination_before,
+        )
+        self.assertEqual(InventoryItem.objects.get(location=self.unconfirmed_location, product=self.product).quantity_on_hand, unconfirmed_before)
+        self.assertEqual(StockMovement.objects.count(), movement_count)
+        self.assertEqual(AuditLog.objects.filter(message__icontains="with final outcome: Transit loss confirmed").count(), 1)
+        self.assertEqual(response.data["reconciliation"]["manual_decision_required"], False)
+        self.assertEqual(response.data["reconciliation"]["manual_decision"]["outcome_label"], "Transit loss confirmed")
+        self.assertEqual(response.data["reconciliation"]["status_label"], "Completed")
+
+    def test_transit_final_decision_validates_investigation_state_and_outcome(self):
+        in_progress_reconciliation = self.create_acknowledged_transit_reconciliation()
+        investigation = TransferDiscrepancyTransitInvestigation.objects.get(reconciliation=in_progress_reconciliation)
+        self.begin_transit_investigation(investigation)
+
+        in_progress_response = self.complete_manual_reconciliation(
+            in_progress_reconciliation,
+            outcome=TransferDiscrepancyManualReconciliationDecision.Outcome.TRANSIT_LOSS_CONFIRMED,
+            operation_id="bad-transit-in-progress",
+        )
+        self.assertEqual(in_progress_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(in_progress_response.data["detail"], "Transit reconciliation must require manual action.")
+
+        reconciliation, completed_investigation = self.create_completed_transit_investigation()
+        invalid_outcome = self.complete_manual_reconciliation(
+            reconciliation,
+            outcome=TransferDiscrepancyManualReconciliationDecision.Outcome.SOURCE_LOSS_CONFIRMED,
+            operation_id="bad-transit-source-outcome",
+        )
+        self.assertEqual(invalid_outcome.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(invalid_outcome.data["detail"], "This outcome is not allowed for transit investigation.")
+
+        completed_investigation.finding_note = ""
+        completed_investigation.save(update_fields=["finding_note", "updated_at"])
+        missing_note = self.complete_manual_reconciliation(
+            reconciliation,
+            outcome=TransferDiscrepancyManualReconciliationDecision.Outcome.TRANSIT_LOSS_CONFIRMED,
+            operation_id="bad-transit-missing-note",
+        )
+        self.assertEqual(missing_note.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(missing_note.data["detail"], "Transit investigation finding and note are required before manual completion.")
+        self.assertFalse(TransferDiscrepancyManualReconciliationDecision.objects.exists())
+
+    def test_transit_final_decision_supports_allowed_outcomes_without_inventory_mutation(self):
+        for index, outcome in enumerate(
+            [
+                TransferDiscrepancyManualReconciliationDecision.Outcome.TRANSIT_LOSS_CONFIRMED,
+                TransferDiscrepancyManualReconciliationDecision.Outcome.UNRESOLVED_LOSS_CLOSED,
+                TransferDiscrepancyManualReconciliationDecision.Outcome.ADMINISTRATIVE_ERROR,
+            ],
+            start=1,
+        ):
+            reconciliation, _investigation = self.create_completed_transit_investigation()
+            unconfirmed_before = InventoryItem.objects.get(location=self.unconfirmed_location, product=self.product).quantity_on_hand
+            movement_count = StockMovement.objects.count()
+
+            response = self.complete_manual_reconciliation(
+                reconciliation,
+                outcome=outcome,
+                note=f"Final transit decision note {index}.",
+                operation_id=f"allowed-transit-outcome-{index}",
+            )
+
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            self.assertEqual(
+                TransferDiscrepancyManualReconciliationDecision.objects.get(reconciliation=reconciliation).outcome,
+                outcome,
+            )
+            self.assertEqual(InventoryItem.objects.get(location=self.unconfirmed_location, product=self.product).quantity_on_hand, unconfirmed_before)
+            self.assertEqual(StockMovement.objects.count(), movement_count)
+
+    def test_transit_final_decision_idempotency_does_not_overwrite_or_duplicate_audit(self):
+        reconciliation, _investigation = self.create_completed_transit_investigation()
+
+        first = self.complete_manual_reconciliation(
+            reconciliation,
+            outcome=TransferDiscrepancyManualReconciliationDecision.Outcome.TRANSIT_LOSS_CONFIRMED,
+            note="Original transit final decision.",
+            operation_id="same-transit-final",
+        )
+        second = self.complete_manual_reconciliation(
+            reconciliation,
+            outcome=TransferDiscrepancyManualReconciliationDecision.Outcome.ADMINISTRATIVE_ERROR,
+            note="Changed transit final decision.",
+            operation_id="same-transit-final",
+        )
+        third = self.complete_manual_reconciliation(
+            reconciliation,
+            outcome=TransferDiscrepancyManualReconciliationDecision.Outcome.UNRESOLVED_LOSS_CLOSED,
+            note="Different retry.",
+            operation_id="different-transit-final",
+        )
+
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(third.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(TransferDiscrepancyManualReconciliationDecision.objects.filter(reconciliation=reconciliation).count(), 1)
+        decision = TransferDiscrepancyManualReconciliationDecision.objects.get(reconciliation=reconciliation)
+        self.assertEqual(decision.outcome, TransferDiscrepancyManualReconciliationDecision.Outcome.TRANSIT_LOSS_CONFIRMED)
+        self.assertEqual(decision.decision_note, "Original transit final decision.")
+        self.assertEqual(AuditLog.objects.filter(message__icontains="with final outcome: Transit loss confirmed").count(), 1)
 
     def test_seed_demo_pallet_exists_and_seed_is_idempotent(self):
         output = StringIO()

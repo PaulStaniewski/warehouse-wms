@@ -30,6 +30,7 @@ from operations.models import (
     TransferDiscrepancySourceStockVerification,
     TransferDiscrepancySourceStockVerificationItem,
     TransferDiscrepancySourceReview,
+    TransferDiscrepancyTransitInvestigation,
     TransferPallet,
     TransferPalletItem,
 )
@@ -289,6 +290,19 @@ class TransferDiscrepancyManualReconciliationDecisionAdmin(admin.ModelAdmin):
     list_display = ["reconciliation", "outcome", "decided_by_worker_code", "decided_at"]
     list_filter = ["outcome", "decided_at"]
     search_fields = ["reconciliation__reference", "decision_note", "client_operation_id"]
+
+
+@admin.register(TransferDiscrepancyTransitInvestigation)
+class TransferDiscrepancyTransitInvestigationAdmin(admin.ModelAdmin):
+    list_display = ["reference", "reconciliation", "status", "finding", "started_at", "completed_at"]
+    list_filter = ["status", "finding", "reconciliation__discrepancy__transfer__source_branch"]
+    search_fields = [
+        "reference",
+        "reconciliation__reference",
+        "reconciliation__discrepancy__reference",
+        "reconciliation__discrepancy__pallet__scan_code",
+        "reconciliation__discrepancy__transfer__reference",
+    ]
 
 
 class TransferDiscrepancySourceStockVerificationItemInline(admin.TabularInline):

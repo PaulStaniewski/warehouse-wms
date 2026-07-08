@@ -98,11 +98,15 @@ export function DiscrepancyReconciliationDetailPage() {
   const selectedOutcomeLabel =
     manualOutcome === "source_loss_confirmed"
       ? "Source loss confirmed"
-      : manualOutcome === "unresolved_loss_closed"
-        ? "Unresolved loss - cause not determined"
-        : manualOutcome === "administrative_error"
-          ? "Administrative or process error"
-          : "";
+      : manualOutcome === "transit_loss_confirmed"
+        ? "Transit loss confirmed"
+        : manualOutcome === "unresolved_loss_closed"
+          ? "Unresolved loss - cause not determined"
+          : manualOutcome === "administrative_error"
+            ? "Administrative or process error"
+            : "";
+  const isTransitManualDecision = data?.route === "transit_investigation";
+  const isSourceManualDecision = data?.route === "source_stock_verification";
 
   return (
     <>
@@ -205,13 +209,22 @@ export function DiscrepancyReconciliationDetailPage() {
 
             {data.manual_decision_required && (
               <section className="panel">
-                <h2>Final manual reconciliation</h2>
+                <h2>{isTransitManualDecision ? "Final transit reconciliation" : "Final manual reconciliation"}</h2>
                 <p>Review the complete evidence chain and record one final outcome.</p>
+                {isTransitManualDecision && data.transit_investigation && (
+                  <div className="scanner-warning-panel">
+                    <strong>Final transit reconciliation</strong>
+                    <span>Route: {data.route_label}</span>
+                    <span>Transit investigation: {data.transit_investigation.status_label}</span>
+                    <span>Finding: {data.transit_investigation.finding_label}</span>
+                  </div>
+                )}
                 <label>
                   <span>Final reconciliation outcome</span>
                   <select onChange={(event) => setManualOutcome(event.target.value)} value={manualOutcome}>
                     <option value="">Select final outcome</option>
-                    <option value="source_loss_confirmed">Source loss confirmed</option>
+                    {isSourceManualDecision && <option value="source_loss_confirmed">Source loss confirmed</option>}
+                    {isTransitManualDecision && <option value="transit_loss_confirmed">Transit loss confirmed</option>}
                     <option value="unresolved_loss_closed">Unresolved loss - cause not determined</option>
                     <option value="administrative_error">Administrative or process error</option>
                   </select>
@@ -230,8 +243,10 @@ export function DiscrepancyReconciliationDetailPage() {
                     <span>Outcome: {selectedOutcomeLabel}</span>
                     <span>Decision note: {decisionNote}</span>
                     <p>
-                      This will complete the reconciliation. No inventory will be changed automatically. The final decision
-                      cannot be edited in this stage.
+                      No inventory will be changed automatically.
+                    </p>
+                    <p>
+                      This will complete the reconciliation. The final decision cannot be edited in this stage.
                     </p>
                   </div>
                 )}
@@ -296,6 +311,18 @@ export function DiscrepancyReconciliationDetailPage() {
                 <Link to={`/wms/source-stock-verifications/${data.source_stock_verification.id}`}>
                   View source stock verification
                 </Link>
+              </section>
+            )}
+
+            {data.transit_investigation && (
+              <section className="panel">
+                <h2>Transit investigation</h2>
+                <p>
+                  <strong>{data.transit_investigation.reference}</strong>
+                </p>
+                <p>Status: {data.transit_investigation.status_label}</p>
+                {data.transit_investigation.finding_label && <p>Finding: {data.transit_investigation.finding_label}</p>}
+                <Link to={`/wms/transit-investigations/${data.transit_investigation.id}`}>View transit investigation</Link>
               </section>
             )}
 

@@ -220,7 +220,7 @@ export function SourceStockVerificationDetailPage() {
               <section className="panel">
                 <h2>Final reconciliation outcome</h2>
                 <p>
-                  Reconciliation {data.reconciliation_reference} is {data.reconciliation_status}.
+                  Reconciliation {data.reconciliation_reference} is {data.reconciliation_status_label}.
                 </p>
                 <p>
                   Final outcome: <strong>{data.reconciliation_manual_decision.outcome_label}</strong>
