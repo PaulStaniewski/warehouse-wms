@@ -2,6 +2,7 @@ import { Search } from "lucide-react";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 
+import { useActiveBranch } from "../api/ActiveBranchContext";
 import { useTransferDiscrepancyTransitInvestigations } from "../api/queries";
 import { DataState } from "../components/DataState";
 import { PageHeader } from "../components/PageHeader";
@@ -25,7 +26,8 @@ function formatDateTime(value: string | null) {
 export function TransitInvestigationsPage() {
   const [status, setStatus] = useState("");
   const [search, setSearch] = useState("");
-  const investigations = useTransferDiscrepancyTransitInvestigations(status, search);
+  const { activeBranchCode } = useActiveBranch();
+  const investigations = useTransferDiscrepancyTransitInvestigations(status, search, activeBranchCode);
   const rows = investigations.data?.results ?? [];
 
   return (

@@ -2,6 +2,7 @@ import { Search } from "lucide-react";
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
+import { useActiveBranch } from "../api/ActiveBranchContext";
 import { useTransferDiscrepancyActions } from "../api/queries";
 import { DataState } from "../components/DataState";
 import { PageHeader } from "../components/PageHeader";
@@ -34,9 +35,9 @@ function actionGroup(actionType: string) {
 
 export function DiscrepancyActionQueuePage() {
   const [actionType, setActionType] = useState("");
-  const [branch, setBranch] = useState("");
   const [search, setSearch] = useState("");
-  const actions = useTransferDiscrepancyActions(actionType, branch, search);
+  const { activeBranchCode } = useActiveBranch();
+  const actions = useTransferDiscrepancyActions(actionType, activeBranchCode, search);
   const rows = actions.data?.results ?? [];
   const counters = useMemo(
     () => ({
@@ -90,10 +91,6 @@ export function DiscrepancyActionQueuePage() {
             <option value="complete_transit_investigation">Complete transit investigation</option>
             <option value="record_final_reconciliation_outcome">Record final reconciliation outcome</option>
           </select>
-        </label>
-        <label>
-          <span>Branch</span>
-          <input onChange={(event) => setBranch(event.target.value)} placeholder="GDA or GDY" value={branch} />
         </label>
         <label>
           <span>Search</span>

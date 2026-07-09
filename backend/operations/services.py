@@ -141,7 +141,14 @@ def _action_base(discrepancy: TransferDiscrepancy) -> dict:
     }
 
 
-def _action_row(discrepancy: TransferDiscrepancy, action_type: str, target, target_type: str, target_url: str) -> dict:
+def _action_row(
+    discrepancy: TransferDiscrepancy,
+    action_type: str,
+    target,
+    target_type: str,
+    target_url: str,
+    visible_branches: list[str],
+) -> dict:
     return {
         **_action_base(discrepancy),
         "action_type": action_type,
@@ -154,6 +161,7 @@ def _action_row(discrepancy: TransferDiscrepancy, action_type: str, target, targ
         "current_status": target.status,
         "current_status_label": target.get_status_display(),
         "waiting_since": getattr(target, "updated_at", None) or getattr(target, "created_at", None),
+        "visible_branches": visible_branches,
     }
 
 
@@ -203,6 +211,7 @@ def build_transfer_discrepancy_action_queue() -> list[dict]:
                             reconciliation,
                             "reconciliation",
                             f"/wms/discrepancy-reconciliations/{reconciliation.id}",
+                            [discrepancy.transfer.source_branch.code, discrepancy.transfer.destination_branch.code],
                         )
                     )
                     continue
@@ -220,6 +229,7 @@ def build_transfer_discrepancy_action_queue() -> list[dict]:
                         transit_investigation,
                         "transit_investigation",
                         f"/wms/transit-investigations/{transit_investigation.id}",
+                        [discrepancy.transfer.source_branch.code, discrepancy.transfer.destination_branch.code],
                     )
                 )
                 continue
@@ -239,6 +249,7 @@ def build_transfer_discrepancy_action_queue() -> list[dict]:
                         source_stock_verification,
                         "source_stock_verification",
                         f"/wms/source-stock-verifications/{source_stock_verification.id}",
+                        [discrepancy.transfer.source_branch.code],
                     )
                 )
                 continue
@@ -250,6 +261,7 @@ def build_transfer_discrepancy_action_queue() -> list[dict]:
                         reconciliation,
                         "reconciliation",
                         f"/wms/discrepancy-reconciliations/{reconciliation.id}",
+                        [discrepancy.transfer.source_branch.code, discrepancy.transfer.destination_branch.code],
                     )
                 )
                 continue
@@ -268,6 +280,7 @@ def build_transfer_discrepancy_action_queue() -> list[dict]:
                     source_review,
                     "source_review",
                     f"/wms/source-discrepancy-reviews/{source_review.id}",
+                    [discrepancy.transfer.source_branch.code],
                 )
             )
             continue
@@ -280,6 +293,7 @@ def build_transfer_discrepancy_action_queue() -> list[dict]:
                     discrepancy,
                     "discrepancy",
                     f"/wms/discrepancies/{discrepancy.id}",
+                    [discrepancy.transfer.destination_branch.code],
                 )
             )
     return rows

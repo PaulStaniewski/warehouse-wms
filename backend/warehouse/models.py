@@ -1,4 +1,5 @@
 from django.db import models
+from django.core.exceptions import ValidationError
 
 
 class TimestampedModel(models.Model):
@@ -111,3 +112,12 @@ class InventoryItem(TimestampedModel):
 
     def __str__(self) -> str:
         return f"{self.product.sku} at {self.location.code}: {self.quantity_on_hand}"
+
+    def clean(self):
+        super().clean()
+        if self.branch_id and self.location_id and self.location.branch_id != self.branch_id:
+            raise ValidationError({"location": "Inventory location must belong to the inventory branch."})
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)

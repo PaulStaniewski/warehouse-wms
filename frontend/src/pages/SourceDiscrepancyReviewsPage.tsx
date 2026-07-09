@@ -2,6 +2,7 @@ import { Link } from "react-router-dom";
 import { Search } from "lucide-react";
 import { useState } from "react";
 
+import { useActiveBranch } from "../api/ActiveBranchContext";
 import { useTransferDiscrepancySourceReviews } from "../api/queries";
 import { DataState } from "../components/DataState";
 import { PageHeader } from "../components/PageHeader";
@@ -22,7 +23,8 @@ function formatDateTime(value: string) {
 export function SourceDiscrepancyReviewsPage() {
   const [status, setStatus] = useState("");
   const [search, setSearch] = useState("");
-  const reviews = useTransferDiscrepancySourceReviews(status, search);
+  const { activeBranchCode } = useActiveBranch();
+  const reviews = useTransferDiscrepancySourceReviews(status, search, activeBranchCode);
   const rows = reviews.data?.results ?? [];
 
   return (

@@ -1,3 +1,4 @@
+import { useActiveBranch } from "../api/ActiveBranchContext";
 import { useInventoryItems } from "../api/queries";
 import { DataState } from "../components/DataState";
 import { DataTable } from "../components/DataTable";
@@ -6,7 +7,8 @@ import type { InventoryItem } from "../types/api";
 
 
 export function InventoryPage() {
-  const inventory = useInventoryItems();
+  const { activeBranchCode } = useActiveBranch();
+  const inventory = useInventoryItems(activeBranchCode);
 
   return (
     <>

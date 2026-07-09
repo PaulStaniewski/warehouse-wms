@@ -139,6 +139,7 @@ class Command(BaseCommand):
         demo_pallets.delete()
         InterBranchTransfer.objects.filter(reference__in=demo_transfer_refs).delete()
         InventoryItem.objects.filter(location__code__iexact="UNCONFIRMED", location__branch__code="GDY").delete()
+        InventoryItem.objects.filter(location__code__iexact="UNCONFIRMED", location__branch__code="GDA").delete()
         InventoryItem.objects.filter(location__code__iexact="A-03-01", location__branch__code="GDY").delete()
         InventoryItem.objects.filter(location__code__iexact="A-03-01", location__branch__code="GDA").delete()
 
@@ -171,11 +172,13 @@ class Command(BaseCommand):
             ("GDY", "RET-01", Location.LocationType.RETURNS),
             ("GDY", "PACK-01", Location.LocationType.SHIPPING),
             ("GDY", "UNCONFIRMED", Location.LocationType.RECEIVING),
+            ("GDA", "A-01-01", Location.LocationType.STORAGE),
             ("GDA", "B-01-01", Location.LocationType.STORAGE),
             ("GDA", "B-01-02", Location.LocationType.PICKING),
             ("GDA", "A-03-01", Location.LocationType.STORAGE),
             ("GDA", "RET-01", Location.LocationType.RETURNS),
             ("GDA", "PACK-01", Location.LocationType.SHIPPING),
+            ("GDA", "UNCONFIRMED", Location.LocationType.RECEIVING),
         ]
 
         locations = {}

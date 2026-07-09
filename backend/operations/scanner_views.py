@@ -987,10 +987,6 @@ class ScannerPickingConfirmLocationView(APIView):
             if cart_work_session.status not in [CartWorkSession.Status.ACTIVE, CartWorkSession.Status.CONTROL]:
                 return Response({"detail": "Cart work session is not active."}, status=status.HTTP_400_BAD_REQUEST)
 
-            scanned_location = _find_location_by_code(location_code)
-            if scanned_location is None:
-                return Response({"detail": "Unknown location."}, status=status.HTTP_404_NOT_FOUND)
-
             task = _current_pick_task_queryset(cart_work_session.picking_job).first()
             if task is None:
                 cart_work_session.confirmed_location = None
@@ -1006,6 +1002,19 @@ class ScannerPickingConfirmLocationView(APIView):
                     },
                     status=status.HTTP_200_OK,
                 )
+
+            scanned_location = (
+                Location.objects.select_related("branch")
+                .filter(branch=task.branch, code__iexact=location_code)
+                .first()
+            )
+            if scanned_location is None:
+                if Location.objects.filter(code__iexact=location_code).exists():
+                    return Response(
+                        {"detail": f"Wrong location. Go to {task.source_location.code}."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                return Response({"detail": "Unknown location."}, status=status.HTTP_404_NOT_FOUND)
 
             if scanned_location.id != task.source_location_id:
                 return Response(
@@ -1748,14 +1757,21 @@ class ScannerReceivingPutAwayView(APIView):
             if _pallet_is_closed(pallet):
                 return Response({"detail": "Pallet is already closed."}, status=status.HTTP_400_BAD_REQUEST)
 
-            location = Location.objects.select_related("branch").filter(code__iexact=location_code).first()
-            if location is None:
-                return Response({"detail": "Destination location not found."}, status=status.HTTP_404_NOT_FOUND)
             destination_branch = session.pallet.transfer.destination_branch
-            if location.branch_id != destination_branch.id:
+            location = (
+                Location.objects.select_related("branch")
+                .filter(branch=destination_branch, code__iexact=location_code)
+                .first()
+            )
+            if location is None:
+                if Location.objects.filter(code__iexact=location_code).exists():
+                    return Response(
+                        {"detail": f"Wrong branch. Use a {destination_branch.code} destination location."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
                 return Response(
-                    {"detail": f"Wrong branch. Use a {destination_branch.code} destination location."},
-                    status=status.HTTP_400_BAD_REQUEST,
+                    {"detail": f"Destination location not found in branch {destination_branch.code}."},
+                    status=status.HTTP_404_NOT_FOUND,
                 )
 
             item = TransferPalletItem.objects.select_for_update().select_related("product").get(

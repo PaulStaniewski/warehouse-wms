@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { AlertTriangle, Clock3, RefreshCw } from "lucide-react";
 
-import { useBranches, useCloseRouteRun, usePrintRouteDocuments, useRouteRuns } from "../api/queries";
+import { useActiveBranch } from "../api/ActiveBranchContext";
+import { useCloseRouteRun, usePrintRouteDocuments, useRouteRuns } from "../api/queries";
 import { DataState } from "../components/DataState";
 import { PageHeader } from "../components/PageHeader";
-import type { Branch, RouteRun } from "../types/api";
+import type { RouteRun } from "../types/api";
 
 
 function formatStatus(status: string) {
@@ -13,10 +14,6 @@ function formatStatus(status: string) {
 
 function formatTime(value: string) {
   return value.slice(0, 5);
-}
-
-function getDefaultBranch(branches: Branch[]) {
-  return branches.find((branch) => branch.code === "GDY") ?? branches[0];
 }
 
 function isClosed(run: RouteRun) {
@@ -129,14 +126,11 @@ function RouteList({
 }
 
 export function RouteMonitorPage() {
-  const branches = useBranches();
-  const [selectedBranchId, setSelectedBranchId] = useState<number | undefined>();
+  const { activeBranch, activeBranchCode, isLoading: isBranchLoading } = useActiveBranch();
   const [selectedRouteRun, setSelectedRouteRun] = useState<RouteRun | null>(null);
   const [actionMessage, setActionMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [now, setNow] = useState(() => new Date());
-  const branchRows = useMemo(() => branches.data?.results ?? [], [branches.data?.results]);
-  const selectedBranch = branchRows.find((branch) => branch.id === selectedBranchId);
-  const routeRuns = useRouteRuns(selectedBranchId);
+  const routeRuns = useRouteRuns(activeBranchCode);
   const printDocuments = usePrintRouteDocuments();
   const closeRouteRun = useCloseRouteRun();
   const rows = routeRuns.data?.results ?? [];
@@ -147,17 +141,14 @@ export function RouteMonitorPage() {
     .sort((left, right) => left.departure_time.localeCompare(right.departure_time));
 
   useEffect(() => {
-    if (selectedBranchId || branchRows.length === 0) {
-      return;
-    }
-
-    setSelectedBranchId(getDefaultBranch(branchRows).id);
-  }, [branchRows, selectedBranchId]);
-
-  useEffect(() => {
     const clock = window.setInterval(() => setNow(new Date()), 1000);
     return () => window.clearInterval(clock);
   }, []);
+
+  useEffect(() => {
+    setSelectedRouteRun(null);
+    setActionMessage(null);
+  }, [activeBranchCode]);
 
   useEffect(() => {
     const refresh = window.setInterval(() => {
@@ -213,35 +204,20 @@ export function RouteMonitorPage() {
               <RefreshCw size={16} />
               Refresh
             </button>
-            <div className="branch-selector">
-              <label htmlFor="branch-select">Branch</label>
-              <select
-                disabled={branches.isLoading || branchRows.length === 0}
-                id="branch-select"
-                onChange={(event) => setSelectedBranchId(Number(event.target.value))}
-                value={selectedBranchId ?? ""}
-              >
-                {branchRows.map((branch) => (
-                  <option key={branch.id} value={branch.id}>
-                    {branch.code} / {branch.name}
-                  </option>
-                ))}
-              </select>
-            </div>
           </div>
         }
       />
 
       <DataState
-        isLoading={branches.isLoading || routeRuns.isLoading || !selectedBranchId}
-        isError={branches.isError || routeRuns.isError}
-        error={branches.error || routeRuns.error}
+        isLoading={isBranchLoading || routeRuns.isLoading || !activeBranchCode}
+        isError={routeRuns.isError}
+        error={routeRuns.error}
       >
         <section className="monitor-board">
           <header className="monitor-board-header">
             <div>
-              <p>Viewing branch: {selectedBranch?.code ?? "..."}</p>
-              <strong>{selectedBranch?.name ?? "No branch selected"}</strong>
+              <p>Viewing branch: {activeBranch?.code ?? "..."}</p>
+              <strong>{activeBranch?.name ?? "No branch selected"}</strong>
             </div>
             {(attentionRows.length > 0 || delayedRows.length > 0) && (
               <div className="monitor-priority-banner">
@@ -311,7 +287,7 @@ export function RouteMonitorPage() {
                         onClick={handlePrintDocuments}
                         type="button"
                       >
-                        Drukuj dokumenty trasy
+                        Print route documents
                       </button>
                       <button
                         disabled={

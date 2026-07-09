@@ -1,3 +1,4 @@
+import { useActiveBranch } from "../api/ActiveBranchContext";
 import { useLocations } from "../api/queries";
 import { DataState } from "../components/DataState";
 import { DataTable } from "../components/DataTable";
@@ -7,7 +8,8 @@ import type { Location } from "../types/api";
 
 
 export function LocationsPage() {
-  const locations = useLocations();
+  const { activeBranchCode } = useActiveBranch();
+  const locations = useLocations(activeBranchCode);
 
   return (
     <>

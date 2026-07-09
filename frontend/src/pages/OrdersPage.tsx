@@ -1,3 +1,4 @@
+import { useActiveBranch } from "../api/ActiveBranchContext";
 import { useOrders } from "../api/queries";
 import { DataState } from "../components/DataState";
 import { DataTable } from "../components/DataTable";
@@ -6,7 +7,8 @@ import type { Order } from "../types/api";
 
 
 export function OrdersPage() {
-  const orders = useOrders();
+  const { activeBranchCode } = useActiveBranch();
+  const orders = useOrders(activeBranchCode);
 
   return (
     <>

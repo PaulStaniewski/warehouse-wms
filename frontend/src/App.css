@@ -121,7 +121,8 @@ a {
 .topbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
+  flex-wrap: wrap;
   gap: 24px;
   min-height: 72px;
   border-bottom: 1px solid #dce3e8;
@@ -135,8 +136,29 @@ a {
 }
 
 .topbar-meta {
+  margin-left: auto;
   color: #687985;
   font-size: 0.875rem;
+}
+
+.branch-selector {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #40525c;
+  font-size: 0.8125rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.branch-selector select {
+  min-width: 170px;
+  border: 1px solid #c8d3d9;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #172026;
+  font: inherit;
+  padding: 8px 10px;
 }
 
 .content {

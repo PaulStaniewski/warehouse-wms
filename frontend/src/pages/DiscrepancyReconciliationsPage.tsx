@@ -2,6 +2,7 @@ import { Search } from "lucide-react";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 
+import { useActiveBranch } from "../api/ActiveBranchContext";
 import { useTransferDiscrepancyReconciliations } from "../api/queries";
 import { DataState } from "../components/DataState";
 import { PageHeader } from "../components/PageHeader";
@@ -26,7 +27,8 @@ export function DiscrepancyReconciliationsPage() {
   const [status, setStatus] = useState("");
   const [route, setRoute] = useState("");
   const [search, setSearch] = useState("");
-  const reconciliations = useTransferDiscrepancyReconciliations(status, route, search);
+  const { activeBranchCode } = useActiveBranch();
+  const reconciliations = useTransferDiscrepancyReconciliations(status, route, search, activeBranchCode);
   const rows = reconciliations.data?.results ?? [];
 
   return (

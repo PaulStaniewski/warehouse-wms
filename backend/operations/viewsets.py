@@ -15,8 +15,10 @@ from rest_framework.viewsets import ReadOnlyModelViewSet, ViewSet
 from operations.models import (
     AuditLog,
     DeliveryRoute,
+    InterBranchTransfer,
     Order,
     OrderLine,
+    PalletReceivingScan,
     PickingTask,
     ReturnBatch,
     ReturnLine,
@@ -32,6 +34,7 @@ from operations.models import (
     TransferDiscrepancySourceStockVerificationItem,
     TransferDiscrepancySourceReview,
     TransferDiscrepancyTransitInvestigation,
+    TransferPallet,
 )
 from operations.serializers import (
     AuditLogSerializer,
@@ -223,9 +226,19 @@ class RouteRunViewSet(ReadOnlyModelViewSet):
 class OrderViewSet(ReadOnlyModelViewSet):
     queryset = Order.objects.select_related("branch", "route_run", "route_run__route")
     serializer_class = OrderSerializer
-    filterset_fields = ["branch", "status", "external_reference", "route_run"]
+    filterset_fields = ["status", "external_reference", "route_run"]
     search_fields = ["external_reference", "customer_name", "branch__code", "route_run__route__code"]
     ordering_fields = ["external_reference", "status", "requested_ship_date", "created_at", "updated_at"]
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        branch = self.request.query_params.get("branch", "").strip()
+        if branch:
+            if branch.isdigit():
+                queryset = queryset.filter(branch_id=branch)
+            else:
+                queryset = queryset.filter(branch__code__iexact=branch)
+        return queryset
 
 
 class OrderLineViewSet(ReadOnlyModelViewSet):
@@ -393,10 +406,76 @@ class AuditLogViewSet(ReadOnlyModelViewSet):
     search_fields = ["entity_name", "entity_id", "message", "actor__username"]
     ordering_fields = ["action_type", "entity_name", "created_at"]
 
+    def _event_visible_for_branch(self, event, branch_code: str) -> bool:
+        branch_code = branch_code.lower()
+        entity_id = event.entity_id
+        if not entity_id:
+            return False
+        try:
+            if event.entity_name == "TransferDiscrepancy":
+                discrepancy = TransferDiscrepancy.objects.select_related("transfer__destination_branch").get(pk=entity_id)
+                return discrepancy.transfer.destination_branch.code.lower() == branch_code
+            if event.entity_name == "TransferDiscrepancySourceReview":
+                review = TransferDiscrepancySourceReview.objects.select_related("source_branch").get(pk=entity_id)
+                return review.source_branch.code.lower() == branch_code
+            if event.entity_name == "TransferDiscrepancySourceStockVerification":
+                verification = TransferDiscrepancySourceStockVerification.objects.select_related(
+                    "reconciliation__discrepancy__transfer__source_branch"
+                ).get(pk=entity_id)
+                return verification.reconciliation.discrepancy.transfer.source_branch.code.lower() == branch_code
+            if event.entity_name in ["TransferDiscrepancyReconciliation", "TransferDiscrepancyTransitInvestigation"]:
+                if event.entity_name == "TransferDiscrepancyReconciliation":
+                    reconciliation = TransferDiscrepancyReconciliation.objects.select_related(
+                        "discrepancy__transfer__source_branch",
+                        "discrepancy__transfer__destination_branch",
+                    ).get(pk=entity_id)
+                else:
+                    investigation = TransferDiscrepancyTransitInvestigation.objects.select_related(
+                        "reconciliation__discrepancy__transfer__source_branch",
+                        "reconciliation__discrepancy__transfer__destination_branch",
+                    ).get(pk=entity_id)
+                    reconciliation = investigation.reconciliation
+                return branch_code in [
+                    reconciliation.discrepancy.transfer.source_branch.code.lower(),
+                    reconciliation.discrepancy.transfer.destination_branch.code.lower(),
+                ]
+            if event.entity_name == "TransferPallet":
+                pallet = TransferPallet.objects.select_related("transfer__destination_branch").get(pk=entity_id)
+                return pallet.transfer.destination_branch.code.lower() == branch_code
+            if event.entity_name == "PalletReceivingScan":
+                scan = PalletReceivingScan.objects.select_related("pallet__transfer__destination_branch").get(pk=entity_id)
+                return scan.pallet.transfer.destination_branch.code.lower() == branch_code
+            if event.entity_name == "InterBranchTransfer":
+                transfer = InterBranchTransfer.objects.select_related("source_branch", "destination_branch").get(pk=entity_id)
+                return branch_code in [transfer.source_branch.code.lower(), transfer.destination_branch.code.lower()]
+            if event.entity_name == "RouteRun":
+                route_run = RouteRun.objects.select_related("route__branch").get(pk=entity_id)
+                return route_run.route.branch.code.lower() == branch_code
+            if event.entity_name == "PickingTask":
+                task = PickingTask.objects.select_related("branch").get(pk=entity_id)
+                return task.branch.code.lower() == branch_code
+            if event.entity_name == "StockMovement":
+                movement = StockMovement.objects.select_related("branch").get(pk=entity_id)
+                return movement.branch.code.lower() == branch_code
+        except (ValueError, TransferDiscrepancy.DoesNotExist, TransferDiscrepancySourceReview.DoesNotExist,
+                TransferDiscrepancySourceStockVerification.DoesNotExist, TransferDiscrepancyReconciliation.DoesNotExist,
+                TransferDiscrepancyTransitInvestigation.DoesNotExist, TransferPallet.DoesNotExist,
+                PalletReceivingScan.DoesNotExist, InterBranchTransfer.DoesNotExist, RouteRun.DoesNotExist,
+                PickingTask.DoesNotExist, StockMovement.DoesNotExist):
+            return False
+        return False
+
+    def _apply_branch_visibility(self, queryset, request):
+        branch = request.query_params.get("branch", "").strip()
+        if not branch:
+            return queryset
+        return [event for event in queryset if self._event_visible_for_branch(event, branch)]
+
     @action(detail=False, methods=["get"])
     def current(self, request):
         since = timezone.now() - timezone.timedelta(days=30)
         queryset = self.filter_queryset(self.get_queryset().filter(created_at__gte=since).order_by("-created_at"))
+        queryset = self._apply_branch_visibility(queryset, request)
         page = self.paginate_queryset(queryset)
 
         if page is not None:
@@ -428,6 +507,7 @@ class AuditLogViewSet(ReadOnlyModelViewSet):
             .filter(created_at__date__gte=date_from, created_at__date__lte=date_to)
             .order_by("-created_at")
         )
+        queryset = self._apply_branch_visibility(queryset, request)
         page = self.paginate_queryset(queryset)
 
         if page is not None:
@@ -454,7 +534,7 @@ class TransferDiscrepancyActionViewSet(ViewSet):
             rows = [
                 row
                 for row in rows
-                if row["source_branch"].lower() == branch or row["destination_branch"].lower() == branch
+                if branch in [code.lower() for code in row.get("visible_branches", [])]
             ]
         if search:
             searchable_keys = [
@@ -498,6 +578,13 @@ class TransferDiscrepancyViewSet(ReadOnlyModelViewSet):
     filterset_fields = ["status", "pallet", "transfer"]
     search_fields = ["reference", "pallet__scan_code", "transfer__reference"]
     ordering_fields = ["reference", "status", "created_at", "updated_at"]
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        branch = self.request.query_params.get("branch", "").strip()
+        if branch:
+            queryset = queryset.filter(transfer__destination_branch__code__iexact=branch)
+        return queryset
 
     def _recovery_response(self, recovery: TransferDiscrepancyRecovery):
         discrepancy = recovery.discrepancy
@@ -726,13 +813,20 @@ class TransferDiscrepancyViewSet(ReadOnlyModelViewSet):
             except DiscrepancyLocationMissing as error:
                 return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
 
-            destination_location = Location.objects.select_related("branch").filter(code__iexact=destination_location_code).first()
+            destination_location = (
+                Location.objects.select_related("branch")
+                .filter(branch=discrepancy.transfer.destination_branch, code__iexact=destination_location_code)
+                .first()
+            )
             if destination_location is None:
-                return Response({"detail": "Destination location not found."}, status=status.HTTP_404_NOT_FOUND)
-            if destination_location.branch_id != discrepancy.transfer.destination_branch_id:
+                if Location.objects.filter(code__iexact=destination_location_code).exists():
+                    return Response(
+                        {"detail": "Destination location belongs to another branch."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
                 return Response(
-                    {"detail": "Destination location belongs to another branch."},
-                    status=status.HTTP_400_BAD_REQUEST,
+                    {"detail": "Destination location not found in destination branch."},
+                    status=status.HTTP_404_NOT_FOUND,
                 )
             if destination_location.id == unconfirmed_location.id:
                 return Response({"detail": "UNCONFIRMED cannot be the recovery destination."}, status=status.HTTP_400_BAD_REQUEST)
@@ -981,10 +1075,11 @@ class TransferDiscrepancyViewSet(ReadOnlyModelViewSet):
 
 class TransferDiscrepancySourceReviewFilter(django_filters.FilterSet):
     search = django_filters.CharFilter(method="filter_search")
+    branch = django_filters.CharFilter(field_name="source_branch__code", lookup_expr="iexact")
 
     class Meta:
         model = TransferDiscrepancySourceReview
-        fields = ["status", "source_branch", "discrepancy"]
+        fields = ["status", "source_branch", "branch", "discrepancy"]
 
     def filter_search(self, queryset, name, value):
         return queryset.filter(
@@ -1137,11 +1232,18 @@ class TransferDiscrepancySourceReviewViewSet(ReadOnlyModelViewSet):
 class TransferDiscrepancyReconciliationFilter(django_filters.FilterSet):
     source_branch = django_filters.NumberFilter(field_name="discrepancy__transfer__source_branch_id")
     destination_branch = django_filters.NumberFilter(field_name="discrepancy__transfer__destination_branch_id")
+    branch = django_filters.CharFilter(method="filter_branch")
     search = django_filters.CharFilter(method="filter_search")
 
     class Meta:
         model = TransferDiscrepancyReconciliation
-        fields = ["status", "route", "source_branch", "destination_branch"]
+        fields = ["status", "route", "source_branch", "destination_branch", "branch"]
+
+    def filter_branch(self, queryset, name, value):
+        return queryset.filter(
+            models.Q(discrepancy__transfer__source_branch__code__iexact=value)
+            | models.Q(discrepancy__transfer__destination_branch__code__iexact=value)
+        )
 
     def filter_search(self, queryset, name, value):
         return queryset.filter(
@@ -1453,11 +1555,12 @@ class TransferDiscrepancyReconciliationViewSet(ReadOnlyModelViewSet):
 
 class TransferDiscrepancySourceStockVerificationFilter(django_filters.FilterSet):
     source_branch = django_filters.NumberFilter(field_name="reconciliation__discrepancy__transfer__source_branch_id")
+    branch = django_filters.CharFilter(field_name="reconciliation__discrepancy__transfer__source_branch__code", lookup_expr="iexact")
     search = django_filters.CharFilter(method="filter_search")
 
     class Meta:
         model = TransferDiscrepancySourceStockVerification
-        fields = ["status", "source_branch"]
+        fields = ["status", "source_branch", "branch"]
 
     def filter_search(self, queryset, name, value):
         return queryset.filter(
@@ -1474,11 +1577,18 @@ class TransferDiscrepancySourceStockVerificationFilter(django_filters.FilterSet)
 class TransferDiscrepancyTransitInvestigationFilter(django_filters.FilterSet):
     source_branch = django_filters.NumberFilter(field_name="reconciliation__discrepancy__transfer__source_branch_id")
     destination_branch = django_filters.NumberFilter(field_name="reconciliation__discrepancy__transfer__destination_branch_id")
+    branch = django_filters.CharFilter(method="filter_branch")
     search = django_filters.CharFilter(method="filter_search")
 
     class Meta:
         model = TransferDiscrepancyTransitInvestigation
-        fields = ["status", "source_branch", "destination_branch"]
+        fields = ["status", "source_branch", "destination_branch", "branch"]
+
+    def filter_branch(self, queryset, name, value):
+        return queryset.filter(
+            models.Q(reconciliation__discrepancy__transfer__source_branch__code__iexact=value)
+            | models.Q(reconciliation__discrepancy__transfer__destination_branch__code__iexact=value)
+        )
 
     def filter_search(self, queryset, name, value):
         return queryset.filter(
@@ -1891,11 +2001,15 @@ class TransferDiscrepancySourceStockVerificationViewSet(ReadOnlyModelViewSet):
                 )
 
             source_branch = verification.reconciliation.discrepancy.transfer.source_branch
-            destination_location = Location.objects.select_related("branch").filter(code__iexact=destination_location_code).first()
+            destination_location = (
+                Location.objects.select_related("branch")
+                .filter(branch=source_branch, code__iexact=destination_location_code)
+                .first()
+            )
             if destination_location is None:
-                return Response({"detail": "Source location not found."}, status=status.HTTP_404_NOT_FOUND)
-            if destination_location.branch_id != source_branch.id:
-                return Response({"detail": "Source location belongs to another branch."}, status=status.HTTP_400_BAD_REQUEST)
+                if Location.objects.filter(code__iexact=destination_location_code).exists():
+                    return Response({"detail": "Source location belongs to another branch."}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({"detail": "Source location not found in source branch."}, status=status.HTTP_404_NOT_FOUND)
             if destination_location.code.upper() == "UNCONFIRMED":
                 return Response({"detail": "UNCONFIRMED cannot be used as a source stock recovery location."}, status=status.HTTP_400_BAD_REQUEST)
 

@@ -1,3 +1,4 @@
+import { useActiveBranch } from "../api/ActiveBranchContext";
 import { useRouteRunArchive } from "../api/queries";
 import { DataState } from "../components/DataState";
 import { PageHeader } from "../components/PageHeader";
@@ -31,13 +32,14 @@ function formatCloseResult(result: "on_time" | "late" | "unknown") {
 }
 
 export function RouteArchivePage() {
-  const archive = useRouteRunArchive();
+  const { activeBranchCode } = useActiveBranch();
+  const archive = useRouteRunArchive(activeBranchCode);
   const rows = archive.data?.results ?? [];
 
   return (
     <>
       <PageHeader
-        title="Archiwum tras"
+        title="Routes Archive"
         description="Closed route runs with readiness, document printing and close timestamps."
       />
 

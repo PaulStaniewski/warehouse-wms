@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 
+import { useActiveBranch } from "../api/ActiveBranchContext";
 import { useStoredScannerSession } from "../api/scannerSession";
 
 
@@ -85,6 +86,8 @@ const pageTitles: Record<string, string> = {
 export function AppLayout() {
   const location = useLocation();
   const scannerSession = useStoredScannerSession();
+  const { activeBranchCode, branches, setActiveBranchCode } = useActiveBranch();
+  const isScanner = location.pathname.startsWith("/scanner");
   const title = pageTitles[location.pathname] ?? (location.pathname.startsWith("/scanner") ? "Scanner" : "Warehouse WMS");
 
   return (
@@ -135,10 +138,20 @@ export function AppLayout() {
         <header className="topbar">
           <h2 className="topbar-title">{title}</h2>
           <span className="topbar-meta">
-            {location.pathname.startsWith("/scanner") && scannerSession
-              ? `Cart: ${scannerSession.cart_code}`
-              : "API: /api"}
+            {isScanner && scannerSession ? `Cart: ${scannerSession.cart_code}` : "API: /api"}
           </span>
+          {!isScanner && (
+            <label className="branch-selector">
+              <span>Working branch:</span>
+              <select onChange={(event) => setActiveBranchCode(event.target.value)} value={activeBranchCode}>
+                {branches.map((branch) => (
+                  <option key={branch.code} value={branch.code}>
+                    {branch.code} / {branch.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
         </header>
         <main className="content">
           <Outlet />

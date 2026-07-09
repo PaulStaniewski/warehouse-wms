@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 
 import "./App.css";
+import { ActiveBranchProvider } from "./api/ActiveBranchContext";
 import { AppLayout } from "./layout/AppLayout";
 import { ArchiveEventsPage } from "./pages/ArchiveEventsPage";
 import { CurrentEventsPage } from "./pages/CurrentEventsPage";
@@ -37,8 +38,9 @@ import { TransitInvestigationsPage } from "./pages/TransitInvestigationsPage";
 
 function App() {
   return (
-    <Routes>
-      <Route element={<AppLayout />}>
+    <ActiveBranchProvider>
+      <Routes>
+        <Route element={<AppLayout />}>
         <Route index element={<Navigate to="/wms/dashboard" replace />} />
         <Route path="wms/dashboard" element={<DashboardPage />} />
         <Route path="wms/products" element={<ProductsPage />} />
@@ -81,8 +83,9 @@ function App() {
         <Route path="locations" element={<Navigate to="/wms/locations" replace />} />
         <Route path="routes-monitor" element={<Navigate to="/wms/routes-monitor" replace />} />
         <Route path="*" element={<Navigate to="/wms/dashboard" replace />} />
-      </Route>
-    </Routes>
+        </Route>
+      </Routes>
+    </ActiveBranchProvider>
   );
 }
 

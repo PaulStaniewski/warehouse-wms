@@ -66,6 +66,38 @@ def _location_contents(location: Location):
     )
 
 
+def _combined_location_contents(code: str, locations: list[Location]):
+    inventory_items = (
+        InventoryItem.objects.select_related("product", "location", "location__branch")
+        .filter(location__in=locations, quantity_on_hand__gt=0)
+        .order_by("location__branch__code", "product__sku")
+    )
+    items = [
+        {
+            "product_id": item.product_id,
+            "sku": item.product.sku,
+            "name": item.product.name,
+            "quantity": piece_quantity(item.quantity_on_hand),
+            "reserved_quantity": piece_quantity(item.quantity_reserved),
+            "branch_code": item.location.branch.code,
+            "location_code": item.location.code,
+        }
+        for item in inventory_items
+    ]
+    branch_codes = ", ".join(location.branch.code for location in locations)
+    return ContentsMatch(
+        "location",
+        {
+            "object_type": "location",
+            "code": code,
+            "title": f"Location {code}",
+            "status": "active",
+            "description": f"Matching branch locations: {branch_codes}",
+            "items": items,
+        },
+    )
+
+
 def _cart_contents(cart: ScannerCart):
     active_work = (
         CartWorkSession.objects.select_related("picking_job")
@@ -271,9 +303,11 @@ def resolve_contents_code(code: str):
         raise ContentsLookupError("code query parameter is required.")
 
     matches = []
-    location = Location.objects.select_related("branch").filter(code__iexact=code).first()
-    if location:
-        matches.append(_location_contents(location))
+    locations = list(Location.objects.select_related("branch").filter(code__iexact=code).order_by("branch__code"))
+    if len(locations) == 1:
+        matches.append(_location_contents(locations[0]))
+    elif len(locations) > 1:
+        matches.append(_combined_location_contents(code, locations))
 
     cart = ScannerCart.objects.filter(code__iexact=code).first()
     if cart:

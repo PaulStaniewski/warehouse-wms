@@ -3,6 +3,8 @@ from decimal import Decimal
 from io import StringIO
 
 from django.core.management import call_command
+from django.core.exceptions import ValidationError
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -821,6 +823,12 @@ class ScannerReceivingWorkflowTests(APITestCase):
             name="UNCONFIRMED",
             location_type=Location.LocationType.RECEIVING,
         )
+        self.source_unconfirmed_location = Location.objects.create(
+            branch=self.source_branch,
+            code="UNCONFIRMED",
+            name="UNCONFIRMED",
+            location_type=Location.LocationType.RECEIVING,
+        )
         self.wrong_branch_location = Location.objects.create(
             branch=self.source_branch,
             code="B-01-01",
@@ -1152,10 +1160,124 @@ class ScannerReceivingWorkflowTests(APITestCase):
         self.assertIsNotNone(self.pallet.receiving_started_at)
         self.assertTrue(AuditLog.objects.filter(message__icontains="Receiving started").exists())
 
+    def test_location_codes_are_unique_per_branch(self):
+        duplicate_code_location = Location.objects.create(
+            branch=self.source_branch,
+            code=self.destination_location.code,
+            name="Source A-01-01",
+            location_type=Location.LocationType.STORAGE,
+        )
+
+        self.assertEqual(duplicate_code_location.code, "A-01-01")
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                Location.objects.create(
+                    branch=self.destination_branch,
+                    code=self.destination_location.code,
+                    name="Duplicate destination A-01-01",
+                    location_type=Location.LocationType.STORAGE,
+                )
+
+    def test_inventory_location_must_match_inventory_branch(self):
+        InventoryItem.objects.create(
+            branch=self.destination_branch,
+            location=self.destination_location,
+            product=self.product,
+            quantity_on_hand=Decimal("1"),
+            quantity_reserved=Decimal("0"),
+        )
+
+        with self.assertRaises(ValidationError):
+            InventoryItem.objects.create(
+                branch=self.destination_branch,
+                location=self.wrong_branch_location,
+                product=self.second_product,
+                quantity_on_hand=Decimal("1"),
+                quantity_reserved=Decimal("0"),
+            )
+
+    def test_branch_filters_for_locations_and_inventory(self):
+        InventoryItem.objects.create(
+            branch=self.destination_branch,
+            location=self.destination_location,
+            product=self.product,
+            quantity_on_hand=Decimal("1"),
+            quantity_reserved=Decimal("0"),
+        )
+        InventoryItem.objects.create(
+            branch=self.source_branch,
+            location=self.wrong_branch_location,
+            product=self.product,
+            quantity_on_hand=Decimal("1"),
+            quantity_reserved=Decimal("0"),
+        )
+
+        locations_response = self.client.get("/api/locations/", {"branch": self.destination_branch.code})
+        inventory_response = self.client.get("/api/inventory-items/", {"branch": self.destination_branch.code})
+
+        self.assertEqual(locations_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(inventory_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(all(row["branch_code"] == self.destination_branch.code for row in locations_response.data["results"]))
+        self.assertTrue(all(row["branch_code"] == self.destination_branch.code for row in inventory_response.data["results"]))
+
+    def test_orders_branch_filter_accepts_branch_code(self):
+        gdy_order = Order.objects.create(
+            branch=self.destination_branch,
+            external_reference="GDY-ORDER-001",
+            customer_name="GDY Customer",
+            status=Order.Status.IMPORTED,
+        )
+        gda_order = Order.objects.create(
+            branch=self.source_branch,
+            external_reference="GDA-ORDER-001",
+            customer_name="GDA Customer",
+            status=Order.Status.IMPORTED,
+        )
+
+        gdy_response = self.client.get("/api/orders/", {"branch": self.destination_branch.code})
+        gda_response = self.client.get("/api/orders/", {"branch": self.source_branch.code})
+
+        self.assertEqual(gdy_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(gda_response.status_code, status.HTTP_200_OK)
+        self.assertEqual([row["id"] for row in gdy_response.data["results"]], [gdy_order.id])
+        self.assertEqual([row["id"] for row in gda_response.data["results"]], [gda_order.id])
+
+    def test_route_archive_branch_filter_accepts_branch_code(self):
+        other_branch = Branch.objects.create(code="WAW", name="Warsaw", city="Warsaw", country="Poland")
+        gdy_route = DeliveryRoute.objects.create(branch=self.destination_branch, code="GDY-ARCH", name="GDY Archive")
+        gda_route = DeliveryRoute.objects.create(branch=self.source_branch, code="GDA-ARCH", name="GDA Archive")
+        other_route = DeliveryRoute.objects.create(branch=other_branch, code="WAW-ARCH", name="WAW Archive")
+        for index, route in enumerate([gdy_route, gda_route, other_route], start=1):
+            RouteRun.objects.create(
+                route=route,
+                service_date=timezone.localdate(),
+                run_number=index,
+                order_cutoff_time=time(8, 0),
+                sync_time=time(8, 15),
+                departure_time=time(9, 0),
+                status=RouteRun.Status.CLOSED,
+                closed_at=timezone.now(),
+            )
+
+        gdy_response = self.client.get("/api/route-runs/archive/", {"branch_code": self.destination_branch.code})
+        gda_response = self.client.get("/api/route-runs/archive/", {"branch_code": self.source_branch.code})
+
+        self.assertEqual([row["route_code"] for row in gdy_response.data["results"]], ["GDY-ARCH"])
+        self.assertEqual([row["route_code"] for row in gda_response.data["results"]], ["GDA-ARCH"])
+
     def test_unknown_pallet_returns_not_found(self):
         response = self.start_receiving("PAL-NOT-FOUND")
 
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_receiving_rejects_source_branch_location(self):
+        session_id = self.start_receiving().data["receiving_session"]["id"]
+        self.scan_product(session_id, self.product.sku, "1")
+
+        response = self.put_away(session_id, location_code=self.wrong_branch_location.code)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Wrong branch", response.data["detail"])
 
     def test_completed_pallet_cannot_start(self):
         self.pallet.status = TransferPallet.Status.RECEIVED
@@ -2266,6 +2388,64 @@ class ScannerReceivingWorkflowTests(APITestCase):
         self.assertEqual(StockMovement.objects.count(), movement_count)
         self.assertEqual(AuditLog.objects.filter(message__icontains="with final outcome: Source loss confirmed").count(), 1)
 
+    def test_destination_recovery_rejects_source_branch_location(self):
+        discrepancy = self.create_shortage_discrepancy()
+        self.print_report(discrepancy)
+
+        response = self.recover_item(
+            discrepancy,
+            product_code=self.product.sku,
+            location_code=self.wrong_branch_location.code,
+            quantity="1",
+            operation_id="wrong-destination-branch-recovery",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("another branch", response.data["detail"])
+
+    def test_shortage_posting_uses_destination_branch_unconfirmed_location(self):
+        discrepancy = self.create_shortage_discrepancy()
+        first = self.print_report(discrepancy)
+        second = self.print_report(discrepancy)
+
+        destination_item = InventoryItem.objects.get(
+            branch=self.destination_branch,
+            location=self.unconfirmed_location,
+            product=self.product,
+        )
+        source_item = InventoryItem.objects.filter(
+            branch=self.source_branch,
+            location=self.source_unconfirmed_location,
+            product=self.product,
+        ).first()
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(destination_item.quantity_on_hand, Decimal("1.000"))
+        self.assertIsNone(source_item)
+        self.assertEqual(
+            StockMovement.objects.filter(
+                branch=self.destination_branch,
+                destination_location=self.unconfirmed_location,
+                movement_type=StockMovement.MovementType.RECEIVING_DISCREPANCY,
+            ).count(),
+            1,
+        )
+
+    def test_source_stock_verification_rejects_destination_branch_location(self):
+        verification = self.create_source_stock_verification()
+        self.begin_source_stock_verification(verification)
+
+        response = self.record_source_stock_found(
+            verification,
+            product_code=self.product.sku,
+            location_code=self.destination_location.code,
+            quantity="1",
+            operation_id="wrong-source-branch-recovery",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("another branch", response.data["detail"])
+
     def test_manual_decision_supports_original_manual_route(self):
         reconciliation = self.create_acknowledged_manual_reconciliation()
         movement_count = StockMovement.objects.count()
@@ -2772,6 +2952,40 @@ class ScannerReceivingWorkflowTests(APITestCase):
         self.assertEqual(StockMovement.objects.count(), movement_count)
         self.assertEqual(list(InventoryItem.objects.order_by("id").values_list("id", "quantity_on_hand")), inventory_snapshot)
 
+    def test_discrepancy_action_queue_respects_branch_responsibility(self):
+        destination_discrepancy = self.create_shortage_discrepancy()
+        self.print_report(destination_discrepancy)
+        source_discrepancy = self.create_shortage_discrepancy()
+        self.print_report(source_discrepancy)
+        self.confirm_shortage(source_discrepancy, operation_id="queue-branch-source-shortage")
+        source_review = TransferDiscrepancySourceReview.objects.get(discrepancy=source_discrepancy)
+
+        gdy_rows = self.action_rows(branch=self.destination_branch.code)
+        gda_rows = self.action_rows(branch=self.source_branch.code)
+
+        self.assertTrue(any(row["action_type"] == "review_destination_shortage" for row in gdy_rows))
+        self.assertFalse(any(row["target_reference"] == source_review.reference for row in gdy_rows))
+        self.assertTrue(any(row["target_reference"] == source_review.reference for row in gda_rows))
+
+        self.begin_source_review(source_review)
+        self.complete_source_review(
+            source_review,
+            finding=TransferDiscrepancySourceReview.Finding.DISPATCH_EVIDENCE_MATCHES,
+            operation_id="queue-branch-transit-review",
+        )
+        reconciliation = TransferDiscrepancyReconciliation.objects.get(discrepancy=source_discrepancy)
+        self.acknowledge_reconciliation(reconciliation)
+        investigation = TransferDiscrepancyTransitInvestigation.objects.get(reconciliation=reconciliation)
+        self.begin_transit_investigation(investigation)
+        self.complete_transit_investigation(investigation, operation_id="queue-branch-transit-complete")
+
+        self.assertTrue(
+            any(row["target_reference"] == reconciliation.reference for row in self.action_rows(branch=self.destination_branch.code))
+        )
+        self.assertTrue(
+            any(row["target_reference"] == reconciliation.reference for row in self.action_rows(branch=self.source_branch.code))
+        )
+
     def test_current_events_actor_display_infers_worker_for_manual_events(self):
         review_discrepancy = self.create_shortage_discrepancy()
         self.print_report(review_discrepancy)
@@ -2786,6 +3000,42 @@ class ScannerReceivingWorkflowTests(APITestCase):
         automatic_event = next(event for event in response.data["results"] if "Source review" in event["message"] and "was created" in event["message"])
         self.assertEqual(manual_event["actor_display"], "DEMO")
         self.assertEqual(automatic_event["actor_display"], "System")
+
+    def test_current_events_are_filtered_by_relevant_branch(self):
+        start_response = self.start_receiving()
+        session_id = start_response.data["receiving_session"]["id"]
+        self.scan_product(session_id, self.product.sku, "2")
+        self.put_away(session_id)
+        self.scan_product(session_id, self.second_product.sku, "2")
+        self.put_away(session_id)
+        self.complete(session_id)
+        discrepancy = TransferDiscrepancy.objects.get(pallet=self.pallet)
+        self.print_report(discrepancy)
+        self.confirm_shortage(discrepancy, operation_id="event-branch-shortage")
+
+        source_events = self.client.get("/api/audit-logs/current/", {"branch": self.source_branch.code})
+        destination_events = self.client.get("/api/audit-logs/current/", {"branch": self.destination_branch.code})
+
+        self.assertEqual(source_events.status_code, status.HTTP_200_OK)
+        self.assertEqual(destination_events.status_code, status.HTTP_200_OK)
+        self.assertTrue(any("Source review" in event["message"] for event in source_events.data["results"]))
+        self.assertFalse(any("Receiving started" in event["message"] for event in source_events.data["results"]))
+        self.assertTrue(any("Receiving started" in event["message"] for event in destination_events.data["results"]))
+
+    def test_reconciliation_and_transit_events_are_visible_to_both_branches(self):
+        reconciliation = self.create_acknowledged_transit_reconciliation()
+        investigation = TransferDiscrepancyTransitInvestigation.objects.get(reconciliation=reconciliation)
+        self.begin_transit_investigation(investigation)
+
+        source_events = self.client.get("/api/audit-logs/current/", {"branch": self.source_branch.code})
+        destination_events = self.client.get("/api/audit-logs/current/", {"branch": self.destination_branch.code})
+
+        self.assertEqual(source_events.status_code, status.HTTP_200_OK)
+        self.assertEqual(destination_events.status_code, status.HTTP_200_OK)
+        self.assertTrue(any("Reconciliation case" in event["message"] for event in source_events.data["results"]))
+        self.assertTrue(any("Reconciliation case" in event["message"] for event in destination_events.data["results"]))
+        self.assertTrue(any("began transit investigation" in event["message"] for event in source_events.data["results"]))
+        self.assertTrue(any("began transit investigation" in event["message"] for event in destination_events.data["results"]))
 
     def test_seed_demo_pallet_exists_and_seed_is_idempotent(self):
         output = StringIO()

@@ -1,5 +1,6 @@
 import { Link } from "react-router-dom";
 
+import { useActiveBranch } from "../api/ActiveBranchContext";
 import { useTransferDiscrepancies } from "../api/queries";
 import { DataState } from "../components/DataState";
 import { PageHeader } from "../components/PageHeader";
@@ -18,7 +19,8 @@ function formatQuantity(value: string) {
 }
 
 export function DiscrepanciesPage() {
-  const discrepancies = useTransferDiscrepancies();
+  const { activeBranchCode } = useActiveBranch();
+  const discrepancies = useTransferDiscrepancies(activeBranchCode);
   const rows = discrepancies.data?.results ?? [];
 
   return (

@@ -12,6 +12,7 @@ import {
   useReturnBatches,
   useRouteRuns,
 } from "../api/queries";
+import { useActiveBranch } from "../api/ActiveBranchContext";
 import type { Order, ReturnBatch } from "../types/api";
 
 
@@ -76,11 +77,12 @@ function StatusOverview({ title, items }: { title: string; items: Array<{ status
 }
 
 export function DashboardPage() {
+  const { activeBranchCode } = useActiveBranch();
   const health = useHealth();
   const products = useProducts();
-  const inventory = useInventoryItems();
-  const orders = useOrders();
-  const locations = useLocations();
+  const inventory = useInventoryItems(activeBranchCode);
+  const orders = useOrders(activeBranchCode);
+  const locations = useLocations(activeBranchCode);
   const pickingTasks = usePickingTasks();
   const returnBatches = useReturnBatches();
   const routeRuns = useRouteRuns();

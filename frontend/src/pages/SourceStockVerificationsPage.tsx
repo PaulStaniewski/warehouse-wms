@@ -2,6 +2,7 @@ import { Search } from "lucide-react";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 
+import { useActiveBranch } from "../api/ActiveBranchContext";
 import { useTransferDiscrepancySourceStockVerifications } from "../api/queries";
 import { DataState } from "../components/DataState";
 import { PageHeader } from "../components/PageHeader";
@@ -22,7 +23,8 @@ function formatDateTime(value: string) {
 export function SourceStockVerificationsPage() {
   const [status, setStatus] = useState("");
   const [search, setSearch] = useState("");
-  const verifications = useTransferDiscrepancySourceStockVerifications(status, search);
+  const { activeBranchCode } = useActiveBranch();
+  const verifications = useTransferDiscrepancySourceStockVerifications(status, search, activeBranchCode);
   const rows = verifications.data?.results ?? [];
 
   return (

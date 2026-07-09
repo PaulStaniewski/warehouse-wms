@@ -1,6 +1,7 @@
 import { DataState } from "../components/DataState";
 import { DataTable } from "../components/DataTable";
 import { PageHeader } from "../components/PageHeader";
+import { useActiveBranch } from "../api/ActiveBranchContext";
 import { useCurrentAuditLogs } from "../api/queries";
 import type { AuditLog } from "../types/api";
 
@@ -17,7 +18,8 @@ function formatAction(value: string) {
 }
 
 export function CurrentEventsPage() {
-  const auditLogs = useCurrentAuditLogs();
+  const { activeBranchCode } = useActiveBranch();
+  const auditLogs = useCurrentAuditLogs(activeBranchCode);
 
   return (
     <>

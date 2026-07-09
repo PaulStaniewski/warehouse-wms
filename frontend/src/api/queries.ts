@@ -59,24 +59,24 @@ export function useProducts() {
   });
 }
 
-export function useInventoryItems() {
+export function useInventoryItems(branch?: string) {
   return useQuery({
-    queryKey: ["inventory-items"],
-    queryFn: () => getList<InventoryItem>("/inventory-items/"),
+    queryKey: ["inventory-items", branch],
+    queryFn: () => getList<InventoryItem>(`/inventory-items/${branch ? `?branch=${branch}` : ""}`),
   });
 }
 
-export function useOrders() {
+export function useOrders(branch?: string) {
   return useQuery({
-    queryKey: ["orders"],
-    queryFn: () => getList<Order>("/orders/"),
+    queryKey: ["orders", branch],
+    queryFn: () => getList<Order>(`/orders/${branch ? `?branch=${branch}` : ""}`),
   });
 }
 
-export function useLocations() {
+export function useLocations(branch?: string) {
   return useQuery({
-    queryKey: ["locations"],
-    queryFn: () => getList<Location>("/locations/"),
+    queryKey: ["locations", branch],
+    queryFn: () => getList<Location>(`/locations/${branch ? `?branch=${branch}` : ""}`),
   });
 }
 
@@ -101,10 +101,16 @@ export function useReturnBatches() {
   });
 }
 
-export function useRouteRuns(branchId?: number) {
+export function useRouteRuns(branch?: number | string) {
   return useQuery({
-    queryKey: ["route-runs", branchId ?? "all"],
-    queryFn: () => getList<RouteRun>(branchId ? `/route-runs/?branch=${branchId}` : "/route-runs/"),
+    queryKey: ["route-runs", branch ?? "all"],
+    queryFn: () => {
+      if (!branch) {
+        return getList<RouteRun>("/route-runs/");
+      }
+      const param = typeof branch === "number" ? `branch=${branch}` : `branch_code=${branch}`;
+      return getList<RouteRun>(`/route-runs/?${param}`);
+    },
   });
 }
 
@@ -119,10 +125,10 @@ export function useRouteRun(routeRunId?: string) {
   });
 }
 
-export function useRouteRunArchive() {
+export function useRouteRunArchive(branchCode?: string) {
   return useQuery({
-    queryKey: ["route-runs", "archive"],
-    queryFn: () => getList<RouteRun>("/route-runs/archive/"),
+    queryKey: ["route-runs", "archive", branchCode],
+    queryFn: () => getList<RouteRun>(`/route-runs/archive/${branchCode ? `?branch_code=${branchCode}` : ""}`),
   });
 }
 
@@ -580,10 +586,10 @@ export function useScannerReceivingClose() {
   });
 }
 
-export function useTransferDiscrepancies() {
+export function useTransferDiscrepancies(branch?: string) {
   return useQuery({
-    queryKey: ["transfer-discrepancies"],
-    queryFn: () => getList<TransferDiscrepancy>("/transfer-discrepancies/"),
+    queryKey: ["transfer-discrepancies", branch],
+    queryFn: () => getList<TransferDiscrepancy>(`/transfer-discrepancies/${branch ? `?branch=${branch}` : ""}`),
   });
 }
 
@@ -682,9 +688,9 @@ export function useConfirmTransferDiscrepancyShortage() {
   });
 }
 
-export function useTransferDiscrepancySourceReviews(status?: string, search?: string) {
+export function useTransferDiscrepancySourceReviews(status?: string, search?: string, branch?: string) {
   return useQuery({
-    queryKey: ["transfer-discrepancy-source-reviews", status, search],
+    queryKey: ["transfer-discrepancy-source-reviews", status, search, branch],
     queryFn: () => {
       const params = new URLSearchParams();
       if (status) {
@@ -692,6 +698,9 @@ export function useTransferDiscrepancySourceReviews(status?: string, search?: st
       }
       if (search) {
         params.set("search", search);
+      }
+      if (branch) {
+        params.set("branch", branch);
       }
       const query = params.toString();
       return getList<TransferDiscrepancySourceReview>(
@@ -755,9 +764,9 @@ export function useCompleteTransferDiscrepancySourceReview() {
   });
 }
 
-export function useTransferDiscrepancyReconciliations(status?: string, route?: string, search?: string) {
+export function useTransferDiscrepancyReconciliations(status?: string, route?: string, search?: string, branch?: string) {
   return useQuery({
-    queryKey: ["transfer-discrepancy-reconciliations", status, route, search],
+    queryKey: ["transfer-discrepancy-reconciliations", status, route, search, branch],
     queryFn: () => {
       const params = new URLSearchParams();
       if (status) {
@@ -768,6 +777,9 @@ export function useTransferDiscrepancyReconciliations(status?: string, route?: s
       }
       if (search) {
         params.set("search", search);
+      }
+      if (branch) {
+        params.set("branch", branch);
       }
       const query = params.toString();
       return getList<TransferDiscrepancyReconciliation>(
@@ -851,9 +863,9 @@ export function useCompleteManualTransferDiscrepancyReconciliation() {
   });
 }
 
-export function useTransferDiscrepancySourceStockVerifications(status?: string, search?: string) {
+export function useTransferDiscrepancySourceStockVerifications(status?: string, search?: string, branch?: string) {
   return useQuery({
-    queryKey: ["transfer-discrepancy-source-stock-verifications", status, search],
+    queryKey: ["transfer-discrepancy-source-stock-verifications", status, search, branch],
     queryFn: () => {
       const params = new URLSearchParams();
       if (status) {
@@ -861,6 +873,9 @@ export function useTransferDiscrepancySourceStockVerifications(status?: string, 
       }
       if (search) {
         params.set("search", search);
+      }
+      if (branch) {
+        params.set("branch", branch);
       }
       const query = params.toString();
       return getList<TransferDiscrepancySourceStockVerification>(
@@ -953,9 +968,9 @@ export function useCompleteTransferDiscrepancySourceSearch() {
   });
 }
 
-export function useTransferDiscrepancyTransitInvestigations(status?: string, search?: string) {
+export function useTransferDiscrepancyTransitInvestigations(status?: string, search?: string, branch?: string) {
   return useQuery({
-    queryKey: ["transfer-discrepancy-transit-investigations", status, search],
+    queryKey: ["transfer-discrepancy-transit-investigations", status, search, branch],
     queryFn: () => {
       const params = new URLSearchParams();
       if (status) {
@@ -963,6 +978,9 @@ export function useTransferDiscrepancyTransitInvestigations(status?: string, sea
       }
       if (search) {
         params.set("search", search);
+      }
+      if (branch) {
+        params.set("branch", branch);
       }
       const query = params.toString();
       return getList<TransferDiscrepancyTransitInvestigation>(
@@ -1026,10 +1044,10 @@ export function useCompleteTransferDiscrepancyTransitInvestigation() {
   });
 }
 
-export function useCurrentAuditLogs() {
+export function useCurrentAuditLogs(branch?: string) {
   return useQuery({
-    queryKey: ["audit-logs", "current"],
-    queryFn: () => getList<AuditLog>("/audit-logs/current/"),
+    queryKey: ["audit-logs", "current", branch],
+    queryFn: () => getList<AuditLog>(`/audit-logs/current/${branch ? `?branch=${branch}` : ""}`),
   });
 }
 
