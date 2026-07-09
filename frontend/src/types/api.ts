@@ -145,10 +145,31 @@ export type AuditLog = {
   id: number;
   actor: number | null;
   actor_username: string | null;
+  actor_display: string;
   action_type: string;
   entity_name: string;
   entity_id: string;
   message: string;
+  created_at: string;
+};
+
+export type TransferDiscrepancyAction = {
+  action_type: string;
+  action_label: string;
+  target_type: string;
+  target_reference: string;
+  target_url: string;
+  discrepancy_reference: string;
+  transfer_reference: string;
+  pallet_reference: string;
+  source_branch: string;
+  destination_branch: string;
+  route: string;
+  route_label: string;
+  current_status: string;
+  current_status_label: string;
+  confirmed_shortage_quantity: string;
+  waiting_since: string;
   created_at: string;
 };
 

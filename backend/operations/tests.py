@@ -1053,6 +1053,14 @@ class ScannerReceivingWorkflowTests(APITestCase):
             format="json",
         )
 
+    def get_discrepancy_actions(self, **params):
+        return self.client.get("/api/transfer-discrepancy-actions/", params)
+
+    def action_rows(self, **params):
+        response = self.get_discrepancy_actions(**params)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        return response.data["results"]
+
     def create_acknowledged_manual_reconciliation(self):
         discrepancy = self.create_shortage_discrepancy()
         self.print_report(discrepancy)
@@ -2657,6 +2665,127 @@ class ScannerReceivingWorkflowTests(APITestCase):
         self.assertEqual(decision.outcome, TransferDiscrepancyManualReconciliationDecision.Outcome.TRANSIT_LOSS_CONFIRMED)
         self.assertEqual(decision.decision_note, "Original transit final decision.")
         self.assertEqual(AuditLog.objects.filter(message__icontains="with final outcome: Transit loss confirmed").count(), 1)
+
+    def test_discrepancy_action_queue_tracks_source_review_to_reconciliation(self):
+        discrepancy = self.create_shortage_discrepancy()
+        self.print_report(discrepancy)
+        self.confirm_shortage(discrepancy, operation_id="queue-source-shortage")
+        review = TransferDiscrepancySourceReview.objects.get(discrepancy=discrepancy)
+
+        rows = self.action_rows()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["action_type"], "begin_source_review")
+        self.assertEqual(rows[0]["action_label"], "Begin source review")
+        self.assertEqual(rows[0]["target_reference"], review.reference)
+        self.assertEqual(rows[0]["target_url"], f"/wms/source-discrepancy-reviews/{review.id}")
+        self.assertEqual(rows[0]["current_status_label"], "Pending review")
+
+        self.begin_source_review(review)
+        rows = self.action_rows()
+        self.assertEqual(rows[0]["action_type"], "complete_source_review")
+
+        self.complete_source_review(
+            review,
+            finding=TransferDiscrepancySourceReview.Finding.INCONCLUSIVE,
+            operation_id="queue-manual-review",
+        )
+        reconciliation = TransferDiscrepancyReconciliation.objects.get(discrepancy=discrepancy)
+        rows = self.action_rows()
+        self.assertEqual(rows[0]["action_type"], "acknowledge_reconciliation")
+        self.assertEqual(rows[0]["target_reference"], reconciliation.reference)
+        self.assertEqual(rows[0]["target_url"], f"/wms/discrepancy-reconciliations/{reconciliation.id}")
+
+        self.acknowledge_reconciliation(reconciliation)
+        rows = self.action_rows()
+        self.assertEqual(rows[0]["action_type"], "record_final_reconciliation_outcome")
+        self.assertEqual(rows[0]["target_type"], "reconciliation")
+
+    def test_discrepancy_action_queue_tracks_source_stock_verification_and_final_decision(self):
+        verification = self.create_source_stock_verification()
+        reconciliation = verification.reconciliation
+        item = verification.items.get(product=self.product)
+        item.target_quantity = Decimal("3")
+        item.save(update_fields=["target_quantity", "updated_at"])
+
+        rows = self.action_rows()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["action_type"], "begin_source_stock_verification")
+        self.assertEqual(rows[0]["target_reference"], verification.reference)
+
+        self.begin_source_stock_verification(verification)
+        rows = self.action_rows()
+        self.assertEqual(rows[0]["action_type"], "continue_source_stock_verification")
+
+        self.record_source_stock_found(verification, quantity="1", operation_id="queue-source-found")
+        rows = self.action_rows()
+        self.assertEqual(rows[0]["action_type"], "complete_source_search")
+
+        self.complete_source_search(verification, operation_id="queue-source-search")
+        rows = self.action_rows()
+        self.assertEqual(rows[0]["action_type"], "record_final_reconciliation_outcome")
+        self.assertEqual(rows[0]["target_reference"], reconciliation.reference)
+
+    def test_discrepancy_action_queue_tracks_transit_investigation_to_completed_exclusion(self):
+        reconciliation = self.create_acknowledged_transit_reconciliation()
+        investigation = TransferDiscrepancyTransitInvestigation.objects.get(reconciliation=reconciliation)
+
+        rows = self.action_rows()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["action_type"], "begin_transit_investigation")
+        self.assertEqual(rows[0]["target_reference"], investigation.reference)
+        self.assertEqual(rows[0]["target_url"], f"/wms/transit-investigations/{investigation.id}")
+
+        self.begin_transit_investigation(investigation)
+        rows = self.action_rows()
+        self.assertEqual(rows[0]["action_type"], "complete_transit_investigation")
+
+        self.complete_transit_investigation(investigation, operation_id="queue-transit-complete")
+        rows = self.action_rows()
+        self.assertEqual(rows[0]["action_type"], "record_final_reconciliation_outcome")
+        self.assertEqual(rows[0]["target_reference"], reconciliation.reference)
+
+        self.complete_manual_reconciliation(
+            reconciliation,
+            outcome=TransferDiscrepancyManualReconciliationDecision.Outcome.TRANSIT_LOSS_CONFIRMED,
+            note="Final transit evidence supports operational transit loss.",
+            operation_id="queue-transit-final",
+        )
+        self.assertEqual(self.action_rows(), [])
+
+    def test_discrepancy_action_queue_filters_searches_and_does_not_mutate_state(self):
+        verification = self.create_source_stock_verification()
+        reconciliation = verification.reconciliation
+        status_before = reconciliation.status
+        movement_count = StockMovement.objects.count()
+        inventory_snapshot = list(InventoryItem.objects.order_by("id").values_list("id", "quantity_on_hand"))
+
+        by_action = self.action_rows(action_type="begin_source_stock_verification")
+        by_search = self.action_rows(search=verification.reference)
+        by_branch = self.action_rows(branch=self.source_branch.code)
+
+        reconciliation.refresh_from_db()
+        self.assertEqual(len(by_action), 1)
+        self.assertEqual(len(by_search), 1)
+        self.assertEqual(len(by_branch), 1)
+        self.assertEqual(by_search[0]["discrepancy_reference"], verification.reconciliation.discrepancy.reference)
+        self.assertEqual(reconciliation.status, status_before)
+        self.assertEqual(StockMovement.objects.count(), movement_count)
+        self.assertEqual(list(InventoryItem.objects.order_by("id").values_list("id", "quantity_on_hand")), inventory_snapshot)
+
+    def test_current_events_actor_display_infers_worker_for_manual_events(self):
+        review_discrepancy = self.create_shortage_discrepancy()
+        self.print_report(review_discrepancy)
+        self.confirm_shortage(review_discrepancy, operation_id="queue-actor-shortage")
+        review = TransferDiscrepancySourceReview.objects.get(discrepancy=review_discrepancy)
+
+        self.begin_source_review(review, worker_code="DEMO")
+        response = self.client.get("/api/audit-logs/current/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        manual_event = next(event for event in response.data["results"] if "began source review" in event["message"])
+        automatic_event = next(event for event in response.data["results"] if "Source review" in event["message"] and "was created" in event["message"])
+        self.assertEqual(manual_event["actor_display"], "DEMO")
+        self.assertEqual(automatic_event["actor_display"], "System")
 
     def test_seed_demo_pallet_exists_and_seed_is_idempotent(self):
         output = StringIO()

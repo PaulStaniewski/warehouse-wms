@@ -42,7 +42,7 @@ export function CurrentEventsPage() {
             {
               key: "actor",
               header: "Actor",
-              render: (event) => event.actor_username || <span className="muted">System</span>,
+              render: (event) => event.actor_display || event.actor_username || <span className="muted">System</span>,
             },
           ]}
         />

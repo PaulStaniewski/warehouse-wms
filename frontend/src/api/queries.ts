@@ -29,6 +29,7 @@ import type {
   ScannerSessionResponse,
   ScannerTaskStartResponse,
   TransferDiscrepancy,
+  TransferDiscrepancyAction,
   TransferDiscrepancyConfirmShortageResponse,
   TransferDiscrepancyPrintResponse,
   TransferDiscrepancyRecoverResponse,
@@ -772,6 +773,26 @@ export function useTransferDiscrepancyReconciliations(status?: string, route?: s
       return getList<TransferDiscrepancyReconciliation>(
         `/transfer-discrepancy-reconciliations/${query ? `?${query}` : ""}`,
       );
+    },
+  });
+}
+
+export function useTransferDiscrepancyActions(actionType?: string, branch?: string, search?: string) {
+  return useQuery({
+    queryKey: ["transfer-discrepancy-actions", actionType, branch, search],
+    queryFn: () => {
+      const params = new URLSearchParams();
+      if (actionType) {
+        params.set("action_type", actionType);
+      }
+      if (branch) {
+        params.set("branch", branch);
+      }
+      if (search) {
+        params.set("search", search);
+      }
+      const query = params.toString();
+      return getList<TransferDiscrepancyAction>(`/transfer-discrepancy-actions/${query ? `?${query}` : ""}`);
     },
   });
 }

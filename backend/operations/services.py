@@ -114,6 +114,177 @@ def transit_investigation_next_action(status: str) -> str:
     return TRANSIT_INVESTIGATION_NEXT_ACTIONS[status]
 
 
+DISCREPANCY_ACTION_LABELS = {
+    "review_destination_shortage": "Review destination shortage",
+    "begin_source_review": "Begin source review",
+    "complete_source_review": "Complete source review",
+    "acknowledge_reconciliation": "Acknowledge reconciliation",
+    "begin_source_stock_verification": "Begin source stock verification",
+    "continue_source_stock_verification": "Continue source stock verification",
+    "complete_source_search": "Complete source search",
+    "begin_transit_investigation": "Begin transit investigation",
+    "complete_transit_investigation": "Complete transit investigation",
+    "record_final_reconciliation_outcome": "Record final reconciliation outcome",
+}
+
+
+def _action_base(discrepancy: TransferDiscrepancy) -> dict:
+    totals = get_discrepancy_investigation_totals(discrepancy)
+    return {
+        "discrepancy_reference": discrepancy.reference,
+        "transfer_reference": discrepancy.transfer.reference,
+        "pallet_reference": discrepancy.pallet.scan_code,
+        "source_branch": discrepancy.transfer.source_branch.code,
+        "destination_branch": discrepancy.transfer.destination_branch.code,
+        "confirmed_shortage_quantity": str(totals["confirmed_shortage"]),
+        "created_at": discrepancy.created_at,
+    }
+
+
+def _action_row(discrepancy: TransferDiscrepancy, action_type: str, target, target_type: str, target_url: str) -> dict:
+    return {
+        **_action_base(discrepancy),
+        "action_type": action_type,
+        "action_label": DISCREPANCY_ACTION_LABELS[action_type],
+        "target_type": target_type,
+        "target_reference": target.reference,
+        "target_url": target_url,
+        "route": getattr(target, "route", ""),
+        "route_label": target.get_route_display() if hasattr(target, "get_route_display") else "",
+        "current_status": target.status,
+        "current_status_label": target.get_status_display(),
+        "waiting_since": getattr(target, "updated_at", None) or getattr(target, "created_at", None),
+    }
+
+
+def _source_stock_action_type(verification: TransferDiscrepancySourceStockVerification) -> str:
+    if verification.status == TransferDiscrepancySourceStockVerification.Status.PENDING_VERIFICATION:
+        return "begin_source_stock_verification"
+    if verification.recoveries.exists():
+        return "complete_source_search"
+    return "continue_source_stock_verification"
+
+
+def build_transfer_discrepancy_action_queue() -> list[dict]:
+    discrepancies = (
+        TransferDiscrepancy.objects.select_related(
+            "pallet",
+            "transfer",
+            "transfer__source_branch",
+            "transfer__destination_branch",
+            "source_review",
+            "reconciliation",
+            "reconciliation__source_stock_verification",
+            "reconciliation__transit_investigation",
+            "reconciliation__manual_decision",
+        )
+        .prefetch_related("items", "reconciliation__source_stock_verification__recoveries")
+        .exclude(status=TransferDiscrepancy.Status.RESOLVED)
+        .order_by("created_at")
+    )
+    rows = []
+    for discrepancy in discrepancies:
+        reconciliation = getattr(discrepancy, "reconciliation", None)
+        if reconciliation is not None:
+            if reconciliation.status == TransferDiscrepancyReconciliation.Status.COMPLETED:
+                continue
+            if getattr(reconciliation, "manual_decision", None) is None:
+                if (
+                    reconciliation.status == TransferDiscrepancyReconciliation.Status.MANUAL_ACTION_REQUIRED
+                    or (
+                        reconciliation.route == TransferDiscrepancyReconciliation.Route.MANUAL_RECONCILIATION
+                        and reconciliation.status == TransferDiscrepancyReconciliation.Status.IN_PROGRESS
+                    )
+                ):
+                    rows.append(
+                        _action_row(
+                            discrepancy,
+                            "record_final_reconciliation_outcome",
+                            reconciliation,
+                            "reconciliation",
+                            f"/wms/discrepancy-reconciliations/{reconciliation.id}",
+                        )
+                    )
+                    continue
+            transit_investigation = getattr(reconciliation, "transit_investigation", None)
+            if transit_investigation is not None and transit_investigation.status != TransferDiscrepancyTransitInvestigation.Status.COMPLETED:
+                action_type = (
+                    "begin_transit_investigation"
+                    if transit_investigation.status == TransferDiscrepancyTransitInvestigation.Status.PENDING_INVESTIGATION
+                    else "complete_transit_investigation"
+                )
+                rows.append(
+                    _action_row(
+                        discrepancy,
+                        action_type,
+                        transit_investigation,
+                        "transit_investigation",
+                        f"/wms/transit-investigations/{transit_investigation.id}",
+                    )
+                )
+                continue
+            source_stock_verification = getattr(reconciliation, "source_stock_verification", None)
+            if (
+                source_stock_verification is not None
+                and source_stock_verification.status
+                not in [
+                    TransferDiscrepancySourceStockVerification.Status.COMPLETED,
+                    TransferDiscrepancySourceStockVerification.Status.COMPLETED_UNRESOLVED,
+                ]
+            ):
+                rows.append(
+                    _action_row(
+                        discrepancy,
+                        _source_stock_action_type(source_stock_verification),
+                        source_stock_verification,
+                        "source_stock_verification",
+                        f"/wms/source-stock-verifications/{source_stock_verification.id}",
+                    )
+                )
+                continue
+            if reconciliation.status == TransferDiscrepancyReconciliation.Status.PENDING_ACTION:
+                rows.append(
+                    _action_row(
+                        discrepancy,
+                        "acknowledge_reconciliation",
+                        reconciliation,
+                        "reconciliation",
+                        f"/wms/discrepancy-reconciliations/{reconciliation.id}",
+                    )
+                )
+                continue
+
+        source_review = getattr(discrepancy, "source_review", None)
+        if source_review is not None and source_review.status != TransferDiscrepancySourceReview.Status.COMPLETED:
+            action_type = (
+                "begin_source_review"
+                if source_review.status == TransferDiscrepancySourceReview.Status.PENDING_REVIEW
+                else "complete_source_review"
+            )
+            rows.append(
+                _action_row(
+                    discrepancy,
+                    action_type,
+                    source_review,
+                    "source_review",
+                    f"/wms/source-discrepancy-reviews/{source_review.id}",
+                )
+            )
+            continue
+
+        if discrepancy.status in [TransferDiscrepancy.Status.OPEN, TransferDiscrepancy.Status.INVESTIGATING]:
+            rows.append(
+                _action_row(
+                    discrepancy,
+                    "review_destination_shortage",
+                    discrepancy,
+                    "discrepancy",
+                    f"/wms/discrepancies/{discrepancy.id}",
+                )
+            )
+    return rows
+
+
 def ensure_reconciliation_for_source_review(source_review):
     if source_review.status != TransferDiscrepancySourceReview.Status.COMPLETED:
         raise ValueError("Source review must be completed before reconciliation.")

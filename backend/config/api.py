@@ -10,6 +10,7 @@ from operations.viewsets import (
     ReturnLineViewSet,
     RouteRunViewSet,
     StockMovementViewSet,
+    TransferDiscrepancyActionViewSet,
     TransferDiscrepancyReconciliationViewSet,
     TransferDiscrepancySourceStockVerificationViewSet,
     TransferDiscrepancySourceReviewViewSet,
@@ -33,6 +34,7 @@ router.register("return-lines", ReturnLineViewSet, basename="return-line")
 router.register("picking-tasks", PickingTaskViewSet, basename="picking-task")
 router.register("stock-movements", StockMovementViewSet, basename="stock-movement")
 router.register("audit-logs", AuditLogViewSet, basename="audit-log")
+router.register("transfer-discrepancy-actions", TransferDiscrepancyActionViewSet, basename="transfer-discrepancy-action")
 router.register("transfer-discrepancies", TransferDiscrepancyViewSet, basename="transfer-discrepancy")
 router.register(
     "transfer-discrepancy-source-reviews",

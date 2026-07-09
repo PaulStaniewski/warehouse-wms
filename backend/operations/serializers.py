@@ -1,3 +1,4 @@
+import re
 from decimal import Decimal
 
 from rest_framework import serializers
@@ -360,6 +361,15 @@ class StockMovementSerializer(serializers.ModelSerializer):
 
 class AuditLogSerializer(serializers.ModelSerializer):
     actor_username = serializers.CharField(source="actor.username", read_only=True)
+    actor_display = serializers.SerializerMethodField()
+
+    def get_actor_display(self, obj) -> str:
+        if obj.actor_id and obj.actor:
+            return obj.actor.username
+        match = re.match(r"^Worker\s+([A-Za-z0-9_.-]+)\s+", obj.message or "")
+        if match:
+            return match.group(1)
+        return "System"
 
     class Meta:
         model = AuditLog
@@ -367,12 +377,33 @@ class AuditLogSerializer(serializers.ModelSerializer):
             "id",
             "actor",
             "actor_username",
+            "actor_display",
             "action_type",
             "entity_name",
             "entity_id",
             "message",
             "created_at",
         ]
+
+
+class TransferDiscrepancyActionSerializer(serializers.Serializer):
+    action_type = serializers.CharField()
+    action_label = serializers.CharField()
+    target_type = serializers.CharField()
+    target_reference = serializers.CharField()
+    target_url = serializers.CharField()
+    discrepancy_reference = serializers.CharField()
+    transfer_reference = serializers.CharField()
+    pallet_reference = serializers.CharField()
+    source_branch = serializers.CharField()
+    destination_branch = serializers.CharField()
+    route = serializers.CharField(allow_blank=True)
+    route_label = serializers.CharField(allow_blank=True)
+    current_status = serializers.CharField()
+    current_status_label = serializers.CharField()
+    confirmed_shortage_quantity = serializers.CharField()
+    waiting_since = serializers.DateTimeField()
+    created_at = serializers.DateTimeField()
 
 
 class TransferDiscrepancyItemSerializer(serializers.ModelSerializer):

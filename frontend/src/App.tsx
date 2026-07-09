@@ -6,6 +6,7 @@ import { ArchiveEventsPage } from "./pages/ArchiveEventsPage";
 import { CurrentEventsPage } from "./pages/CurrentEventsPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { DiscrepanciesPage } from "./pages/DiscrepanciesPage";
+import { DiscrepancyActionQueuePage } from "./pages/DiscrepancyActionQueuePage";
 import { DiscrepancyDetailPage } from "./pages/DiscrepancyDetailPage";
 import { DiscrepancyReconciliationDetailPage } from "./pages/DiscrepancyReconciliationDetailPage";
 import { DiscrepancyReconciliationsPage } from "./pages/DiscrepancyReconciliationsPage";
@@ -46,6 +47,7 @@ function App() {
         <Route path="wms/locations" element={<LocationsPage />} />
         <Route path="wms/routes-monitor" element={<RouteMonitorPage />} />
         <Route path="wms/routes/archive" element={<RouteArchivePage />} />
+        <Route path="wms/discrepancy-actions" element={<DiscrepancyActionQueuePage />} />
         <Route path="wms/discrepancies" element={<DiscrepanciesPage />} />
         <Route path="wms/discrepancies/:id" element={<DiscrepancyDetailPage />} />
         <Route path="wms/discrepancies/:id/report" element={<DiscrepancyReportPage />} />

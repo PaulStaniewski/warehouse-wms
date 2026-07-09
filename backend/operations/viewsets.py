@@ -8,8 +8,9 @@ from django.utils import timezone
 from django.utils.dateparse import parse_date
 from rest_framework import status
 from rest_framework.decorators import action
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
-from rest_framework.viewsets import ReadOnlyModelViewSet
+from rest_framework.viewsets import ReadOnlyModelViewSet, ViewSet
 
 from operations.models import (
     AuditLog,
@@ -42,6 +43,7 @@ from operations.serializers import (
     ReturnLineSerializer,
     RouteRunSerializer,
     StockMovementSerializer,
+    TransferDiscrepancyActionSerializer,
     TransferDiscrepancyReconciliationSerializer,
     TransferDiscrepancySerializer,
     TransferDiscrepancySourceStockVerificationSerializer,
@@ -52,6 +54,7 @@ from operations.services import is_route_late, is_route_work_fully_prepared, rec
 from operations.services import (
     DiscrepancyLocationMissing,
     complete_source_verification_if_finished,
+    build_transfer_discrepancy_action_queue,
     discrepancy_line_remaining,
     ensure_reconciliation_for_source_review,
     ensure_source_stock_verification_for_reconciliation,
@@ -63,6 +66,12 @@ from operations.services import (
     source_verification_item_remaining,
 )
 from warehouse.models import InventoryItem, Location, Product
+
+
+class TransferDiscrepancyActionPagination(PageNumberPagination):
+    page_size = 50
+    page_size_query_param = "page_size"
+    max_page_size = 200
 
 
 def format_piece_quantity(value) -> str:
@@ -427,6 +436,46 @@ class AuditLogViewSet(ReadOnlyModelViewSet):
 
         serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data)
+
+
+class TransferDiscrepancyActionViewSet(ViewSet):
+    serializer_class = TransferDiscrepancyActionSerializer
+    pagination_class = TransferDiscrepancyActionPagination
+
+    def list(self, request):
+        rows = build_transfer_discrepancy_action_queue()
+        action_type = request.query_params.get("action_type", "").strip()
+        branch = request.query_params.get("branch", "").strip().lower()
+        search = request.query_params.get("search", "").strip().lower()
+
+        if action_type:
+            rows = [row for row in rows if row["action_type"] == action_type]
+        if branch:
+            rows = [
+                row
+                for row in rows
+                if row["source_branch"].lower() == branch or row["destination_branch"].lower() == branch
+            ]
+        if search:
+            searchable_keys = [
+                "target_reference",
+                "discrepancy_reference",
+                "transfer_reference",
+                "pallet_reference",
+                "source_branch",
+                "destination_branch",
+            ]
+            rows = [
+                row
+                for row in rows
+                if any(search in str(row.get(key, "")).lower() for key in searchable_keys)
+            ]
+
+        rows = sorted(rows, key=lambda row: row["waiting_since"] or row["created_at"])
+        paginator = self.pagination_class()
+        page = paginator.paginate_queryset(rows, request)
+        serializer = self.serializer_class(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
 
 
 class TransferDiscrepancyViewSet(ReadOnlyModelViewSet):
