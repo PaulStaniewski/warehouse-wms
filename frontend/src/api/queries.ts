@@ -3,6 +3,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { apiClient, getHealth, getList } from "./client";
 import type {
   Branch,
+  BranchMembership,
   AuditLog,
   InventoryItem,
   Location,
@@ -84,6 +85,17 @@ export function useBranches() {
   return useQuery({
     queryKey: ["branches"],
     queryFn: () => getList<Branch>("/branches/"),
+  });
+}
+
+export function useBranchMemberships(enabled = true) {
+  return useQuery({
+    enabled,
+    queryKey: ["me", "branch-memberships"],
+    queryFn: async () => {
+      const response = await apiClient.get<BranchMembership[]>("/me/branch-memberships/");
+      return response.data;
+    },
   });
 }
 

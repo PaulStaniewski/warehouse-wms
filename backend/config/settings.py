@@ -95,8 +95,11 @@ REDIS_URL = config("REDIS_URL", default="redis://redis:6379/0")
 
 REST_FRAMEWORK = {
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
-    # Development stage: API endpoints are unauthenticated until JWT is introduced.
-    "DEFAULT_AUTHENTICATION_CLASSES": [],
+    # JWT will replace this development-friendly API authentication layer later.
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "accounts.authentication.CsrfExemptSessionAuthentication",
+        "rest_framework.authentication.BasicAuthentication",
+    ],
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.AllowAny",
     ],

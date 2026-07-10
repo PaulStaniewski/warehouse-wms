@@ -19,6 +19,7 @@ import {
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 
 import { useActiveBranch } from "../api/ActiveBranchContext";
+import { useAuth } from "../api/AuthContext";
 import { useStoredScannerSession } from "../api/scannerSession";
 
 
@@ -85,8 +86,9 @@ const pageTitles: Record<string, string> = {
 
 export function AppLayout() {
   const location = useLocation();
+  const auth = useAuth();
   const scannerSession = useStoredScannerSession();
-  const { activeBranchCode, branches, setActiveBranchCode } = useActiveBranch();
+  const { activeBranchCode, activeMembership, branches, setActiveBranchCode } = useActiveBranch();
   const isScanner = location.pathname.startsWith("/scanner");
   const title = pageTitles[location.pathname] ?? (location.pathname.startsWith("/scanner") ? "Scanner" : "Warehouse WMS");
 
@@ -150,7 +152,16 @@ export function AppLayout() {
                   </option>
                 ))}
               </select>
+              {activeMembership && <span className="branch-role">Role: {activeMembership.role_label}</span>}
             </label>
+          )}
+          {!isScanner && auth.isAuthenticated && (
+            <div className="topbar-user">
+              <span>{auth.username}</span>
+              <button onClick={() => void auth.logout()} type="button">
+                Logout
+              </button>
+            </div>
           )}
         </header>
         <main className="content">

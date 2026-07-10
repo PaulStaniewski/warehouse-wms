@@ -2,6 +2,7 @@ from datetime import datetime, time
 from decimal import Decimal
 from io import StringIO
 
+from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
@@ -9,6 +10,7 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
+from accounts.models import UserBranchMembership
 from operations.models import (
     AuditLog,
     CartPickedItem,
@@ -42,6 +44,147 @@ from operations.models import (
 )
 from operations.services import recalculate_route_readiness, reconciliation_route_for_finding, route_close_result
 from warehouse.models import Branch, InventoryItem, Location, Product
+
+
+class BranchMembershipAuthorizationTests(APITestCase):
+    def setUp(self):
+        self.source_branch = Branch.objects.create(code="GDA", name="Gdansk", city="Gdansk", country="Poland")
+        self.destination_branch = Branch.objects.create(code="GDY", name="Gdynia", city="Gdynia", country="Poland")
+        self.unrelated_branch = Branch.objects.create(code="WAW", name="Warsaw", city="Warsaw", country="Poland")
+        self.destination_location = Location.objects.create(
+            branch=self.destination_branch,
+            code="A-01-01",
+            name="A-01-01",
+            location_type=Location.LocationType.STORAGE,
+        )
+        self.unrelated_location = Location.objects.create(
+            branch=self.unrelated_branch,
+            code="W-01-01",
+            name="W-01-01",
+            location_type=Location.LocationType.STORAGE,
+        )
+        User = get_user_model()
+        self.gdy_worker = User.objects.create_user(username="GDY_WORKER", password="demo12345")
+        self.gdy_leader = User.objects.create_user(username="GDY_LEADER", password="demo12345")
+        self.waw_worker = User.objects.create_user(username="WAW_WORKER", password="demo12345")
+        UserBranchMembership.objects.create(
+            user=self.gdy_worker,
+            branch=self.destination_branch,
+            role=UserBranchMembership.Role.WORKER,
+        )
+        UserBranchMembership.objects.create(
+            user=self.gdy_leader,
+            branch=self.destination_branch,
+            role=UserBranchMembership.Role.LEADER,
+        )
+        UserBranchMembership.objects.create(
+            user=self.waw_worker,
+            branch=self.unrelated_branch,
+            role=UserBranchMembership.Role.WORKER,
+        )
+
+    def create_discrepancy_with_manual_reconciliation(self):
+        transfer = InterBranchTransfer.objects.create(
+            reference="IBT-AUTH-001",
+            source_branch=self.source_branch,
+            destination_branch=self.destination_branch,
+            status=InterBranchTransfer.Status.CLOSED_WITH_DISCREPANCY,
+        )
+        pallet = TransferPallet.objects.create(
+            transfer=transfer,
+            scan_code="PAL-AUTH-001",
+            status=TransferPallet.Status.CLOSED_WITH_DISCREPANCY,
+        )
+        discrepancy = TransferDiscrepancy.objects.create(
+            reference="DISC-AUTH-001",
+            pallet=pallet,
+            transfer=transfer,
+            status=TransferDiscrepancy.Status.CONFIRMED_SHORTAGE,
+        )
+        source_review = TransferDiscrepancySourceReview.objects.create(
+            discrepancy=discrepancy,
+            source_branch=self.source_branch,
+            status=TransferDiscrepancySourceReview.Status.COMPLETED,
+            finding=TransferDiscrepancySourceReview.Finding.INCONCLUSIVE,
+            completed_at=timezone.now(),
+            completed_by_worker_code="OTHER_USER",
+        )
+        return TransferDiscrepancyReconciliation.objects.create(
+            discrepancy=discrepancy,
+            source_review=source_review,
+            route=TransferDiscrepancyReconciliation.Route.MANUAL_RECONCILIATION,
+            status=TransferDiscrepancyReconciliation.Status.IN_PROGRESS,
+            acknowledged_at=timezone.now(),
+        )
+
+    def test_me_branch_memberships_returns_current_user_allowed_branches(self):
+        self.client.login(username="GDY_WORKER", password="demo12345")
+
+        response = self.client.get("/api/me/branch-memberships/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data[0]["branch_code"], "GDY")
+        self.assertEqual(response.data[0]["role"], "worker")
+
+    def test_branch_scoped_locations_reject_unrelated_authenticated_branch(self):
+        self.client.force_authenticate(self.gdy_worker)
+
+        allowed = self.client.get("/api/locations/", {"branch": "GDY"})
+        forbidden = self.client.get("/api/locations/", {"branch": "WAW"})
+
+        self.assertEqual(allowed.status_code, status.HTTP_200_OK)
+        self.assertEqual([row["branch_code"] for row in allowed.data["results"]], ["GDY"])
+        self.assertEqual(forbidden.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_action_queue_hides_leader_only_final_action_from_worker(self):
+        self.create_discrepancy_with_manual_reconciliation()
+
+        self.client.force_authenticate(self.gdy_worker)
+        worker_response = self.client.get("/api/transfer-discrepancy-actions/", {"branch": "GDY"})
+        self.client.force_authenticate(self.gdy_leader)
+        leader_response = self.client.get("/api/transfer-discrepancy-actions/", {"branch": "GDY"})
+
+        self.assertEqual(worker_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(leader_response.status_code, status.HTTP_200_OK)
+        self.assertFalse(
+            any(row["action_type"] == "record_final_reconciliation_outcome" for row in worker_response.data["results"])
+        )
+        self.assertTrue(
+            any(row["action_type"] == "record_final_reconciliation_outcome" for row in leader_response.data["results"])
+        )
+
+    def test_worker_cannot_complete_leader_only_manual_reconciliation(self):
+        reconciliation = self.create_discrepancy_with_manual_reconciliation()
+        payload = {
+            "client_operation_id": "auth-final-1",
+            "decision_note": "Leader decision note.",
+            "outcome": TransferDiscrepancyManualReconciliationDecision.Outcome.ADMINISTRATIVE_ERROR,
+            "worker_code": "SPOOFED",
+        }
+
+        self.client.force_authenticate(self.gdy_worker)
+        worker_response = self.client.post(
+            f"/api/transfer-discrepancy-reconciliations/{reconciliation.id}/complete-manual/",
+            payload,
+            format="json",
+        )
+        self.client.force_authenticate(self.gdy_leader)
+        leader_response = self.client.post(
+            f"/api/transfer-discrepancy-reconciliations/{reconciliation.id}/complete-manual/",
+            {**payload, "client_operation_id": "auth-final-2"},
+            format="json",
+        )
+
+        self.assertEqual(worker_response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(leader_response.status_code, status.HTTP_200_OK)
+        reconciliation.refresh_from_db()
+        self.assertEqual(reconciliation.completed_by_worker_code, "GDY_LEADER")
+        audit_log = AuditLog.objects.filter(
+            entity_name="TransferDiscrepancyReconciliation",
+            entity_id=str(reconciliation.id),
+        ).latest("created_at")
+        self.assertEqual(audit_log.actor, self.gdy_leader)
 
 
 class PickingTaskCompleteActionTests(APITestCase):

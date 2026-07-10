@@ -1,6 +1,7 @@
 import django_filters
 from rest_framework.viewsets import ReadOnlyModelViewSet
 
+from accounts.authorization import branch_codes_filter, branch_ids_filter, branch_queryset_for_user
 from warehouse.models import Branch, InventoryItem, Location, Product
 from warehouse.serializers import (
     BranchSerializer,
@@ -16,6 +17,11 @@ class BranchViewSet(ReadOnlyModelViewSet):
     filterset_fields = ["code", "city", "is_active"]
     search_fields = ["code", "name", "city", "country"]
     ordering_fields = ["code", "name", "city", "created_at", "updated_at"]
+
+    def get_queryset(self):
+        if self.request.user.is_authenticated:
+            return branch_queryset_for_user(self.request.user)
+        return super().get_queryset()
 
 
 class BranchCodeFilterSet(django_filters.FilterSet):
@@ -39,6 +45,15 @@ class LocationViewSet(ReadOnlyModelViewSet):
     filterset_class = LocationFilter
     search_fields = ["code", "name", "branch__code", "branch__name"]
     ordering_fields = ["branch__code", "code", "location_type", "created_at", "updated_at"]
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        if not self.request.user.is_authenticated:
+            return queryset
+        requested = self.request.query_params.get("branch", "").strip()
+        if requested.isdigit() or not requested:
+            return queryset.filter(branch_id__in=branch_ids_filter(self.request.user, requested))
+        return queryset.filter(branch__code__in=branch_codes_filter(self.request.user, requested))
 
 
 class ProductViewSet(ReadOnlyModelViewSet):
@@ -67,3 +82,12 @@ class InventoryItemViewSet(ReadOnlyModelViewSet):
         "quantity_on_hand",
         "updated_at",
     ]
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        if not self.request.user.is_authenticated:
+            return queryset
+        requested = self.request.query_params.get("branch", "").strip()
+        if requested.isdigit() or not requested:
+            return queryset.filter(branch_id__in=branch_ids_filter(self.request.user, requested))
+        return queryset.filter(branch__code__in=branch_codes_filter(self.request.user, requested))

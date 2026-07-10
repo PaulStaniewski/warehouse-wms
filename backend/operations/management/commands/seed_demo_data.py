@@ -1,10 +1,12 @@
 from datetime import datetime, timedelta
 from decimal import Decimal
 
+from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand
 from django.db import models, transaction
 from django.utils import timezone
 
+from accounts.models import UserBranchMembership
 from operations.models import (
     AuditLog,
     CartPickedItem,
@@ -48,6 +50,7 @@ class Command(BaseCommand):
         with transaction.atomic():
             self.cleanup_demo_workflow()
             branches = self.create_branches()
+            demo_users = self.create_demo_users(branches)
             locations = self.create_locations(branches)
             products = self.create_products()
             inventory_items = self.create_inventory_items(branches, locations, products)
@@ -63,6 +66,7 @@ class Command(BaseCommand):
 
         self.stdout.write(self.style.SUCCESS("Demo warehouse data seeded successfully."))
         self.stdout.write(f"Branches: {len(branches)}")
+        self.stdout.write(f"Demo users: {len(demo_users)}")
         self.stdout.write(f"Locations: {len(locations)}")
         self.stdout.write(f"Products: {len(products)}")
         self.stdout.write(f"Inventory items: {len(inventory_items)}")
@@ -76,6 +80,7 @@ class Command(BaseCommand):
         self.stdout.write(f"Transfer pallets: {len(transfer_pallets)}")
         self.stdout.write(f"Stock movements: {len(stock_movements)}")
         self.stdout.write(f"Audit logs: {len(audit_logs)}")
+        self.stdout.write("Demo password: demo12345")
 
     def cleanup_demo_workflow(self):
         demo_cart_codes = ["WOZEK-01", "WOZEK-02", "WOZEK-03"]
@@ -162,6 +167,36 @@ class Command(BaseCommand):
             )
             branches[branch.code] = branch
         return branches
+
+    def create_demo_users(self, branches):
+        user_data = [
+            ("GDY_WORKER", "GDY", UserBranchMembership.Role.WORKER),
+            ("GDY_LEADER", "GDY", UserBranchMembership.Role.LEADER),
+            ("GDA_WORKER", "GDA", UserBranchMembership.Role.WORKER),
+            ("GDA_LEADER", "GDA", UserBranchMembership.Role.LEADER),
+            ("DEMO", "GDY", UserBranchMembership.Role.LEADER),
+            ("DEMO", "GDA", UserBranchMembership.Role.LEADER),
+        ]
+        users = {}
+        User = get_user_model()
+        for username, branch_code, role in user_data:
+            user, created = User.objects.get_or_create(
+                username=username,
+                defaults={
+                    "is_active": True,
+                    "email": f"{username.lower()}@example.local",
+                },
+            )
+            if created or not user.has_usable_password():
+                user.set_password("demo12345")
+                user.save(update_fields=["password"])
+            UserBranchMembership.objects.update_or_create(
+                user=user,
+                branch=branches[branch_code],
+                defaults={"role": role},
+            )
+            users[username] = user
+        return users
 
     def create_locations(self, branches):
         location_data = [

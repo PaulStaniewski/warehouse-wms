@@ -1,5 +1,6 @@
 from rest_framework.routers import DefaultRouter
 
+from accounts.viewsets import AuthLoginView, AuthLogoutView, AuthSessionView, CurrentUserBranchMembershipsView
 from operations.viewsets import (
     AuditLogViewSet,
     DeliveryRouteViewSet,
@@ -56,3 +57,8 @@ router.register(
     TransferDiscrepancyTransitInvestigationViewSet,
     basename="transfer-discrepancy-transit-investigation",
 )
+
+me_branch_memberships = CurrentUserBranchMembershipsView.as_view()
+auth_session = AuthSessionView.as_view()
+auth_login = AuthLoginView.as_view()
+auth_logout = AuthLogoutView.as_view()

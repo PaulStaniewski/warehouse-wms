@@ -12,6 +12,13 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.viewsets import ReadOnlyModelViewSet, ViewSet
 
+from accounts.authorization import (
+    branch_codes_filter,
+    branch_ids_filter,
+    filter_rows_for_user,
+    require_any_branch_access,
+    require_branch_access,
+)
 from operations.models import (
     AuditLog,
     DeliveryRoute,
@@ -88,6 +95,41 @@ def unit_label(value, singular="unit", plural="units") -> str:
     return singular if Decimal(value) == 1 else plural
 
 
+def actor_code(request) -> str:
+    if request.user and request.user.is_authenticated:
+        return request.user.username
+    return str(request.data.get("worker_code", "")).strip() or "DEMO"
+
+
+def audit_actor(request):
+    return request.user if request.user and request.user.is_authenticated else None
+
+
+def filter_branch_queryset(queryset, request, field_prefix: str, param_name: str = "branch"):
+    if not request.user.is_authenticated:
+        return queryset
+    requested = request.query_params.get(param_name, "").strip()
+    field = f"{field_prefix}__id" if field_prefix else "id"
+    code_field = f"{field_prefix}__code" if field_prefix else "code"
+    if requested.isdigit() or not requested:
+        return queryset.filter(**{f"{field}__in": branch_ids_filter(request.user, requested)})
+    return queryset.filter(**{f"{code_field}__in": branch_codes_filter(request.user, requested)})
+
+
+def filter_dual_branch_queryset(queryset, request, source_path: str, destination_path: str):
+    if not request.user.is_authenticated:
+        return queryset
+    requested = request.query_params.get("branch", "").strip()
+    if requested:
+        codes = branch_codes_filter(request.user, requested)
+    else:
+        codes = branch_codes_filter(request.user)
+    return queryset.filter(
+        models.Q(**{f"{source_path}__code__in": codes})
+        | models.Q(**{f"{destination_path}__code__in": codes})
+    ).distinct()
+
+
 class AuditLogFilter(django_filters.FilterSet):
     action = django_filters.CharFilter(field_name="action_type")
 
@@ -111,6 +153,9 @@ class DeliveryRouteViewSet(ReadOnlyModelViewSet):
     filterset_fields = ["branch", "code", "is_active"]
     search_fields = ["code", "name", "branch__code", "branch__name"]
     ordering_fields = ["branch__code", "code", "name", "created_at", "updated_at"]
+
+    def get_queryset(self):
+        return filter_branch_queryset(super().get_queryset(), self.request, "branch")
 
 
 class OrderLineFilter(django_filters.FilterSet):
@@ -138,6 +183,7 @@ class RouteRunViewSet(ReadOnlyModelViewSet):
 
     def get_queryset(self):
         queryset = super().get_queryset()
+        queryset = filter_branch_queryset(queryset, self.request, "route__branch")
         if self.action == "list":
             return queryset.exclude(status=RouteRun.Status.CLOSED)
         return queryset
@@ -168,6 +214,8 @@ class RouteRunViewSet(ReadOnlyModelViewSet):
     @action(detail=True, methods=["post"], url_path="print-documents")
     def print_documents(self, request, pk=None):
         route_run = self.get_object()
+        if request.user.is_authenticated:
+            require_branch_access(request.user, route_run.route.branch)
         recalculate_route_readiness(route_run)
         route_run.refresh_from_db()
 
@@ -181,6 +229,7 @@ class RouteRunViewSet(ReadOnlyModelViewSet):
         route_run.documents_printed_at = timezone.now()
         route_run.save(update_fields=["documents_printed_at", "updated_at"])
         AuditLog.objects.create(
+            actor=audit_actor(request),
             action_type=AuditLog.ActionType.UPDATE,
             entity_name="RouteRun",
             entity_id=str(route_run.id),
@@ -196,6 +245,8 @@ class RouteRunViewSet(ReadOnlyModelViewSet):
     @action(detail=True, methods=["post"])
     def close(self, request, pk=None):
         route_run = self.get_object()
+        if request.user.is_authenticated:
+            require_branch_access(request.user, route_run.route.branch)
         recalculate_route_readiness(route_run)
         route_run.refresh_from_db()
 
@@ -213,6 +264,7 @@ class RouteRunViewSet(ReadOnlyModelViewSet):
         route_run.closed_at = timezone.now()
         route_run.save(update_fields=["status", "closed_at", "updated_at"])
         AuditLog.objects.create(
+            actor=audit_actor(request),
             action_type=AuditLog.ActionType.STATUS_CHANGE,
             entity_name="RouteRun",
             entity_id=str(route_run.id),
@@ -231,7 +283,7 @@ class OrderViewSet(ReadOnlyModelViewSet):
     ordering_fields = ["external_reference", "status", "requested_ship_date", "created_at", "updated_at"]
 
     def get_queryset(self):
-        queryset = super().get_queryset()
+        queryset = filter_branch_queryset(super().get_queryset(), self.request, "branch")
         branch = self.request.query_params.get("branch", "").strip()
         if branch:
             if branch.isdigit():
@@ -248,6 +300,9 @@ class OrderLineViewSet(ReadOnlyModelViewSet):
     search_fields = ["order__external_reference", "product__sku", "product__name", "order__route_run__route__code"]
     ordering_fields = ["order", "line_number", "created_at", "updated_at"]
 
+    def get_queryset(self):
+        return filter_branch_queryset(super().get_queryset(), self.request, "order__branch")
+
 
 class ReturnBatchViewSet(ReadOnlyModelViewSet):
     queryset = ReturnBatch.objects.select_related("branch")
@@ -256,6 +311,9 @@ class ReturnBatchViewSet(ReadOnlyModelViewSet):
     search_fields = ["reference", "branch__code"]
     ordering_fields = ["reference", "status", "received_at", "created_at", "updated_at"]
 
+    def get_queryset(self):
+        return filter_branch_queryset(super().get_queryset(), self.request, "branch")
+
 
 class ReturnLineViewSet(ReadOnlyModelViewSet):
     queryset = ReturnLine.objects.select_related("return_batch", "product")
@@ -263,6 +321,9 @@ class ReturnLineViewSet(ReadOnlyModelViewSet):
     filterset_fields = ["return_batch", "product"]
     search_fields = ["return_batch__reference", "product__sku", "product__name"]
     ordering_fields = ["return_batch", "line_number", "created_at", "updated_at"]
+
+    def get_queryset(self):
+        return filter_branch_queryset(super().get_queryset(), self.request, "return_batch__branch")
 
 
 class PickingTaskViewSet(ReadOnlyModelViewSet):
@@ -282,6 +343,9 @@ class PickingTaskViewSet(ReadOnlyModelViewSet):
         "assigned_to__username",
     ]
     ordering_fields = ["status", "created_at", "updated_at"]
+
+    def get_queryset(self):
+        return filter_branch_queryset(super().get_queryset(), self.request, "branch")
 
     @action(detail=True, methods=["post"])
     def complete(self, request, pk=None):
@@ -398,6 +462,9 @@ class StockMovementViewSet(ReadOnlyModelViewSet):
     search_fields = ["product__sku", "product__name", "reference", "branch__code"]
     ordering_fields = ["movement_type", "quantity", "created_at", "updated_at"]
 
+    def get_queryset(self):
+        return filter_branch_queryset(super().get_queryset(), self.request, "branch")
+
 
 class AuditLogViewSet(ReadOnlyModelViewSet):
     queryset = AuditLog.objects.select_related("actor")
@@ -467,6 +534,12 @@ class AuditLogViewSet(ReadOnlyModelViewSet):
 
     def _apply_branch_visibility(self, queryset, request):
         branch = request.query_params.get("branch", "").strip()
+        if request.user.is_authenticated:
+            if branch:
+                branch_codes_filter(request.user, branch)
+            else:
+                allowed = {code.lower() for code in branch_codes_filter(request.user)}
+                return [event for event in queryset if any(self._event_visible_for_branch(event, code) for code in allowed)]
         if not branch:
             return queryset
         return [event for event in queryset if self._event_visible_for_branch(event, branch)]
@@ -528,6 +601,10 @@ class TransferDiscrepancyActionViewSet(ViewSet):
         branch = request.query_params.get("branch", "").strip().lower()
         search = request.query_params.get("search", "").strip().lower()
 
+        if request.user.is_authenticated:
+            rows = filter_rows_for_user(rows, request.user, branch)
+            branch = ""
+
         if action_type:
             rows = [row for row in rows if row["action_type"] == action_type]
         if branch:
@@ -581,6 +658,13 @@ class TransferDiscrepancyViewSet(ReadOnlyModelViewSet):
 
     def get_queryset(self):
         queryset = super().get_queryset()
+        if self.request.user.is_authenticated:
+            queryset = filter_dual_branch_queryset(
+                queryset,
+                self.request,
+                "transfer__source_branch",
+                "transfer__destination_branch",
+            )
         branch = self.request.query_params.get("branch", "").strip()
         if branch:
             queryset = queryset.filter(transfer__destination_branch__code__iexact=branch)
@@ -625,7 +709,7 @@ class TransferDiscrepancyViewSet(ReadOnlyModelViewSet):
     @action(detail=True, methods=["post"], url_path="print-report")
     def print_report(self, request, pk=None):
         printer_code = str(request.data.get("printer_code", "")).strip()
-        worker_code = str(request.data.get("worker_code", "")).strip() or "DEMO"
+        worker_code = actor_code(request)
         if not printer_code:
             return Response({"detail": "printer_code is required."}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -635,6 +719,8 @@ class TransferDiscrepancyViewSet(ReadOnlyModelViewSet):
                 .select_related("pallet", "transfer", "transfer__destination_branch")
                 .get(pk=pk)
             )
+            if request.user.is_authenticated:
+                require_branch_access(request.user, discrepancy.transfer.destination_branch)
             items = list(
                 discrepancy.items.select_for_update()
                 .select_related("product")
@@ -677,7 +763,7 @@ class TransferDiscrepancyViewSet(ReadOnlyModelViewSet):
                         movement_type=StockMovement.MovementType.RECEIVING_DISCREPANCY,
                         quantity=unposted,
                         reference=discrepancy.reference,
-                        performed_by=None,
+                        performed_by=audit_actor(request),
                     )
                     posted_quantity += unposted
 
@@ -685,6 +771,7 @@ class TransferDiscrepancyViewSet(ReadOnlyModelViewSet):
                 discrepancy.shortage_posted_at = now
                 discrepancy.status = TransferDiscrepancy.Status.INVESTIGATING
                 AuditLog.objects.create(
+                    actor=audit_actor(request),
                     action_type=AuditLog.ActionType.UPDATE,
                     entity_name="TransferDiscrepancy",
                     entity_id=str(discrepancy.id),
@@ -704,6 +791,7 @@ class TransferDiscrepancyViewSet(ReadOnlyModelViewSet):
                     )
             else:
                 AuditLog.objects.create(
+                    actor=audit_actor(request),
                     action_type=AuditLog.ActionType.UPDATE,
                     entity_name="TransferDiscrepancy",
                     entity_id=str(discrepancy.id),
@@ -738,7 +826,7 @@ class TransferDiscrepancyViewSet(ReadOnlyModelViewSet):
     def recover_item(self, request, pk=None):
         product_code = str(request.data.get("product_code", "")).strip()
         destination_location_code = str(request.data.get("destination_location_code", "")).strip()
-        worker_code = str(request.data.get("worker_code", "")).strip() or "DEMO"
+        worker_code = actor_code(request)
         client_operation_id = str(request.data.get("client_operation_id", "")).strip()
         raw_quantity = str(request.data.get("quantity", "1")).strip()
 
@@ -773,6 +861,8 @@ class TransferDiscrepancyViewSet(ReadOnlyModelViewSet):
                 .select_related("transfer", "transfer__destination_branch")
                 .get(pk=pk)
             )
+            if request.user.is_authenticated:
+                require_branch_access(request.user, discrepancy.transfer.destination_branch)
             if discrepancy.status != TransferDiscrepancy.Status.INVESTIGATING:
                 return Response(
                     {"detail": "Recovery is allowed only for investigating discrepancies."},
@@ -862,7 +952,7 @@ class TransferDiscrepancyViewSet(ReadOnlyModelViewSet):
                 movement_type=StockMovement.MovementType.DISCREPANCY_RECOVERY,
                 quantity=quantity,
                 reference=discrepancy.reference,
-                performed_by=None,
+                performed_by=audit_actor(request),
             )
             recovery = TransferDiscrepancyRecovery.objects.create(
                 discrepancy=discrepancy,
@@ -884,6 +974,7 @@ class TransferDiscrepancyViewSet(ReadOnlyModelViewSet):
             unit_word = unit_label(quantity)
             move_word = "it" if quantity == 1 else "them"
             AuditLog.objects.create(
+                actor=audit_actor(request),
                 action_type=AuditLog.ActionType.UPDATE,
                 entity_name="TransferDiscrepancy",
                 entity_id=str(discrepancy.id),
@@ -921,7 +1012,7 @@ class TransferDiscrepancyViewSet(ReadOnlyModelViewSet):
     @action(detail=True, methods=["post"], url_path="confirm-shortage")
     def confirm_shortage(self, request, pk=None):
         product_code = str(request.data.get("product_code", "")).strip()
-        worker_code = str(request.data.get("worker_code", "")).strip() or "DEMO"
+        worker_code = actor_code(request)
         client_operation_id = str(request.data.get("client_operation_id", "")).strip()
         raw_quantity = str(request.data.get("quantity", "1")).strip()
 
@@ -959,6 +1050,17 @@ class TransferDiscrepancyViewSet(ReadOnlyModelViewSet):
                 .select_related("transfer", "transfer__destination_branch")
                 .get(pk=pk)
             )
+            if request.user.is_authenticated:
+                require_branch_access(
+                    request.user,
+                    discrepancy.transfer.destination_branch,
+                    leader_required=True,
+                )
+                if discrepancy.created_by_worker_code == request.user.username:
+                    return Response(
+                        {"detail": "A different leader must confirm the destination shortage."},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
             if discrepancy.status != TransferDiscrepancy.Status.INVESTIGATING:
                 return Response(
                     {"detail": "Shortage confirmation is allowed only for investigating discrepancies."},
@@ -1022,7 +1124,7 @@ class TransferDiscrepancyViewSet(ReadOnlyModelViewSet):
                 movement_type=StockMovement.MovementType.DISCREPANCY_SHORTAGE,
                 quantity=quantity,
                 reference=discrepancy.reference,
-                performed_by=None,
+                performed_by=audit_actor(request),
             )
             confirmation = TransferDiscrepancyShortageConfirmation.objects.create(
                 discrepancy=discrepancy,
@@ -1043,6 +1145,7 @@ class TransferDiscrepancyViewSet(ReadOnlyModelViewSet):
             unit_word = unit_label(quantity)
             remove_word = "it" if quantity == 1 else "them"
             AuditLog.objects.create(
+                actor=audit_actor(request),
                 action_type=AuditLog.ActionType.UPDATE,
                 entity_name="TransferDiscrepancy",
                 entity_id=str(discrepancy.id),
@@ -1118,6 +1221,9 @@ class TransferDiscrepancySourceReviewViewSet(ReadOnlyModelViewSet):
     ]
     ordering_fields = ["reference", "status", "created_at", "updated_at", "completed_at"]
 
+    def get_queryset(self):
+        return filter_branch_queryset(super().get_queryset(), self.request, "source_branch")
+
     def _validate_confirmed_shortage_discrepancy(self, review):
         if review.discrepancy.status != TransferDiscrepancy.Status.CONFIRMED_SHORTAGE:
             return Response(
@@ -1128,13 +1234,15 @@ class TransferDiscrepancySourceReviewViewSet(ReadOnlyModelViewSet):
 
     @action(detail=True, methods=["post"], url_path="begin")
     def begin(self, request, pk=None):
-        worker_code = str(request.data.get("worker_code", "")).strip() or "DEMO"
+        worker_code = actor_code(request)
         with transaction.atomic():
             review = (
                 TransferDiscrepancySourceReview.objects.select_for_update()
                 .select_related("discrepancy")
                 .get(pk=pk)
             )
+            if request.user.is_authenticated:
+                require_branch_access(request.user, review.source_branch)
             validation = self._validate_confirmed_shortage_discrepancy(review)
             if validation is not None:
                 return validation
@@ -1148,6 +1256,7 @@ class TransferDiscrepancySourceReviewViewSet(ReadOnlyModelViewSet):
             review.started_by_worker_code = worker_code
             review.save(update_fields=["status", "started_at", "started_by_worker_code", "updated_at"])
             AuditLog.objects.create(
+                actor=audit_actor(request),
                 action_type=AuditLog.ActionType.UPDATE,
                 entity_name="TransferDiscrepancySourceReview",
                 entity_id=str(review.id),
@@ -1160,7 +1269,7 @@ class TransferDiscrepancySourceReviewViewSet(ReadOnlyModelViewSet):
     def complete(self, request, pk=None):
         finding = str(request.data.get("finding", "")).strip()
         finding_note = str(request.data.get("finding_note", "")).strip()
-        worker_code = str(request.data.get("worker_code", "")).strip() or "DEMO"
+        worker_code = actor_code(request)
         client_operation_id = str(request.data.get("client_operation_id", "")).strip()
 
         if not client_operation_id:
@@ -1184,6 +1293,8 @@ class TransferDiscrepancySourceReviewViewSet(ReadOnlyModelViewSet):
                 .select_related("discrepancy")
                 .get(pk=pk)
             )
+            if request.user.is_authenticated:
+                require_branch_access(request.user, review.source_branch)
             validation = self._validate_confirmed_shortage_discrepancy(review)
             if validation is not None:
                 return validation
@@ -1211,6 +1322,7 @@ class TransferDiscrepancySourceReviewViewSet(ReadOnlyModelViewSet):
             )
             reconciliation, _ = ensure_reconciliation_for_source_review(review)
             AuditLog.objects.create(
+                actor=audit_actor(request),
                 action_type=AuditLog.ActionType.STATUS_CHANGE,
                 entity_name="TransferDiscrepancySourceReview",
                 entity_id=str(review.id),
@@ -1277,15 +1389,31 @@ class TransferDiscrepancyReconciliationViewSet(ReadOnlyModelViewSet):
     ]
     ordering_fields = ["reference", "route", "status", "created_at", "updated_at", "acknowledged_at"]
 
+    def get_queryset(self):
+        return filter_dual_branch_queryset(
+            super().get_queryset(),
+            self.request,
+            "discrepancy__transfer__source_branch",
+            "discrepancy__transfer__destination_branch",
+        )
+
     @action(detail=True, methods=["post"], url_path="acknowledge")
     def acknowledge(self, request, pk=None):
-        worker_code = str(request.data.get("worker_code", "")).strip() or "DEMO"
+        worker_code = actor_code(request)
         with transaction.atomic():
             reconciliation = (
                 TransferDiscrepancyReconciliation.objects.select_for_update()
                 .select_related("discrepancy", "source_review")
                 .get(pk=pk)
             )
+            if request.user.is_authenticated:
+                require_any_branch_access(
+                    request.user,
+                    [
+                        reconciliation.discrepancy.transfer.source_branch,
+                        reconciliation.discrepancy.transfer.destination_branch,
+                    ],
+                )
             if reconciliation.source_review.status != TransferDiscrepancySourceReview.Status.COMPLETED:
                 return Response(
                     {"detail": "Reconciliation requires a completed source review."},
@@ -1319,6 +1447,7 @@ class TransferDiscrepancyReconciliationViewSet(ReadOnlyModelViewSet):
             verification, verification_created = ensure_source_stock_verification_for_reconciliation(reconciliation)
             investigation, investigation_created = ensure_transit_investigation_for_reconciliation(reconciliation)
             AuditLog.objects.create(
+                actor=audit_actor(request),
                 action_type=AuditLog.ActionType.UPDATE,
                 entity_name="TransferDiscrepancyReconciliation",
                 entity_id=str(reconciliation.id),
@@ -1355,7 +1484,7 @@ class TransferDiscrepancyReconciliationViewSet(ReadOnlyModelViewSet):
     def complete_manual(self, request, pk=None):
         outcome = str(request.data.get("outcome", "")).strip()
         decision_note = str(request.data.get("decision_note", "")).strip()
-        worker_code = str(request.data.get("worker_code", "")).strip() or "DEMO"
+        worker_code = actor_code(request)
         client_operation_id = str(request.data.get("client_operation_id", "")).strip()
 
         if not client_operation_id:
@@ -1413,6 +1542,15 @@ class TransferDiscrepancyReconciliationViewSet(ReadOnlyModelViewSet):
                 )
                 .get(pk=pk)
             )
+            if request.user.is_authenticated:
+                require_any_branch_access(
+                    request.user,
+                    [
+                        reconciliation.discrepancy.transfer.source_branch,
+                        reconciliation.discrepancy.transfer.destination_branch,
+                    ],
+                    leader_required=True,
+                )
             if TransferDiscrepancyManualReconciliationDecision.objects.filter(
                 reconciliation=reconciliation,
                 client_operation_id=client_operation_id,
@@ -1472,6 +1610,14 @@ class TransferDiscrepancyReconciliationViewSet(ReadOnlyModelViewSet):
                         {"detail": "Source stock verification has no unresolved quantity."},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
+                if (
+                    request.user.is_authenticated
+                    and verification.search_completed_by_worker_code == request.user.username
+                ):
+                    return Response(
+                        {"detail": "A different leader must record the final reconciliation outcome."},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
             elif reconciliation.route == TransferDiscrepancyReconciliation.Route.TRANSIT_INVESTIGATION:
                 if outcome not in transit_outcomes:
                     return Response(
@@ -1508,6 +1654,14 @@ class TransferDiscrepancyReconciliationViewSet(ReadOnlyModelViewSet):
                         {"detail": "Transit investigation does not match this reconciliation."},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
+                if (
+                    request.user.is_authenticated
+                    and investigation.completed_by_worker_code == request.user.username
+                ):
+                    return Response(
+                        {"detail": "A different leader must record the final reconciliation outcome."},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
             elif reconciliation.route == TransferDiscrepancyReconciliation.Route.MANUAL_RECONCILIATION:
                 if outcome not in original_manual_outcomes:
                     return Response(
@@ -1518,6 +1672,14 @@ class TransferDiscrepancyReconciliationViewSet(ReadOnlyModelViewSet):
                     return Response(
                         {"detail": "Manual reconciliation must be in progress before completion."},
                         status=status.HTTP_400_BAD_REQUEST,
+                    )
+                if (
+                    request.user.is_authenticated
+                    and reconciliation.source_review.completed_by_worker_code == request.user.username
+                ):
+                    return Response(
+                        {"detail": "A different leader must record the final reconciliation outcome."},
+                        status=status.HTTP_403_FORBIDDEN,
                     )
             else:
                 return Response(
@@ -1539,6 +1701,7 @@ class TransferDiscrepancyReconciliationViewSet(ReadOnlyModelViewSet):
             reconciliation.completed_by_worker_code = worker_code
             reconciliation.save(update_fields=["status", "completed_at", "completed_by_worker_code", "updated_at"])
             AuditLog.objects.create(
+                actor=audit_actor(request),
                 action_type=AuditLog.ActionType.STATUS_CHANGE,
                 entity_name="TransferDiscrepancyReconciliation",
                 entity_id=str(reconciliation.id),
@@ -1631,6 +1794,14 @@ class TransferDiscrepancyTransitInvestigationViewSet(ReadOnlyModelViewSet):
     ]
     ordering_fields = ["reference", "status", "finding", "created_at", "updated_at", "completed_at"]
 
+    def get_queryset(self):
+        return filter_dual_branch_queryset(
+            super().get_queryset(),
+            self.request,
+            "reconciliation__discrepancy__transfer__source_branch",
+            "reconciliation__discrepancy__transfer__destination_branch",
+        )
+
     def _validate_transit_workflow(self, investigation):
         reconciliation = investigation.reconciliation
         if reconciliation.route != TransferDiscrepancyReconciliation.Route.TRANSIT_INVESTIGATION:
@@ -1654,13 +1825,16 @@ class TransferDiscrepancyTransitInvestigationViewSet(ReadOnlyModelViewSet):
 
     @action(detail=True, methods=["post"], url_path="begin")
     def begin(self, request, pk=None):
-        worker_code = str(request.data.get("worker_code", "")).strip() or "DEMO"
+        worker_code = actor_code(request)
         with transaction.atomic():
             investigation = (
                 TransferDiscrepancyTransitInvestigation.objects.select_for_update()
                 .select_related("reconciliation", "reconciliation__source_review", "reconciliation__discrepancy")
                 .get(pk=pk)
             )
+            if request.user.is_authenticated:
+                transfer = investigation.reconciliation.discrepancy.transfer
+                require_any_branch_access(request.user, [transfer.source_branch, transfer.destination_branch])
             if investigation.status == TransferDiscrepancyTransitInvestigation.Status.COMPLETED:
                 return Response(
                     {"detail": "This transit investigation has already been completed."},
@@ -1686,6 +1860,7 @@ class TransferDiscrepancyTransitInvestigationViewSet(ReadOnlyModelViewSet):
             investigation.started_by_worker_code = worker_code
             investigation.save(update_fields=["status", "started_at", "started_by_worker_code", "updated_at"])
             AuditLog.objects.create(
+                actor=audit_actor(request),
                 action_type=AuditLog.ActionType.UPDATE,
                 entity_name="TransferDiscrepancyTransitInvestigation",
                 entity_id=str(investigation.id),
@@ -1700,7 +1875,7 @@ class TransferDiscrepancyTransitInvestigationViewSet(ReadOnlyModelViewSet):
     def complete(self, request, pk=None):
         finding = str(request.data.get("finding", "")).strip()
         finding_note = str(request.data.get("finding_note", "")).strip()
-        worker_code = str(request.data.get("worker_code", "")).strip() or "DEMO"
+        worker_code = actor_code(request)
         client_operation_id = str(request.data.get("client_operation_id", "")).strip()
 
         if not client_operation_id:
@@ -1739,6 +1914,9 @@ class TransferDiscrepancyTransitInvestigationViewSet(ReadOnlyModelViewSet):
             )
             reconciliation = TransferDiscrepancyReconciliation.objects.select_for_update().get(pk=investigation.reconciliation_id)
             investigation.reconciliation = reconciliation
+            if request.user.is_authenticated:
+                transfer = investigation.reconciliation.discrepancy.transfer
+                require_any_branch_access(request.user, [transfer.source_branch, transfer.destination_branch])
             if (
                 investigation.completion_operation_id == client_operation_id
                 and investigation.status == TransferDiscrepancyTransitInvestigation.Status.COMPLETED
@@ -1789,6 +1967,7 @@ class TransferDiscrepancyTransitInvestigationViewSet(ReadOnlyModelViewSet):
             reconciliation.status = TransferDiscrepancyReconciliation.Status.MANUAL_ACTION_REQUIRED
             reconciliation.save(update_fields=["status", "updated_at"])
             AuditLog.objects.create(
+                actor=audit_actor(request),
                 action_type=AuditLog.ActionType.STATUS_CHANGE,
                 entity_name="TransferDiscrepancyTransitInvestigation",
                 entity_id=str(investigation.id),
@@ -1798,6 +1977,7 @@ class TransferDiscrepancyTransitInvestigationViewSet(ReadOnlyModelViewSet):
                 ),
             )
             AuditLog.objects.create(
+                actor=audit_actor(request),
                 action_type=AuditLog.ActionType.STATUS_CHANGE,
                 entity_name="TransferDiscrepancyReconciliation",
                 entity_id=str(reconciliation.id),
@@ -1839,6 +2019,13 @@ class TransferDiscrepancySourceStockVerificationViewSet(ReadOnlyModelViewSet):
     ]
     ordering_fields = ["reference", "status", "created_at", "updated_at", "completed_at"]
 
+    def get_queryset(self):
+        return filter_branch_queryset(
+            super().get_queryset(),
+            self.request,
+            "reconciliation__discrepancy__transfer__source_branch",
+        )
+
     def _validate_active_source_verification(self, verification):
         reconciliation = verification.reconciliation
         if reconciliation.route != TransferDiscrepancyReconciliation.Route.SOURCE_STOCK_VERIFICATION:
@@ -1874,13 +2061,15 @@ class TransferDiscrepancySourceStockVerificationViewSet(ReadOnlyModelViewSet):
 
     @action(detail=True, methods=["post"], url_path="begin")
     def begin(self, request, pk=None):
-        worker_code = str(request.data.get("worker_code", "")).strip() or "DEMO"
+        worker_code = actor_code(request)
         with transaction.atomic():
             verification = (
                 TransferDiscrepancySourceStockVerification.objects.select_for_update()
                 .select_related("reconciliation")
                 .get(pk=pk)
             )
+            if request.user.is_authenticated:
+                require_branch_access(request.user, verification.reconciliation.discrepancy.transfer.source_branch)
             if verification.status == TransferDiscrepancySourceStockVerification.Status.COMPLETED:
                 return Response(
                     {"detail": "This source stock verification has already been completed."},
@@ -1907,6 +2096,7 @@ class TransferDiscrepancySourceStockVerificationViewSet(ReadOnlyModelViewSet):
             verification.started_by_worker_code = worker_code
             verification.save(update_fields=["status", "started_at", "started_by_worker_code", "updated_at"])
             AuditLog.objects.create(
+                actor=audit_actor(request),
                 action_type=AuditLog.ActionType.UPDATE,
                 entity_name="TransferDiscrepancySourceStockVerification",
                 entity_id=str(verification.id),
@@ -1919,7 +2109,7 @@ class TransferDiscrepancySourceStockVerificationViewSet(ReadOnlyModelViewSet):
     def record_found(self, request, pk=None):
         product_code = str(request.data.get("product_code", "")).strip()
         destination_location_code = str(request.data.get("destination_location_code", "")).strip()
-        worker_code = str(request.data.get("worker_code", "")).strip() or "DEMO"
+        worker_code = actor_code(request)
         client_operation_id = str(request.data.get("client_operation_id", "")).strip()
         raw_quantity = str(request.data.get("quantity", "1")).strip()
 
@@ -1961,6 +2151,8 @@ class TransferDiscrepancySourceStockVerificationViewSet(ReadOnlyModelViewSet):
                 )
                 .get(pk=pk)
             )
+            if request.user.is_authenticated:
+                require_branch_access(request.user, verification.reconciliation.discrepancy.transfer.source_branch)
             if verification.status != TransferDiscrepancySourceStockVerification.Status.INVESTIGATING:
                 if verification.status in {
                     TransferDiscrepancySourceStockVerification.Status.COMPLETED,
@@ -2030,7 +2222,7 @@ class TransferDiscrepancySourceStockVerificationViewSet(ReadOnlyModelViewSet):
                 movement_type=StockMovement.MovementType.SOURCE_DISCREPANCY_RECOVERY,
                 quantity=quantity,
                 reference=verification.reference,
-                performed_by=None,
+                performed_by=audit_actor(request),
             )
             recovery = TransferDiscrepancySourceStockRecovery.objects.create(
                 verification=verification,
@@ -2052,6 +2244,7 @@ class TransferDiscrepancySourceStockVerificationViewSet(ReadOnlyModelViewSet):
             unit_word = unit_label(quantity)
             restore_word = "it" if quantity == 1 else "them"
             AuditLog.objects.create(
+                actor=audit_actor(request),
                 action_type=AuditLog.ActionType.UPDATE,
                 entity_name="TransferDiscrepancySourceStockVerification",
                 entity_id=str(verification.id),
@@ -2090,7 +2283,7 @@ class TransferDiscrepancySourceStockVerificationViewSet(ReadOnlyModelViewSet):
 
     @action(detail=True, methods=["post"], url_path="complete-search")
     def complete_search(self, request, pk=None):
-        worker_code = str(request.data.get("worker_code", "")).strip() or "DEMO"
+        worker_code = actor_code(request)
         search_completion_note = str(request.data.get("search_completion_note", "")).strip()
         client_operation_id = str(request.data.get("client_operation_id", "")).strip()
 
@@ -2137,6 +2330,8 @@ class TransferDiscrepancySourceStockVerificationViewSet(ReadOnlyModelViewSet):
                 .get(pk=verification.reconciliation_id)
             )
             verification.reconciliation = reconciliation
+            if request.user.is_authenticated:
+                require_branch_access(request.user, verification.reconciliation.discrepancy.transfer.source_branch)
 
             if (
                 verification.search_completion_operation_id == client_operation_id
@@ -2205,6 +2400,7 @@ class TransferDiscrepancySourceStockVerificationViewSet(ReadOnlyModelViewSet):
             unit_word = unit_label(unresolved_quantity)
             remain_word = "remains" if unresolved_quantity == 1 else "remain"
             AuditLog.objects.create(
+                actor=audit_actor(request),
                 action_type=AuditLog.ActionType.STATUS_CHANGE,
                 entity_name="TransferDiscrepancySourceStockVerification",
                 entity_id=str(verification.id),
@@ -2214,6 +2410,7 @@ class TransferDiscrepancySourceStockVerificationViewSet(ReadOnlyModelViewSet):
                 ),
             )
             AuditLog.objects.create(
+                actor=audit_actor(request),
                 action_type=AuditLog.ActionType.STATUS_CHANGE,
                 entity_name="TransferDiscrepancyReconciliation",
                 entity_id=str(reconciliation.id),

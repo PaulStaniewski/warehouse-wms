@@ -2,7 +2,7 @@ from django.contrib import admin
 from django.urls import include, path
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 
-from config.api import router
+from config.api import auth_login, auth_logout, auth_session, me_branch_memberships, router
 from config.views import health_check
 from operations.scanner_views import (
     ScannerCartWorkCurrentView,
@@ -39,6 +39,10 @@ urlpatterns = [
     path("api/health/", health_check, name="health-check"),
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
     path("api/docs/", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"),
+    path("api/auth/session/", auth_session, name="auth-session"),
+    path("api/auth/login/", auth_login, name="auth-login"),
+    path("api/auth/logout/", auth_logout, name="auth-logout"),
+    path("api/me/branch-memberships/", me_branch_memberships, name="me-branch-memberships"),
     path("api/scanner/session/start/", ScannerSessionStartView.as_view(), name="scanner-session-start"),
     path("api/scanner/session/current/", ScannerSessionCurrentView.as_view(), name="scanner-session-current"),
     path("api/scanner/session/end/", ScannerSessionEndView.as_view(), name="scanner-session-end"),

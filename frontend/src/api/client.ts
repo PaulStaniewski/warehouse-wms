@@ -5,6 +5,7 @@ import type { HealthResponse, PaginatedResponse } from "../types/api";
 
 export const apiClient = axios.create({
   baseURL: "/api",
+  withCredentials: true,
   headers: {
     Accept: "application/json",
   },

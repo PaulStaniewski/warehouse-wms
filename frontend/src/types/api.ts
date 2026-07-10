@@ -9,6 +9,12 @@ export type HealthResponse = {
   status: string;
 };
 
+export type AuthSession = {
+  is_authenticated: boolean;
+  username: string | null;
+  is_superuser: boolean;
+};
+
 export type Branch = {
   id: number;
   code: string;
@@ -16,6 +22,16 @@ export type Branch = {
   city: string;
   country: string;
   is_active: boolean;
+};
+
+export type BranchMembership = {
+  branch_id: number;
+  branch_code: string;
+  branch_name: string;
+  branch_city: string;
+  branch_country: string;
+  role: "worker" | "leader";
+  role_label: string;
 };
 
 export type Location = {
