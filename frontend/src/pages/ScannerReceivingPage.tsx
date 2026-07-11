@@ -1,7 +1,7 @@
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import axios from "axios";
 import { ArrowLeft, Camera, CheckCircle2 } from "lucide-react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 
 import {
@@ -89,9 +89,10 @@ function PalletSummary({ session }: { session: ScannerReceivingSession }) {
 }
 
 export function ScannerReceivingPage() {
+  const [searchParams] = useSearchParams();
   const queryClient = useQueryClient();
   const [receivingSessionId, setReceivingSessionId] = useState<number | null>(() => getStoredReceivingSessionId());
-  const [palletCode, setPalletCode] = useState("");
+  const [palletCode, setPalletCode] = useState(() => searchParams.get("pallet") ?? "");
   const [workerCode, setWorkerCode] = useState("DEMO");
   const [productCode, setProductCode] = useState("");
   const [quantity, setQuantity] = useState("1");

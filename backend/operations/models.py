@@ -553,6 +553,27 @@ class TransferPallet(TimestampedModel):
         return self.scan_code
 
 
+class TransferPalletArrival(TimestampedModel):
+    pallet = models.OneToOneField(TransferPallet, on_delete=models.PROTECT, related_name="arrival")
+    scanned_at = models.DateTimeField(default=timezone.now)
+    scanned_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="transfer_pallet_arrivals",
+        blank=True,
+        null=True,
+    )
+    scanned_by_worker_code = models.CharField(max_length=64, blank=True)
+    client_operation_id = models.CharField(max_length=128, blank=True, null=True, unique=True)
+
+    class Meta:
+        ordering = ["-scanned_at"]
+        indexes = [models.Index(fields=["scanned_at"])]
+
+    def __str__(self) -> str:
+        return f"{self.pallet.scan_code} arrived"
+
+
 class TransferPalletItem(TimestampedModel):
     pallet = models.ForeignKey(TransferPallet, on_delete=models.CASCADE, related_name="items")
     product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name="transfer_pallet_items")
@@ -1156,6 +1177,84 @@ class AuditLog(models.Model):
         null=True,
     )
     action_type = models.CharField(max_length=32, choices=ActionType.choices)
+    event_type = models.CharField(max_length=64, blank=True)
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.SET_NULL,
+        related_name="audit_logs",
+        blank=True,
+        null=True,
+    )
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.SET_NULL,
+        related_name="audit_logs",
+        blank=True,
+        null=True,
+    )
+    quantity = models.DecimalField(max_digits=12, decimal_places=3, blank=True, null=True)
+    expected_quantity = models.DecimalField(max_digits=12, decimal_places=3, blank=True, null=True)
+    checked_quantity = models.DecimalField(max_digits=12, decimal_places=3, blank=True, null=True)
+    source_location = models.ForeignKey(
+        Location,
+        on_delete=models.SET_NULL,
+        related_name="source_audit_logs",
+        blank=True,
+        null=True,
+    )
+    destination_location = models.ForeignKey(
+        Location,
+        on_delete=models.SET_NULL,
+        related_name="destination_audit_logs",
+        blank=True,
+        null=True,
+    )
+    source_label = models.CharField(max_length=128, blank=True)
+    destination_label = models.CharField(max_length=128, blank=True)
+    cart = models.ForeignKey(
+        "ScannerCart",
+        on_delete=models.SET_NULL,
+        related_name="audit_logs",
+        blank=True,
+        null=True,
+    )
+    order = models.ForeignKey(
+        "Order",
+        on_delete=models.SET_NULL,
+        related_name="audit_logs",
+        blank=True,
+        null=True,
+    )
+    route_run = models.ForeignKey(
+        "RouteRun",
+        on_delete=models.SET_NULL,
+        related_name="audit_logs",
+        blank=True,
+        null=True,
+    )
+    transfer = models.ForeignKey(
+        "InterBranchTransfer",
+        on_delete=models.SET_NULL,
+        related_name="audit_logs",
+        blank=True,
+        null=True,
+    )
+    pallet = models.ForeignKey(
+        "TransferPallet",
+        on_delete=models.SET_NULL,
+        related_name="audit_logs",
+        blank=True,
+        null=True,
+    )
+    discrepancy = models.ForeignKey(
+        "TransferDiscrepancy",
+        on_delete=models.SET_NULL,
+        related_name="audit_logs",
+        blank=True,
+        null=True,
+    )
+    result = models.CharField(max_length=64, blank=True)
+    reference = models.CharField(max_length=128, blank=True)
     entity_name = models.CharField(max_length=120)
     entity_id = models.CharField(max_length=64, blank=True)
     message = models.TextField()
@@ -1165,6 +1264,15 @@ class AuditLog(models.Model):
         ordering = ["-created_at"]
         indexes = [
             models.Index(fields=["action_type"]),
+            models.Index(fields=["event_type"]),
+            models.Index(fields=["branch", "event_type"]),
+            models.Index(fields=["product"]),
+            models.Index(fields=["cart"]),
+            models.Index(fields=["order"]),
+            models.Index(fields=["route_run"]),
+            models.Index(fields=["transfer"]),
+            models.Index(fields=["pallet"]),
+            models.Index(fields=["reference"]),
             models.Index(fields=["entity_name", "entity_id"]),
             models.Index(fields=["created_at"]),
         ]

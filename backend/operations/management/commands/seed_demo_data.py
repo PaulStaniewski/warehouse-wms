@@ -38,6 +38,7 @@ from operations.models import (
     TransferDiscrepancySourceStockVerificationItem,
     TransferDiscrepancyTransitInvestigation,
     TransferPallet,
+    TransferPalletArrival,
     TransferPalletItem,
 )
 from warehouse.models import Branch, InventoryItem, Location, Product
@@ -119,6 +120,7 @@ class Command(BaseCommand):
         demo_jobs.delete()
 
         demo_pallets = TransferPallet.objects.filter(scan_code__in=demo_pallet_codes)
+        TransferPalletArrival.objects.filter(pallet__in=demo_pallets).delete()
         demo_discrepancies = TransferDiscrepancy.objects.filter(pallet__in=demo_pallets)
         demo_reconciliations = TransferDiscrepancyReconciliation.objects.filter(discrepancy__in=demo_discrepancies)
         demo_verifications = TransferDiscrepancySourceStockVerification.objects.filter(
@@ -571,6 +573,11 @@ class Command(BaseCommand):
                     },
                 )
             pallets[pallet_code] = pallet
+
+        TransferPalletArrival.objects.update_or_create(
+            pallet=pallets["PAL-GDA-GDY-DISC-001"],
+            defaults={"scanned_by_worker_code": "DEMO", "client_operation_id": "seed-demo-discrepancy-arrival"},
+        )
 
         return pallets
 

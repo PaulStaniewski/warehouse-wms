@@ -20,6 +20,7 @@ const menuItems = [
   { label: "Picking", description: "Pick items for the active cart", to: "/scanner/picking", icon: ScanLine },
   { label: "Control", description: "Prepare picked items for customers", to: "/scanner/control", icon: ClipboardCheck },
   { label: "Receiving", description: "Receive inter-branch transfer pallets", to: "/scanner/receiving", icon: Truck },
+  { label: "Pallet Arrivals", description: "Register inter-branch pallets at destination", to: "/scanner/inter-branch-arrivals", icon: Forklift },
   { label: "Product", description: "Lookup SKU or barcode", to: "/scanner/product", icon: PackageSearch },
   { label: "Contents", description: "Scan a location, cart, or label", to: "/scanner/contents", icon: Boxes },
   { label: "Location", description: "Lookup location stock", to: "/scanner/location", icon: PackageSearch },

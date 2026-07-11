@@ -1,5 +1,6 @@
 from decimal import Decimal
 
+from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.db.models import F, Q
 from django.shortcuts import get_object_or_404
@@ -8,6 +9,7 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from accounts.authorization import require_branch_access
 from operations.models import (
     AuditLog,
     CartPickedItem,
@@ -27,6 +29,7 @@ from operations.models import (
     TransferDiscrepancy,
     TransferDiscrepancyItem,
     TransferPallet,
+    TransferPalletArrival,
     TransferPalletItem,
 )
 from operations.contents import ContentsLookupError, resolve_contents_code
@@ -37,7 +40,25 @@ from operations.services import (
     get_discrepancy_investigation_totals,
     recalculate_route_readiness,
 )
-from warehouse.models import InventoryItem, Location, Product
+from warehouse.models import Branch, InventoryItem, Location, Product
+
+
+User = get_user_model()
+
+
+def _scanner_actor(request, worker_code=""):
+    if request.user and request.user.is_authenticated:
+        return request.user
+    worker_code = str(worker_code or "").strip()
+    if not worker_code:
+        return None
+    return User.objects.filter(username__iexact=worker_code).first()
+
+
+def _scanner_actor_code(request, worker_code="") -> str:
+    if request.user and request.user.is_authenticated:
+        return request.user.username
+    return str(worker_code or "").strip() or "scanner"
 
 
 def _find_product_by_code(code: str):
@@ -441,6 +462,26 @@ def _update_transfer_after_pallet_close(transfer: InterBranchTransfer):
         transfer.save(update_fields=["status", "completed_at", "updated_at"])
 
 
+def _mm_task_data(pallet):
+    items = list(pallet.items.all())
+    expected = sum((item.expected_quantity for item in items), Decimal("0"))
+    put_away = sum((item.received_quantity for item in items), Decimal("0"))
+    return {
+        "pallet_id": pallet.id,
+        "pallet_code": pallet.scan_code,
+        "transfer_id": pallet.transfer_id,
+        "transfer_reference": pallet.transfer.reference,
+        "source_branch": pallet.transfer.source_branch.code,
+        "destination_branch": pallet.transfer.destination_branch.code,
+        "arrived_at": pallet.arrival.scanned_at,
+        "expected_units": _piece_value(expected),
+        "put_away_units": _piece_value(put_away),
+        "remaining_units": _piece_value(max(expected - put_away, Decimal("0"))),
+        "line_count": len(items),
+        "status": "receiving" if pallet.status == TransferPallet.Status.RECEIVING else "waiting_for_receiving",
+    }
+
+
 def _close_receiving_session(session_id):
     with transaction.atomic():
         session, error = _get_active_receiving_session_or_response(session_id)
@@ -542,6 +583,23 @@ def _close_receiving_session(session_id):
                     f"Worker {session.worker_code or 'scanner'} closed pallet {pallet.scan_code} "
                     "with exact manifest match."
                 ),
+            )
+
+        if not AuditLog.objects.filter(event_type="mm_task_completed", pallet=pallet).exists():
+            outcome = "with discrepancy" if shortages else "after receiving"
+            AuditLog.objects.create(
+                action_type=AuditLog.ActionType.STATUS_CHANGE,
+                event_type="mm_task_completed",
+                branch=pallet.transfer.destination_branch,
+                transfer=pallet.transfer,
+                pallet=pallet,
+                source_label=pallet.transfer.source_branch.code,
+                destination_label=pallet.transfer.destination_branch.code,
+                result="discrepancy" if shortages else "completed",
+                reference=pallet.transfer.reference,
+                entity_name="TransferPalletArrival",
+                entity_id=str(pallet.arrival.id),
+                message=f"MM task for pallet {pallet.scan_code} was completed {outcome}.",
             )
 
         _update_transfer_after_pallet_close(pallet.transfer)
@@ -692,12 +750,23 @@ def _pick_for_cart_work(request):
 
         AuditLog.objects.create(
             action_type=AuditLog.ActionType.UPDATE,
+            event_type="pick",
+            branch=task.branch,
+            product=product,
+            quantity=quantity,
+            source_location=task.source_location,
+            source_label=task.source_location.code,
+            destination_label=cart_work_session.cart.code,
+            cart=cart_work_session.cart,
+            order=order_line.order,
+            route_run=order_line.order.route_run,
+            reference=order_line.order.external_reference,
             entity_name="PickingJob",
             entity_id=str(picking_job.id),
             message=(
-                f"Worker {worker_code} picked {quantity} of {product.sku} "
+                f"Worker {worker_code} picked {_piece_value(quantity)} {product.sku} "
                 f"from location {task.source_location.code} to cart {cart_work_session.cart.code} "
-                f"for picking job {picking_job.id}."
+                f"for order {order_line.order.external_reference}."
             ),
         )
 
@@ -833,10 +902,21 @@ def _pick_from_shelf(request, allow_legacy_without_session=False):
 
         AuditLog.objects.create(
             action_type=AuditLog.ActionType.UPDATE,
+            event_type="pick",
+            branch=task.branch,
+            product=product,
+            quantity=quantity,
+            source_location=task.source_location,
+            source_label=task.source_location.code,
+            destination_label=session.cart.code if session is not None else "",
+            cart=session.cart if session is not None else None,
+            order=order_line.order,
+            route_run=route_run,
+            reference=order_line.order.external_reference,
             entity_name="PickingTask",
             entity_id=str(task.id),
             message=(
-                f"Scanner picking picked {quantity} of {product.sku} "
+                f"Scanner picking picked {_piece_value(quantity)} of {product.sku} "
                 f"for route run {route_run.id} and order {order_line.order.external_reference}"
                 + (
                     f" to cart {session.cart.code} by {session.worker_code or 'scanner'}."
@@ -873,6 +953,9 @@ def _prepare_for_order(request):
     if error is not None:
         return error
 
+    actor = _scanner_actor(request, session.worker_code)
+    actor_code = _scanner_actor_code(request, session.worker_code)
+
     with transaction.atomic():
         order = Order.objects.filter(external_reference__iexact=order_reference).first()
         if order is None:
@@ -902,6 +985,37 @@ def _prepare_for_order(request):
             .first()
         )
         if cart_item is None:
+            matched_cart_item = (
+                CartPickedItem.objects.select_related("cart", "route_run", "picking_task", "picking_task__branch")
+                .filter(session=session, product=product, picking_task__order_line__order=order)
+                .order_by("created_at", "id")
+                .first()
+            )
+            if matched_cart_item is not None:
+                AuditLog.objects.create(
+                    actor=actor,
+                    action_type=AuditLog.ActionType.UPDATE,
+                    event_type="control_mismatch",
+                    branch=matched_cart_item.picking_task.branch,
+                    product=product,
+                    quantity=quantity,
+                    expected_quantity=Decimal("0"),
+                    checked_quantity=quantity,
+                    source_label=matched_cart_item.cart.code,
+                    destination_label="Control",
+                    cart=matched_cart_item.cart,
+                    order=order,
+                    route_run=matched_cart_item.route_run,
+                    result="mismatch",
+                    reference=order.external_reference,
+                    entity_name="CartPickedItem",
+                    entity_id=str(matched_cart_item.id),
+                    message=(
+                        f"Worker {actor_code} found a quantity mismatch for {product.sku} "
+                        f"on cart {session.cart.code} for order {order.external_reference}. "
+                        f"Expected 0, checked {_piece_value(quantity)}."
+                    ),
+                )
             return Response(
                 {"detail": "Product is not available on the active cart for this order."},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -911,6 +1025,30 @@ def _prepare_for_order(request):
 
         available_to_prepare = cart_item.quantity_picked - cart_item.quantity_prepared
         if quantity > available_to_prepare:
+            AuditLog.objects.create(
+                actor=actor,
+                action_type=AuditLog.ActionType.UPDATE,
+                event_type="control_mismatch",
+                branch=cart_item.picking_task.branch,
+                product=product,
+                quantity=quantity,
+                expected_quantity=available_to_prepare,
+                checked_quantity=quantity,
+                source_label=cart_item.cart.code,
+                destination_label="Control",
+                cart=cart_item.cart,
+                order=order,
+                route_run=cart_item.route_run,
+                result="mismatch",
+                reference=order.external_reference,
+                entity_name="CartPickedItem",
+                entity_id=str(cart_item.id),
+                message=(
+                    f"Worker {actor_code} found a quantity mismatch for {product.sku} "
+                    f"on cart {session.cart.code} for order {order.external_reference}. "
+                    f"Expected {_piece_value(available_to_prepare)}, checked {_piece_value(quantity)}."
+                ),
+            )
             return Response(
                 {"detail": "Preparing this quantity would exceed picked quantity."},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -935,12 +1073,26 @@ def _prepare_for_order(request):
         task.refresh_from_db()
 
         AuditLog.objects.create(
+            actor=actor,
             action_type=AuditLog.ActionType.UPDATE,
+            event_type="control",
+            branch=task.branch,
+            product=product,
+            quantity=quantity,
+            expected_quantity=quantity,
+            checked_quantity=quantity,
+            source_label=session.cart.code,
+            destination_label="Checked",
+            cart=session.cart,
+            order=order,
+            route_run=cart_item.route_run,
+            result="passed",
+            reference=order.external_reference,
             entity_name="PickingTask",
             entity_id=str(task.id),
             message=(
-                f"Scanner picking prepared {quantity} of {product.sku} from cart {session.cart.code} "
-                f"for order {order.external_reference} by {session.worker_code or 'scanner'}."
+                f"Worker {actor_code} verified {_piece_value(quantity)} {product.sku} on cart {session.cart.code} "
+                f"for order {order.external_reference}."
             ),
         )
 
@@ -1579,6 +1731,96 @@ class ScannerContentsView(APIView):
             return Response(payload, status=error.status_code)
 
 
+class ScannerInterBranchArrivalView(APIView):
+    def get(self, request):
+        branch_code = str(request.query_params.get("branch", "")).strip()
+        if not branch_code:
+            return Response({"detail": "branch is required."}, status=status.HTTP_400_BAD_REQUEST)
+        arrivals = (
+            TransferPalletArrival.objects.select_related(
+                "pallet", "pallet__transfer", "pallet__transfer__source_branch", "pallet__transfer__destination_branch"
+            )
+            .prefetch_related("pallet__items")
+            .filter(pallet__transfer__destination_branch__code__iexact=branch_code)
+            .order_by("-scanned_at")[:20]
+        )
+        if arrivals:
+            require_branch_access(request.user, arrivals[0].pallet.transfer.destination_branch)
+        else:
+            branch = get_object_or_404(Branch, code__iexact=branch_code)
+            require_branch_access(request.user, branch)
+        return Response({"results": [_mm_task_data(arrival.pallet) for arrival in arrivals]})
+
+    def post(self, request):
+        pallet_code = str(request.data.get("pallet_code", "")).strip()
+        worker_code = _scanner_actor_code(request, request.data.get("worker_code", ""))
+        client_operation_id = str(request.data.get("client_operation_id", "")).strip() or None
+        if not pallet_code:
+            return Response({"detail": "pallet_code is required."}, status=status.HTTP_400_BAD_REQUEST)
+        with transaction.atomic():
+            pallet = (
+                TransferPallet.objects.select_for_update()
+                .select_related("transfer", "transfer__source_branch", "transfer__destination_branch")
+                .prefetch_related("items")
+                .filter(scan_code__iexact=pallet_code)
+                .first()
+            )
+            if pallet is None:
+                return Response({"detail": "Pallet not found."}, status=status.HTTP_404_NOT_FOUND)
+            require_branch_access(request.user, pallet.transfer.destination_branch)
+            if pallet.transfer.status == InterBranchTransfer.Status.CANCELLED or pallet.status == TransferPallet.Status.CANCELLED:
+                return Response({"detail": "Cancelled pallets cannot be registered as arrived."}, status=status.HTTP_400_BAD_REQUEST)
+            if not pallet.released_at or pallet.transfer.status not in [InterBranchTransfer.Status.RELEASED, InterBranchTransfer.Status.IN_TRANSIT, InterBranchTransfer.Status.RECEIVING]:
+                return Response({"detail": "Pallet has not been released by the source branch."}, status=status.HTTP_400_BAD_REQUEST)
+            if _pallet_is_closed(pallet):
+                return Response({"detail": "Pallet is already completed."}, status=status.HTTP_400_BAD_REQUEST)
+            arrival, created = TransferPalletArrival.objects.get_or_create(
+                pallet=pallet,
+                defaults={
+                    "scanned_by": request.user,
+                    "scanned_by_worker_code": worker_code,
+                    "client_operation_id": client_operation_id,
+                },
+            )
+            if created:
+                AuditLog.objects.create(
+                    actor=request.user,
+                    action_type=AuditLog.ActionType.CREATE,
+                    event_type="inter_branch_arrival",
+                    branch=pallet.transfer.destination_branch,
+                    transfer=pallet.transfer,
+                    pallet=pallet,
+                    source_label=pallet.transfer.source_branch.code,
+                    destination_label=pallet.transfer.destination_branch.code,
+                    result="arrived",
+                    reference=pallet.transfer.reference,
+                    entity_name="TransferPalletArrival",
+                    entity_id=str(arrival.id),
+                    message=(f"Worker {worker_code} registered pallet {pallet.scan_code} as arrived at "
+                             f"{pallet.transfer.destination_branch.code} from {pallet.transfer.source_branch.code}.")
+                )
+        payload = _mm_task_data(pallet)
+        payload["arrival_result"] = "registered" if created else "already_registered"
+        message = (f"Pallet registered at {pallet.transfer.destination_branch.code}." if created else
+                   f"Pallet {pallet.scan_code} was already registered at {pallet.transfer.destination_branch.code}.")
+        return Response({"message": message, "arrival": payload}, status=status.HTTP_200_OK)
+
+
+class InterBranchMMTasksView(APIView):
+    def get(self, request):
+        branch_code = str(request.query_params.get("branch", "")).strip()
+        branch = get_object_or_404(Branch, code__iexact=branch_code)
+        require_branch_access(request.user, branch)
+        pallets = (
+            TransferPallet.objects.select_related("transfer", "transfer__source_branch", "transfer__destination_branch", "arrival")
+            .prefetch_related("items")
+            .filter(transfer__destination_branch=branch, arrival__isnull=False)
+            .exclude(status__in=[TransferPallet.Status.RECEIVED, TransferPallet.Status.CLOSED_WITH_DISCREPANCY, TransferPallet.Status.CANCELLED])
+            .order_by("arrival__scanned_at")
+        )
+        return Response({"results": [_mm_task_data(pallet) for pallet in pallets]})
+
+
 class ScannerReceivingStartView(APIView):
     def post(self, request):
         pallet_code = str(request.data.get("pallet_code", "")).strip()
@@ -1597,6 +1839,11 @@ class ScannerReceivingStartView(APIView):
                 return Response({"detail": "Pallet not found."}, status=status.HTTP_404_NOT_FOUND)
             if _pallet_is_closed(pallet):
                 return Response({"detail": "Pallet is already closed."}, status=status.HTTP_400_BAD_REQUEST)
+            if not TransferPalletArrival.objects.filter(pallet=pallet).exists():
+                return Response(
+                    {"detail": "Register the pallet arrival before starting receiving."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
             session = PalletReceivingSession.objects.select_for_update().filter(
                 pallet=pallet,
@@ -1717,9 +1964,20 @@ class ScannerReceivingScanProductView(APIView):
 
             AuditLog.objects.create(
                 action_type=AuditLog.ActionType.UPDATE,
+                event_type="receive_scan",
+                branch=pallet.transfer.destination_branch,
+                product=product,
+                quantity=quantity,
+                source_label=pallet.scan_code,
+                transfer=pallet.transfer,
+                pallet=pallet,
+                reference=pallet.scan_code,
                 entity_name="TransferPallet",
                 entity_id=str(pallet.id),
-                message=f"Receiving scanned {_piece_value(quantity)} {product.sku} on pallet {pallet.scan_code}.",
+                message=(
+                    f"Worker {session.worker_code or 'scanner'} scanned {_piece_value(quantity)} {product.sku} "
+                    f"on pallet {pallet.scan_code}."
+                ),
             )
 
         session.refresh_from_db()
@@ -1798,7 +2056,7 @@ class ScannerReceivingPutAwayView(APIView):
             item.save(update_fields=["received_quantity", "updated_at"])
             item.refresh_from_db()
 
-            PalletReceivingScan.objects.create(
+            receiving_scan = PalletReceivingScan.objects.create(
                 receiving_session=session,
                 pallet=pallet,
                 product=item.product,
@@ -1818,11 +2076,22 @@ class ScannerReceivingPutAwayView(APIView):
             )
             AuditLog.objects.create(
                 action_type=AuditLog.ActionType.UPDATE,
+                event_type="receive",
+                branch=destination_branch,
+                product=item.product,
+                quantity=quantity,
+                destination_location=location,
+                source_label=pallet.scan_code,
+                destination_label=location.code,
+                transfer=pallet.transfer,
+                pallet=pallet,
+                reference=pallet.transfer.reference,
                 entity_name="PalletReceivingScan",
-                entity_id=str(movement.id),
+                entity_id=str(receiving_scan.id),
                 message=(
-                    f"Received {_piece_value(quantity)} {item.product.sku} from pallet {pallet.scan_code} "
-                    f"to location {location.code}."
+                    f"Worker {session.worker_code or 'scanner'} received {_piece_value(quantity)} {item.product.sku} "
+                    f"from pallet {pallet.scan_code} "
+                    f"to location {location.code} for transfer {pallet.transfer.reference}."
                 ),
             )
 

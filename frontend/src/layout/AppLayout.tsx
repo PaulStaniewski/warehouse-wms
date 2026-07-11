@@ -37,7 +37,7 @@ const wmsNavItems = [
   { to: "/wms/inventory", label: "Inventory", icon: Boxes },
   { to: "/wms/products", label: "Products", icon: PackageSearch },
   { to: "/wms/locations", label: "Locations", icon: MapPin },
-  { to: "/wms/events/current", label: "Current Events", icon: History },
+  { to: "/wms/current-events", label: "Current Events", icon: History },
   { to: "/wms/events/archive", label: "Archive Events", icon: Archive },
 ];
 
@@ -48,6 +48,7 @@ const scannerNavItems = [
   { to: "/scanner/picking", label: "Picking", icon: Barcode },
   { to: "/scanner/control", label: "Control", icon: ClipboardCheck },
   { to: "/scanner/receiving", label: "Receiving", icon: ArchiveRestore },
+  { to: "/scanner/inter-branch-arrivals", label: "Pallet Arrivals", icon: Forklift },
   { to: "/scanner/product", label: "Product", icon: PackageSearch },
   { to: "/scanner/contents", label: "Contents", icon: Boxes },
   { to: "/scanner/location", label: "Location", icon: MapPin },
@@ -69,6 +70,7 @@ const pageTitles: Record<string, string> = {
   "/wms/source-stock-verifications": "Source Stock",
   "/wms/transit-investigations": "Transit Investigations",
   "/wms/events/current": "Current Events",
+  "/wms/current-events": "Current Events",
   "/wms/events/archive": "Archive Events",
   "/scanner": "Scanner",
   "/scanner/proformas": "Proformas",
@@ -76,6 +78,7 @@ const pageTitles: Record<string, string> = {
   "/scanner/picking": "Picking",
   "/scanner/control": "Control",
   "/scanner/receiving": "Receiving",
+  "/scanner/inter-branch-arrivals": "Inter-branch pallet arrivals",
   "/scanner/routes": "Picking",
   "/scanner/route-runs": "Scanner",
   "/scanner/product": "Product Lookup",

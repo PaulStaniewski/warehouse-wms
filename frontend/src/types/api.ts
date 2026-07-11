@@ -163,6 +163,35 @@ export type AuditLog = {
   actor_username: string | null;
   actor_display: string;
   action_type: string;
+  event_type: string;
+  branch: number | null;
+  branch_code: string | null;
+  product: number | null;
+  product_sku: string | null;
+  product_name: string | null;
+  quantity: string | null;
+  expected_quantity: string | null;
+  checked_quantity: string | null;
+  source_location: number | null;
+  source_location_code: string | null;
+  destination_location: number | null;
+  destination_location_code: string | null;
+  source_label: string;
+  destination_label: string;
+  cart: number | null;
+  cart_code: string | null;
+  order: number | null;
+  order_reference: string | null;
+  route_run: number | null;
+  route_run_label: string | null;
+  transfer: number | null;
+  transfer_reference: string | null;
+  pallet: number | null;
+  pallet_code: string | null;
+  discrepancy: number | null;
+  discrepancy_reference: string | null;
+  result: string;
+  reference: string;
   entity_name: string;
   entity_id: string;
   message: string;
@@ -395,6 +424,27 @@ export type ScannerReceivingResponse = {
   message?: string;
   result?: "exact" | "discrepancy";
   receiving_session: ScannerReceivingSession;
+};
+
+export type InterBranchMMTask = {
+  pallet_id: number;
+  pallet_code: string;
+  transfer_id: number;
+  transfer_reference: string;
+  source_branch: string;
+  destination_branch: string;
+  arrived_at: string;
+  expected_units: number;
+  put_away_units: number;
+  remaining_units: number;
+  line_count: number;
+  status: "waiting_for_receiving" | "receiving";
+  arrival_result?: "registered" | "already_registered";
+};
+
+export type InterBranchArrivalResponse = {
+  message: string;
+  arrival: InterBranchMMTask;
 };
 
 export type TransferDiscrepancySummary = {

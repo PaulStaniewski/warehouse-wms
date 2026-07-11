@@ -10,6 +10,9 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
+
+User = get_user_model()
+
 from accounts.models import UserBranchMembership
 from operations.models import (
     AuditLog,
@@ -40,6 +43,7 @@ from operations.models import (
     TransferDiscrepancySourceStockVerificationItem,
     TransferDiscrepancyTransitInvestigation,
     TransferPallet,
+    TransferPalletArrival,
     TransferPalletItem,
 )
 from operations.services import recalculate_route_readiness, reconciliation_route_for_finding, route_close_result
@@ -550,7 +554,9 @@ class ScannerPickingScanActionTests(APITestCase):
             AuditLog.objects.filter(
                 entity_name="PickingTask",
                 entity_id=str(self.task.id),
-                message__icontains="Scanner picking prepared",
+                event_type="control",
+                result="passed",
+                message__icontains="verified",
             ).exists()
         )
 
@@ -950,6 +956,103 @@ class ScannerContentsLookupTests(APITestCase):
         self.assertEqual(set(response.data["matched_object_types"]), {"location", "cart"})
 
 
+class InterBranchPalletArrivalTests(APITestCase):
+    def setUp(self):
+        self.source = Branch.objects.create(code="GDA", name="Gdansk", city="Gdansk", country="Poland")
+        self.destination = Branch.objects.create(code="GDY", name="Gdynia", city="Gdynia", country="Poland")
+        self.other = Branch.objects.create(code="WAW", name="Warsaw", city="Warsaw", country="Poland")
+        self.worker = User.objects.create_user(username="GDY_WORKER", password="demo12345")
+        self.source_worker = User.objects.create_user(username="GDA_WORKER", password="demo12345")
+        UserBranchMembership.objects.create(user=self.worker, branch=self.destination, role=UserBranchMembership.Role.WORKER)
+        UserBranchMembership.objects.create(user=self.source_worker, branch=self.source, role=UserBranchMembership.Role.WORKER)
+        self.product = Product.objects.create(sku="ARR-001", name="Arrival item", unit_of_measure="pcs")
+        self.location = Location.objects.create(
+            branch=self.destination, code="ARR-01", name="Arrival storage", location_type=Location.LocationType.STORAGE
+        )
+        self.transfer = InterBranchTransfer.objects.create(
+            reference="IBT-ARR-001", source_branch=self.source, destination_branch=self.destination,
+            status=InterBranchTransfer.Status.IN_TRANSIT, released_at=timezone.now(),
+        )
+        self.pallet = TransferPallet.objects.create(
+            transfer=self.transfer, scan_code="PAL-GDA-GDY-001", status=TransferPallet.Status.IN_TRANSIT,
+            released_at=timezone.now(),
+        )
+        TransferPalletItem.objects.create(pallet=self.pallet, product=self.product, expected_quantity=Decimal("5"))
+
+    def scan(self):
+        return self.client.post(
+            "/api/scanner/inter-branch-arrivals/",
+            {"pallet_code": self.pallet.scan_code, "client_operation_id": "arrival-1"}, format="json",
+        )
+
+    def test_arrival_is_destination_scoped_idempotent_and_changes_no_inventory(self):
+        self.client.force_authenticate(self.worker)
+        before = InventoryItem.objects.count()
+        first = self.scan()
+        second = self.scan()
+
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.data["arrival"]["arrival_result"], "already_registered")
+        self.assertEqual(TransferPalletArrival.objects.filter(pallet=self.pallet).count(), 1)
+        self.assertEqual(InventoryItem.objects.count(), before)
+        self.assertEqual(AuditLog.objects.filter(event_type="inter_branch_arrival", pallet=self.pallet).count(), 1)
+        tasks = self.client.get("/api/mm-tasks/", {"branch": "GDY"})
+        self.assertEqual(len(tasks.data["results"]), 1)
+        self.assertEqual(tasks.data["results"][0]["remaining_units"], 5)
+
+    def test_source_worker_and_unknown_pallet_are_rejected(self):
+        self.client.force_authenticate(self.source_worker)
+        forbidden = self.scan()
+        self.assertEqual(forbidden.status_code, status.HTTP_403_FORBIDDEN)
+        self.client.force_authenticate(self.worker)
+        missing = self.client.post("/api/scanner/inter-branch-arrivals/", {"pallet_code": "UNKNOWN"}, format="json")
+        self.assertEqual(missing.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_receiving_requires_arrival_and_completion_removes_mm_task(self):
+        blocked = self.client.post(
+            "/api/scanner/receiving/start/", {"pallet_code": self.pallet.scan_code, "worker_code": "GDY_WORKER"}, format="json"
+        )
+        self.assertEqual(blocked.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Register the pallet arrival", blocked.data["detail"])
+        self.client.force_authenticate(self.worker)
+        self.scan()
+        started = self.client.post(
+            "/api/scanner/receiving/start/", {"pallet_code": self.pallet.scan_code, "worker_code": "GDY_WORKER"}, format="json"
+        )
+        self.assertEqual(started.status_code, status.HTTP_200_OK)
+        session_id = started.data["receiving_session"]["id"]
+        closed = self.client.post("/api/scanner/receiving/close/", {"receiving_session_id": session_id}, format="json")
+        self.assertEqual(closed.status_code, status.HTTP_200_OK)
+        self.assertEqual(closed.data["result"], "discrepancy")
+        tasks = self.client.get("/api/mm-tasks/", {"branch": "GDY"})
+        self.assertEqual(tasks.data["results"], [])
+        self.assertEqual(AuditLog.objects.filter(event_type="mm_task_completed", pallet=self.pallet).count(), 1)
+
+    def test_put_away_updates_progress_and_exact_close_completes_task(self):
+        self.client.force_authenticate(self.worker)
+        self.scan()
+        started = self.client.post(
+            "/api/scanner/receiving/start/", {"pallet_code": self.pallet.scan_code, "worker_code": "GDY_WORKER"}, format="json"
+        )
+        session_id = started.data["receiving_session"]["id"]
+        self.client.post(
+            "/api/scanner/receiving/scan-product/",
+            {"receiving_session_id": session_id, "product_code": "ARR-001", "quantity": "5"}, format="json",
+        )
+        put_away = self.client.post(
+            "/api/scanner/receiving/put-away/",
+            {"receiving_session_id": session_id, "location_code": "ARR-01"}, format="json",
+        )
+        self.assertEqual(put_away.status_code, status.HTTP_200_OK)
+        tasks = self.client.get("/api/mm-tasks/", {"branch": "GDY"})
+        self.assertEqual(tasks.data["results"][0]["put_away_units"], 5)
+        self.assertEqual(tasks.data["results"][0]["remaining_units"], 0)
+        closed = self.client.post("/api/scanner/receiving/close/", {"receiving_session_id": session_id}, format="json")
+        self.assertEqual(closed.data["result"], "exact")
+        self.assertEqual(self.client.get("/api/mm-tasks/", {"branch": "GDY"}).data["results"], [])
+
+
 class ScannerReceivingWorkflowTests(APITestCase):
     def setUp(self):
         self.source_branch = Branch.objects.create(code="GDA", name="Gdansk", city="Gdansk", country="Poland")
@@ -1021,6 +1124,7 @@ class ScannerReceivingWorkflowTests(APITestCase):
             expected_quantity=Decimal("2"),
             received_quantity=Decimal("0"),
         )
+        TransferPalletArrival.objects.create(pallet=self.pallet, scanned_by_worker_code="WORKER-1")
 
     def create_transfer_pallet_fixture(self, suffix=None):
         suffix = suffix or f"{TransferPallet.objects.count() + 1:03d}"
@@ -1049,6 +1153,7 @@ class ScannerReceivingWorkflowTests(APITestCase):
             expected_quantity=Decimal("2"),
             received_quantity=Decimal("0"),
         )
+        TransferPalletArrival.objects.create(pallet=pallet, scanned_by_worker_code="WORKER-1")
         return pallet
 
     def start_receiving(self, pallet_code="PAL-TEST-001"):
@@ -3164,6 +3269,16 @@ class ScannerReceivingWorkflowTests(APITestCase):
         self.assertTrue(any("Source review" in event["message"] for event in source_events.data["results"]))
         self.assertFalse(any("Receiving started" in event["message"] for event in source_events.data["results"]))
         self.assertTrue(any("Receiving started" in event["message"] for event in destination_events.data["results"]))
+        receive_event = AuditLog.objects.get(event_type="receive", product=self.product)
+        self.assertEqual(receive_event.quantity, Decimal("2.000"))
+        self.assertEqual(receive_event.pallet, self.pallet)
+        self.assertEqual(receive_event.transfer, self.transfer)
+        self.assertEqual(receive_event.destination_location, self.destination_location)
+        self.assertEqual(receive_event.branch, self.destination_branch)
+        search_by_pallet = self.client.get("/api/current-events/", {"branch": "GDY", "search": self.pallet.scan_code})
+        search_by_transfer = self.client.get("/api/current-events/", {"branch": "GDY", "search": self.transfer.reference})
+        self.assertTrue(any(event["event_type"] == "receive" for event in search_by_pallet.data["results"]))
+        self.assertTrue(any(event["event_type"] == "receive" for event in search_by_transfer.data["results"]))
 
     def test_reconciliation_and_transit_events_are_visible_to_both_branches(self):
         reconciliation = self.create_acknowledged_transit_reconciliation()
@@ -3527,6 +3642,8 @@ class ScannerLookupAndQuickTransferTests(APITestCase):
 
 class ScannerPickingJobWorkflowTests(APITestCase):
     def setUp(self):
+        self.demo_user = User.objects.create_user(username="DEMO", password="demo12345")
+        self.gdy_worker = User.objects.create_user(username="GDY_WORKER", password="demo12345")
         self.branch = Branch.objects.create(code="JOB", name="Job Branch", city="Gdynia", country="Poland")
         self.location = Location.objects.create(
             branch=self.branch,
@@ -4034,6 +4151,13 @@ class ScannerPickingJobWorkflowTests(APITestCase):
         self.assertEqual(response.data["current_instruction"]["location"]["code"], "J-01-01")
         self.assertEqual(response.data["current_instruction"]["product"]["sku"], "JOB-B")
         self.assertTrue(CartPickedItem.objects.filter(cart_work_session_id=cart_work_session_id).exists())
+        event = AuditLog.objects.get(event_type="pick", product=self.product_a, order=self.order_1)
+        self.assertEqual(event.quantity, Decimal("1.000"))
+        self.assertEqual(event.source_location, self.location)
+        self.assertEqual(event.cart.code, "WOZEK-01")
+        self.assertEqual(event.reference, "JOB-ORDER-1")
+        search = self.client.get("/api/current-events/", {"search": "JOB-A", "cart": "WOZEK-01"})
+        self.assertTrue(any(row["event_type"] == "pick" and row["order_reference"] == "JOB-ORDER-1" for row in search.data["results"]))
 
     def test_final_quantity_cannot_be_picked_twice(self):
         self.create_jobs(route_run_ids=[self.run_1.id])
@@ -4096,6 +4220,55 @@ class ScannerPickingJobWorkflowTests(APITestCase):
         self.assertEqual(second.status_code, status.HTTP_400_BAD_REQUEST)
         self.task_1.refresh_from_db()
         self.assertEqual(self.task_1.quantity_prepared, Decimal("1.000"))
+        prepare_event = AuditLog.objects.get(event_type="control")
+        mismatch_event = AuditLog.objects.get(event_type="control_mismatch")
+        self.assertEqual(prepare_event.actor, self.demo_user)
+        self.assertEqual(prepare_event.product, self.product_a)
+        self.assertEqual(prepare_event.cart.code, "WOZEK-01")
+        self.assertEqual(prepare_event.result, "passed")
+        self.assertEqual(prepare_event.expected_quantity, Decimal("1.000"))
+        self.assertEqual(prepare_event.checked_quantity, Decimal("1.000"))
+        self.assertEqual(mismatch_event.product, self.product_a)
+        self.assertEqual(mismatch_event.result, "mismatch")
+        self.assertEqual(mismatch_event.actor, self.demo_user)
+        self.assertEqual(mismatch_event.expected_quantity, Decimal("0.000"))
+        self.assertEqual(mismatch_event.checked_quantity, Decimal("1.000"))
+        filtered = self.client.get(
+            "/api/current-events/",
+            {"product": "JOB-A", "cart": "WOZEK-01", "order": "JOB-ORDER-1", "result": "passed"},
+        )
+        event_types = {row["event_type"] for row in filtered.data["results"]}
+        self.assertEqual(event_types, {"control"})
+
+    def test_authenticated_control_uses_request_user_as_actor(self):
+        self.create_jobs(route_run_ids=[self.run_1.id])
+        job = PickingJob.objects.get()
+        start = self.start_job(job)
+        session_id = start.data["session"]["id"]
+        cart_work_session_id = start.data["cart_work_session"]["id"]
+        self.confirm_location(cart_work_session_id)
+        self.client.post(
+            "/api/scanner/picking/pick/",
+            {"cart_work_session_id": cart_work_session_id, "product_code": "JOB-A", "quantity": "1"},
+            format="json",
+        )
+        self.client.post(
+            "/api/scanner/control/print-label/",
+            {"session_id": session_id, "order_reference": "JOB-ORDER-1", "printer_code": "ZEBRA-01"},
+            format="json",
+        )
+        self.client.force_authenticate(self.gdy_worker)
+
+        response = self.client.post(
+            "/api/scanner/picking/prepare/",
+            {"session_id": session_id, "order_reference": "JOB-ORDER-1", "product_code": "JOB-A", "quantity": "1"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        event = AuditLog.objects.get(event_type="control")
+        self.assertEqual(event.actor, self.gdy_worker)
+        self.assertIn("Worker GDY_WORKER verified", event.message)
 
     def test_control_sees_items_picked_by_all_workers_and_finish_releases_cart(self):
         self.create_jobs()

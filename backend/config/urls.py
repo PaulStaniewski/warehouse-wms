@@ -2,9 +2,10 @@ from django.contrib import admin
 from django.urls import include, path
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 
-from config.api import auth_login, auth_logout, auth_session, me_branch_memberships, router
+from config.api import auth_login, auth_logout, auth_session, current_events, me_branch_memberships, router
 from config.views import health_check
 from operations.scanner_views import (
+    InterBranchMMTasksView,
     ScannerCartWorkCurrentView,
     ScannerControlCartView,
     ScannerControlCartItemsView,
@@ -21,6 +22,7 @@ from operations.scanner_views import (
     ScannerProformasView,
     ScannerProductLookupView,
     ScannerQuickTransferView,
+    ScannerInterBranchArrivalView,
     ScannerReceivingCompleteView,
     ScannerReceivingCloseView,
     ScannerReceivingCurrentView,
@@ -43,6 +45,7 @@ urlpatterns = [
     path("api/auth/login/", auth_login, name="auth-login"),
     path("api/auth/logout/", auth_logout, name="auth-logout"),
     path("api/me/branch-memberships/", me_branch_memberships, name="me-branch-memberships"),
+    path("api/current-events/", current_events, name="current-events"),
     path("api/scanner/session/start/", ScannerSessionStartView.as_view(), name="scanner-session-start"),
     path("api/scanner/session/current/", ScannerSessionCurrentView.as_view(), name="scanner-session-current"),
     path("api/scanner/session/end/", ScannerSessionEndView.as_view(), name="scanner-session-end"),
@@ -64,6 +67,8 @@ urlpatterns = [
     path("api/scanner/products/lookup/", ScannerProductLookupView.as_view(), name="scanner-product-lookup"),
     path("api/scanner/locations/contents/", ScannerLocationContentsView.as_view(), name="scanner-location-contents"),
     path("api/scanner/quick-transfer/", ScannerQuickTransferView.as_view(), name="scanner-quick-transfer"),
+    path("api/scanner/inter-branch-arrivals/", ScannerInterBranchArrivalView.as_view(), name="scanner-inter-branch-arrivals"),
+    path("api/mm-tasks/", InterBranchMMTasksView.as_view(), name="inter-branch-mm-tasks"),
     path("api/scanner/receiving/start/", ScannerReceivingStartView.as_view(), name="scanner-receiving-start"),
     path("api/scanner/receiving/current/", ScannerReceivingCurrentView.as_view(), name="scanner-receiving-current"),
     path("api/scanner/receiving/scan-product/", ScannerReceivingScanProductView.as_view(), name="scanner-receiving-scan-product"),

@@ -131,11 +131,32 @@ def filter_dual_branch_queryset(queryset, request, source_path: str, destination
 
 
 class AuditLogFilter(django_filters.FilterSet):
+    actor = django_filters.CharFilter(method="filter_actor")
     action = django_filters.CharFilter(field_name="action_type")
+    product = django_filters.CharFilter(field_name="product__sku", lookup_expr="iexact")
+    cart = django_filters.CharFilter(field_name="cart__code", lookup_expr="iexact")
+    location = django_filters.CharFilter(method="filter_location")
+    order = django_filters.CharFilter(field_name="order__external_reference", lookup_expr="iexact")
+    actor_name = django_filters.CharFilter(field_name="actor__username", lookup_expr="iexact")
+    event_type = django_filters.CharFilter(field_name="event_type", lookup_expr="iexact")
+    result = django_filters.CharFilter(field_name="result", lookup_expr="iexact")
+
+    def filter_location(self, queryset, name, value):
+        return queryset.filter(
+            models.Q(source_location__code__iexact=value)
+            | models.Q(destination_location__code__iexact=value)
+            | models.Q(source_label__iexact=value)
+            | models.Q(destination_label__iexact=value)
+        )
+
+    def filter_actor(self, queryset, name, value):
+        if str(value).isdigit():
+            return queryset.filter(actor_id=value)
+        return queryset.filter(models.Q(actor__username__iexact=value) | models.Q(message__icontains=f"Worker {value} "))
 
     class Meta:
         model = AuditLog
-        fields = ["actor", "action", "action_type"]
+        fields = ["actor", "actor_name", "action", "action_type", "event_type", "result", "product", "cart", "location", "order"]
 
 
 class RouteRunFilter(django_filters.FilterSet):
@@ -467,7 +488,20 @@ class StockMovementViewSet(ReadOnlyModelViewSet):
 
 
 class AuditLogViewSet(ReadOnlyModelViewSet):
-    queryset = AuditLog.objects.select_related("actor")
+    queryset = AuditLog.objects.select_related(
+        "actor",
+        "branch",
+        "product",
+        "source_location",
+        "destination_location",
+        "cart",
+        "order",
+        "route_run",
+        "route_run__route",
+        "transfer",
+        "pallet",
+        "discrepancy",
+    )
     serializer_class = AuditLogSerializer
     filterset_class = AuditLogFilter
     search_fields = ["entity_name", "entity_id", "message", "actor__username"]
@@ -475,6 +509,8 @@ class AuditLogViewSet(ReadOnlyModelViewSet):
 
     def _event_visible_for_branch(self, event, branch_code: str) -> bool:
         branch_code = branch_code.lower()
+        if event.branch_id:
+            return event.branch.code.lower() == branch_code
         entity_id = event.entity_id
         if not entity_id:
             return False
@@ -532,6 +568,32 @@ class AuditLogViewSet(ReadOnlyModelViewSet):
             return False
         return False
 
+    def _apply_event_search(self, queryset, request):
+        search = request.query_params.get("search", "").strip()
+        if not search:
+            return queryset
+        return queryset.filter(
+            models.Q(message__icontains=search)
+            | models.Q(entity_name__icontains=search)
+            | models.Q(entity_id__icontains=search)
+            | models.Q(reference__icontains=search)
+            | models.Q(actor__username__icontains=search)
+            | models.Q(product__sku__icontains=search)
+            | models.Q(product__name__icontains=search)
+            | models.Q(source_location__code__icontains=search)
+            | models.Q(destination_location__code__icontains=search)
+            | models.Q(source_label__icontains=search)
+            | models.Q(destination_label__icontains=search)
+            | models.Q(cart__code__icontains=search)
+            | models.Q(order__external_reference__icontains=search)
+            | models.Q(route_run__route__code__icontains=search)
+            | models.Q(route_run__route__name__icontains=search)
+            | models.Q(transfer__reference__icontains=search)
+            | models.Q(pallet__scan_code__icontains=search)
+            | models.Q(discrepancy__reference__icontains=search)
+            | models.Q(result__icontains=search)
+        )
+
     def _apply_branch_visibility(self, queryset, request):
         branch = request.query_params.get("branch", "").strip()
         if request.user.is_authenticated:
@@ -548,6 +610,7 @@ class AuditLogViewSet(ReadOnlyModelViewSet):
     def current(self, request):
         since = timezone.now() - timezone.timedelta(days=30)
         queryset = self.filter_queryset(self.get_queryset().filter(created_at__gte=since).order_by("-created_at"))
+        queryset = self._apply_event_search(queryset, request)
         queryset = self._apply_branch_visibility(queryset, request)
         page = self.paginate_queryset(queryset)
 
@@ -580,6 +643,7 @@ class AuditLogViewSet(ReadOnlyModelViewSet):
             .filter(created_at__date__gte=date_from, created_at__date__lte=date_to)
             .order_by("-created_at")
         )
+        queryset = self._apply_event_search(queryset, request)
         queryset = self._apply_branch_visibility(queryset, request)
         page = self.paginate_queryset(queryset)
 

@@ -362,6 +362,17 @@ class StockMovementSerializer(serializers.ModelSerializer):
 class AuditLogSerializer(serializers.ModelSerializer):
     actor_username = serializers.CharField(source="actor.username", read_only=True)
     actor_display = serializers.SerializerMethodField()
+    branch_code = serializers.CharField(source="branch.code", read_only=True)
+    product_sku = serializers.CharField(source="product.sku", read_only=True)
+    product_name = serializers.CharField(source="product.name", read_only=True)
+    source_location_code = serializers.CharField(source="source_location.code", read_only=True)
+    destination_location_code = serializers.CharField(source="destination_location.code", read_only=True)
+    cart_code = serializers.CharField(source="cart.code", read_only=True)
+    order_reference = serializers.CharField(source="order.external_reference", read_only=True)
+    route_run_label = serializers.SerializerMethodField()
+    transfer_reference = serializers.CharField(source="transfer.reference", read_only=True)
+    pallet_code = serializers.CharField(source="pallet.scan_code", read_only=True)
+    discrepancy_reference = serializers.CharField(source="discrepancy.reference", read_only=True)
 
     def get_actor_display(self, obj) -> str:
         if obj.actor_id and obj.actor:
@@ -371,6 +382,11 @@ class AuditLogSerializer(serializers.ModelSerializer):
             return match.group(1)
         return "System"
 
+    def get_route_run_label(self, obj) -> str | None:
+        if obj.route_run_id is None:
+            return None
+        return str(obj.route_run)
+
     class Meta:
         model = AuditLog
         fields = [
@@ -379,6 +395,35 @@ class AuditLogSerializer(serializers.ModelSerializer):
             "actor_username",
             "actor_display",
             "action_type",
+            "event_type",
+            "branch",
+            "branch_code",
+            "product",
+            "product_sku",
+            "product_name",
+            "quantity",
+            "expected_quantity",
+            "checked_quantity",
+            "source_location",
+            "source_location_code",
+            "destination_location",
+            "destination_location_code",
+            "source_label",
+            "destination_label",
+            "cart",
+            "cart_code",
+            "order",
+            "order_reference",
+            "route_run",
+            "route_run_label",
+            "transfer",
+            "transfer_reference",
+            "pallet",
+            "pallet_code",
+            "discrepancy",
+            "discrepancy_reference",
+            "result",
+            "reference",
             "entity_name",
             "entity_id",
             "message",

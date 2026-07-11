@@ -32,6 +32,7 @@ from operations.models import (
     TransferDiscrepancySourceReview,
     TransferDiscrepancyTransitInvestigation,
     TransferPallet,
+    TransferPalletArrival,
     TransferPalletItem,
 )
 
@@ -202,6 +203,12 @@ class TransferPalletItemAdmin(admin.ModelAdmin):
     search_fields = ["pallet__scan_code", "product__sku", "product__name"]
 
 
+@admin.register(TransferPalletArrival)
+class TransferPalletArrivalAdmin(admin.ModelAdmin):
+    list_display = ["pallet", "scanned_at", "scanned_by", "scanned_by_worker_code"]
+    search_fields = ["pallet__scan_code", "pallet__transfer__reference", "scanned_by__username", "scanned_by_worker_code"]
+
+
 @admin.register(PalletReceivingSession)
 class PalletReceivingSessionAdmin(admin.ModelAdmin):
     list_display = ["pallet", "status", "worker_code", "current_pallet_item", "pending_quantity", "started_at", "completed_at"]
@@ -347,7 +354,20 @@ class StockMovementAdmin(admin.ModelAdmin):
 
 @admin.register(AuditLog)
 class AuditLogAdmin(admin.ModelAdmin):
-    list_display = ["action_type", "entity_name", "entity_id", "actor", "created_at"]
-    list_filter = ["action_type", "entity_name", "actor"]
-    search_fields = ["entity_name", "entity_id", "message", "actor__username"]
+    list_display = ["event_type", "action_type", "branch", "product", "reference", "actor", "created_at"]
+    list_filter = ["event_type", "action_type", "branch", "entity_name", "actor"]
+    search_fields = [
+        "entity_name",
+        "entity_id",
+        "message",
+        "reference",
+        "actor__username",
+        "product__sku",
+        "cart__code",
+        "order__external_reference",
+        "route_run__route__code",
+        "transfer__reference",
+        "pallet__scan_code",
+        "discrepancy__reference",
+    ]
     readonly_fields = ["created_at"]

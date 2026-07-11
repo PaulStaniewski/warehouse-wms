@@ -6,6 +6,8 @@ import type {
   BranchMembership,
   AuditLog,
   InventoryItem,
+  InterBranchArrivalResponse,
+  InterBranchMMTask,
   Location,
   Order,
   OrderLine,
@@ -598,6 +600,37 @@ export function useScannerReceivingClose() {
   });
 }
 
+export function useInterBranchArrivals(branch?: string) {
+  return useQuery({
+    enabled: Boolean(branch),
+    queryKey: ["inter-branch-arrivals", branch],
+    queryFn: () => getList<InterBranchMMTask>(`/scanner/inter-branch-arrivals/?branch=${encodeURIComponent(branch ?? "")}`),
+    refetchInterval: 10_000,
+  });
+}
+
+export function useRegisterInterBranchArrival() {
+  return useMutation({
+    mutationFn: async ({ palletCode, workerCode }: { palletCode: string; workerCode?: string }) => {
+      const response = await apiClient.post<InterBranchArrivalResponse>("/scanner/inter-branch-arrivals/", {
+        pallet_code: palletCode,
+        worker_code: workerCode,
+        client_operation_id: crypto.randomUUID(),
+      });
+      return response.data;
+    },
+  });
+}
+
+export function useInterBranchMMTasks(branch?: string) {
+  return useQuery({
+    enabled: Boolean(branch),
+    queryKey: ["inter-branch-mm-tasks", branch],
+    queryFn: () => getList<InterBranchMMTask>(`/mm-tasks/?branch=${encodeURIComponent(branch ?? "")}`),
+    refetchInterval: 10_000,
+  });
+}
+
 export function useTransferDiscrepancies(branch?: string) {
   return useQuery({
     queryKey: ["transfer-discrepancies", branch],
@@ -1056,10 +1089,34 @@ export function useCompleteTransferDiscrepancyTransitInvestigation() {
   });
 }
 
-export function useCurrentAuditLogs(branch?: string) {
+export type CurrentEventFilters = {
+  actor?: string;
+  cart?: string;
+  eventType?: string;
+  location?: string;
+  order?: string;
+  product?: string;
+  result?: string;
+  search?: string;
+};
+
+export function useCurrentAuditLogs(branch?: string, filters: CurrentEventFilters = {}) {
   return useQuery({
-    queryKey: ["audit-logs", "current", branch],
-    queryFn: () => getList<AuditLog>(`/audit-logs/current/${branch ? `?branch=${branch}` : ""}`),
+    queryKey: ["audit-logs", "current", branch, filters],
+    queryFn: () => {
+      const params = new URLSearchParams();
+      if (branch) params.set("branch", branch);
+      if (filters.search) params.set("search", filters.search);
+      if (filters.eventType) params.set("event_type", filters.eventType);
+      if (filters.product) params.set("product", filters.product);
+      if (filters.result) params.set("result", filters.result);
+      if (filters.cart) params.set("cart", filters.cart);
+      if (filters.location) params.set("location", filters.location);
+      if (filters.order) params.set("order", filters.order);
+      if (filters.actor) params.set("actor", filters.actor);
+      const query = params.toString();
+      return getList<AuditLog>(`/current-events/${query ? `?${query}` : ""}`);
+    },
   });
 }
 

@@ -31,6 +31,7 @@ import { ScannerProformasPage } from "./pages/ScannerProformasPage";
 import { ScannerProductLookupPage } from "./pages/ScannerProductLookupPage";
 import { ScannerQuickTransferPage } from "./pages/ScannerQuickTransferPage";
 import { ScannerReceivingPage } from "./pages/ScannerReceivingPage";
+import { ScannerInterBranchArrivalsPage } from "./pages/ScannerInterBranchArrivalsPage";
 import { ScannerTasksPage } from "./pages/ScannerTasksPage";
 import { SourceDiscrepancyReviewDetailPage } from "./pages/SourceDiscrepancyReviewDetailPage";
 import { SourceDiscrepancyReviewsPage } from "./pages/SourceDiscrepancyReviewsPage";
@@ -87,6 +88,7 @@ function App() {
             <Route path="wms/transit-investigations" element={<TransitInvestigationsPage />} />
             <Route path="wms/transit-investigations/:id" element={<TransitInvestigationDetailPage />} />
             <Route path="wms/route-runs/:id/documents" element={<RouteDocumentsPage />} />
+            <Route path="wms/current-events" element={<CurrentEventsPage />} />
             <Route path="wms/events/current" element={<CurrentEventsPage />} />
             <Route path="wms/events/archive" element={<ArchiveEventsPage />} />
             <Route path="products" element={<Navigate to="/wms/products" replace />} />
@@ -102,6 +104,7 @@ function App() {
             <Route path="scanner/picking" element={<ScannerPickingPage />} />
             <Route path="scanner/control" element={<ScannerControlPage />} />
             <Route path="scanner/receiving" element={<ScannerReceivingPage />} />
+            <Route path="scanner/inter-branch-arrivals" element={<ScannerInterBranchArrivalsPage />} />
             <Route path="scanner/routes" element={<Navigate to="/scanner/proformas" replace />} />
             <Route path="scanner/route-runs/:id/picking" element={<Navigate to="/scanner/picking" replace />} />
             <Route path="scanner/route-runs/:id/control" element={<Navigate to="/scanner/control" replace />} />

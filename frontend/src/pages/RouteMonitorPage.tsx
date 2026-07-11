@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { AlertTriangle, Clock3, RefreshCw } from "lucide-react";
 
 import { useActiveBranch } from "../api/ActiveBranchContext";
-import { useCloseRouteRun, usePrintRouteDocuments, useRouteRuns } from "../api/queries";
+import { useCloseRouteRun, useInterBranchMMTasks, usePrintRouteDocuments, useRouteRuns } from "../api/queries";
 import { DataState } from "../components/DataState";
 import { PageHeader } from "../components/PageHeader";
 import type { RouteRun } from "../types/api";
@@ -131,6 +131,7 @@ export function RouteMonitorPage() {
   const [actionMessage, setActionMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [now, setNow] = useState(() => new Date());
   const routeRuns = useRouteRuns(activeBranchCode);
+  const mmTasks = useInterBranchMMTasks(activeBranchCode);
   const printDocuments = usePrintRouteDocuments();
   const closeRouteRun = useCloseRouteRun();
   const rows = routeRuns.data?.results ?? [];
@@ -153,6 +154,7 @@ export function RouteMonitorPage() {
   useEffect(() => {
     const refresh = window.setInterval(() => {
       routeRuns.refetch();
+      mmTasks.refetch();
     }, 10000);
 
     return () => window.clearInterval(refresh);
@@ -160,6 +162,7 @@ export function RouteMonitorPage() {
 
   function refreshMonitor() {
     routeRuns.refetch();
+    mmTasks.refetch();
   }
 
   async function handlePrintDocuments() {
@@ -307,7 +310,12 @@ export function RouteMonitorPage() {
 
               <section className="monitor-side-section">
                 <h2>MM / Inter-branch transfers</h2>
-                <p>No MM tasks</p>
+                <p>MM tasks: {mmTasks.data?.results.length ?? 0}</p>
+                {(mmTasks.data?.results.length ?? 0) === 0 ? <p>No MM tasks</p> : (
+                  <div className="table-wrap"><table><thead><tr><th>Pallet</th><th>Transfer</th><th>From</th><th>Arrived</th><th>Expected</th><th>Put away</th><th>Remaining</th><th>Status</th><th>Open</th></tr></thead>
+                    <tbody>{mmTasks.data?.results.map((task) => <tr key={task.pallet_id}><td>{task.pallet_code}</td><td>{task.transfer_reference}</td><td>{task.source_branch}</td><td>{new Date(task.arrived_at).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}</td><td>{task.expected_units}</td><td>{task.put_away_units}</td><td>{task.remaining_units}</td><td>{formatStatus(task.status)}</td><td><a href={`/scanner/receiving?pallet=${encodeURIComponent(task.pallet_code)}`}>Open receiving</a></td></tr>)}</tbody>
+                  </table></div>
+                )}
               </section>
 
               <section className="monitor-side-section">
