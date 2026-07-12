@@ -64,6 +64,9 @@ class Location(TimestampedModel):
 class Product(TimestampedModel):
     sku = models.CharField(max_length=64, unique=True)
     name = models.CharField(max_length=255)
+    brand = models.CharField(max_length=128, blank=True)
+    description = models.TextField(blank=True)
+    image_url = models.CharField(max_length=255, blank=True)
     barcode = models.CharField(max_length=128, unique=True, blank=True, null=True)
     unit_of_measure = models.CharField(max_length=32, default="pcs")
     is_active = models.BooleanField(default=True)

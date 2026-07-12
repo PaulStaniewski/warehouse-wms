@@ -3660,6 +3660,9 @@ class ScannerPickingJobWorkflowTests(APITestCase):
         self.product_a = Product.objects.create(
             sku="JOB-A",
             name="Job Product A",
+            brand="Test Brand",
+            description="Presentation details for the active picking product.",
+            image_url="/products/oil-filter.svg",
             barcode="550000000001",
             unit_of_measure="pcs",
         )
@@ -3872,6 +3875,15 @@ class ScannerPickingJobWorkflowTests(APITestCase):
         self.assertEqual(response.data["state"], "waiting_for_location")
         self.assertEqual(response.data["current_instruction"]["location"]["code"], "J-01-01")
         self.assertEqual(response.data["current_instruction"]["product"]["sku"], "JOB-A")
+        self.assertEqual(response.data["current_instruction"]["product"]["brand"], "Test Brand")
+        self.assertEqual(
+            response.data["current_instruction"]["product"]["description"],
+            "Presentation details for the active picking product.",
+        )
+        self.assertEqual(response.data["current_instruction"]["product"]["image_url"], "/products/oil-filter.svg")
+        task = response.data["tasks"][0]
+        self.assertEqual(task["product_brand"], "Test Brand")
+        self.assertEqual(task["product_image_url"], "/products/oil-filter.svg")
 
     def test_correct_location_confirmation_succeeds(self):
         self.create_jobs(route_run_ids=[self.run_1.id])

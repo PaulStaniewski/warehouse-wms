@@ -234,18 +234,21 @@ class Command(BaseCommand):
 
     def create_products(self):
         product_data = [
-            ("FILTR-001", "Filtr oleju demo", "590000000001", "pcs"),
-            ("OLEJ-001", "Olej 5W30 demo", "590000000002", "pcs"),
-            ("KLOCKI-001", "Klocki hamulcowe demo", "590000000003", "pcs"),
-            ("WYCIER-001", "Wycieraczki demo", "590000000004", "pcs"),
+            ("FILTR-001", "Oil Filter RFO-301", "Ravenol", "High-performance oil filter for selected passenger vehicles.", "/products/oil-filter.svg", "590000000001", "pcs"),
+            ("OLEJ-001", "Motor Oil 5W-30", "Lubrix", "Synthetic engine oil supplied in a 5 litre container.", "/products/motor-oil.svg", "590000000002", "pcs"),
+            ("KLOCKI-001", "Front Brake Pads", "Brakemax", "Front axle brake pad set for selected passenger vehicles.", "/products/brake-pads.svg", "590000000003", "pcs"),
+            ("WYCIER-001", "Wiper Blade Set", "Clearway", "Durable front windscreen wiper blade set.", "", "590000000004", "pcs"),
         ]
 
         products = {}
-        for sku, name, barcode, unit_of_measure in product_data:
+        for sku, name, brand, description, image_url, barcode, unit_of_measure in product_data:
             product, _ = Product.objects.update_or_create(
                 sku=sku,
                 defaults={
                     "name": name,
+                    "brand": brand,
+                    "description": description,
+                    "image_url": image_url,
                     "barcode": barcode,
                     "unit_of_measure": unit_of_measure,
                     "is_active": True,

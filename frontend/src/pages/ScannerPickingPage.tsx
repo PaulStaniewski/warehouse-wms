@@ -1,10 +1,11 @@
-import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import axios from "axios";
-import { ArrowLeft, Camera } from "lucide-react";
+import { Archive, ArrowLeft, Camera, ChevronDown, ClipboardList, History, Menu, PackageSearch } from "lucide-react";
 import { Link } from "react-router-dom";
 
-import { useScannerCartWork, useScannerConfirmLocation, useScannerPickingPick } from "../api/queries";
+import { useCurrentAuditLogs, useScannerCartWork, useScannerConfirmLocation, useScannerPickingPick } from "../api/queries";
+import { useActiveBranch } from "../api/ActiveBranchContext";
 import { useStoredScannerSession } from "../api/scannerSession";
 import { DataState } from "../components/DataState";
 import { CameraBarcodeScanner } from "../components/scanner/CameraBarcodeScanner";
@@ -31,7 +32,16 @@ function formatQuantity(value: string | number) {
   return new Intl.NumberFormat("en-GB", { maximumFractionDigits: 0 }).format(numberValue);
 }
 
+function ProductImage({ alt, imageUrl, compact = false }: { alt: string; imageUrl?: string; compact?: boolean }) {
+  const [failed, setFailed] = useState(false);
+  if (!imageUrl || failed) {
+    return <div className={`concept-product-placeholder ${compact ? "concept-product-placeholder--compact" : ""}`}>Product image unavailable</div>;
+  }
+  return <img className={compact ? "concept-product-thumb" : "concept-product-image"} src={imageUrl} alt={alt} onError={() => setFailed(true)} />;
+}
+
 export function ScannerPickingPage() {
+  const { activeBranchCode } = useActiveBranch();
   const queryClient = useQueryClient();
   const activeSession = useStoredScannerSession();
   const cartWork = useScannerCartWork(activeSession?.id, activeSession?.cart_work_session);
@@ -53,6 +63,26 @@ export function ScannerPickingPage() {
   const totalPicked = tasks.reduce((sum, task) => sum + toNumber(task.quantity_picked), 0);
   const totalPrepared = tasks.reduce((sum, task) => sum + toNumber(task.quantity_prepared), 0);
   const totalRemaining = tasks.reduce((sum, task) => sum + toNumber(task.remaining_quantity), 0);
+  const progress = work?.picking_job.progress_percent ?? 0;
+  const recentActions = useCurrentAuditLogs(activeBranchCode, { cart: work?.cart_code, eventType: "pick" });
+  const locationGroups = useMemo(() => {
+    const grouped = new Map<string, typeof tasks>();
+    tasks.forEach((task) => grouped.set(task.source_location_code, [...(grouped.get(task.source_location_code) ?? []), task]));
+    return Array.from(grouped, ([location, groupTasks]) => ({
+      location,
+      name: groupTasks[0]?.source_location_name,
+      tasks: groupTasks,
+      toPick: groupTasks.reduce((sum, task) => sum + toNumber(task.quantity_to_pick), 0),
+      picked: groupTasks.reduce((sum, task) => sum + toNumber(task.quantity_picked), 0),
+      remaining: groupTasks.reduce((sum, task) => sum + toNumber(task.remaining_quantity), 0),
+    }));
+  }, [tasks]);
+  const currentLocation = instruction?.location.code ?? null;
+  const [expandedLocation, setExpandedLocation] = useState<string | null>(null);
+
+  useEffect(() => {
+    setExpandedLocation(currentLocation);
+  }, [currentLocation]);
 
   const refreshPickingData = useCallback(async () => {
     await Promise.all([
@@ -149,237 +179,68 @@ export function ScannerPickingPage() {
     setLocationCode("");
   }, [instruction?.picking_task_id, pickingState]);
 
+  useEffect(() => {
+    if (!work || !instruction) return;
+    window.setTimeout(() => {
+      if (pickingState === "waiting_for_location") locationInputRef.current?.focus();
+      if (pickingState === "waiting_for_product") productInputRef.current?.focus();
+    }, 0);
+  }, [instruction, pickingState, work]);
+
+  const active = Boolean(work && instruction && pickingState !== "completed");
+  const currentTask = tasks.find((task) => task.id === instruction?.picking_task_id);
+
   return (
-    <>
-      <div className="scanner-links">
-        <Link to="/scanner">
-          <ArrowLeft size={17} />
-          Scanner menu
-        </Link>
-        <Link to="/scanner/tasks">Tasks</Link>
-        <Link to="/scanner/control">Control</Link>
-      </div>
-
+    <div className="concept-picking-page">
+      <div className="scanner-links"><Link to="/scanner"><ArrowLeft size={17} />Scanner menu</Link><Link to="/scanner/tasks">Tasks</Link><Link to="/scanner/control">Control</Link></div>
       {message && <div className={`scanner-message scanner-message--${message.type}`}>{message.text}</div>}
-
-      <CameraBarcodeScanner
-        isOpen={cameraMode !== null}
-        onClose={handleCameraClose}
-        onDetected={handleCameraDetected}
-      />
-
-      {!activeSession && (
-        <section className="scanner-workflow-panel">
-          <header>
-            <span>1</span>
-          <h2>Picking</h2>
-        </header>
-        <p>
-            No active picking work. Open <Link to="/scanner/tasks">Tasks</Link>, choose a job, and scan a cart.
-        </p>
-      </section>
-      )}
+      <CameraBarcodeScanner isOpen={cameraMode !== null} onClose={handleCameraClose} onDetected={handleCameraDetected} />
 
       <DataState isLoading={Boolean(activeSession) && cartWork.isLoading} isError={Boolean(activeSession) && cartWork.isError} error={cartWork.error}>
-        {work && (
-          <>
-            <section className="scanner-header-panel">
-              <div>
-                <p>Picking</p>
-                <h1>
-                  Cart <span>{work.cart_code}</span>
-                </h1>
-                <small>Picking Job #{work.picking_job.id} / {work.picking_job.routes.map((route) => route.route_code).join(", ")}</small>
-              </div>
-              <dl>
-                <div>
-                  <dt>Worker</dt>
-                  <dd>{workerCode || "-"}</dd>
-                </div>
-                <div>
-                  <dt>Progress</dt>
-                  <dd>{work.picking_job.progress_percent}%</dd>
-                </div>
-              </dl>
-            </section>
+        <section className={`concept-current-bar ${active ? "" : "concept-current-bar--empty"}`}>
+          <div className="concept-current-identity">
+            {instruction ? <ProductImage compact alt={instruction.product.name} imageUrl={instruction.product.image_url} /> : <div className="concept-product-placeholder concept-product-placeholder--compact">—</div>}
+            <div><small>Current pick</small><strong>{instruction?.product.sku ?? "No active picking work yet"}</strong><span>{instruction?.product.name ?? "Open Tasks, choose a job, and scan a cart."}</span>{instruction?.product.brand && <em>{instruction.product.brand}</em>}</div>
+          </div>
+          <div className="concept-current-location"><small>Location</small><strong>{instruction?.location.code ?? "—"}</strong></div>
+          <dl className="concept-current-stats"><div><dt>To pick</dt><dd>{formatQuantity(instruction?.required_quantity ?? 0)}</dd></div><div><dt>Picked</dt><dd>{formatQuantity(instruction?.picked_quantity ?? 0)}</dd></div><div><dt>Remaining</dt><dd>{formatQuantity(instruction?.remaining_quantity ?? 0)}</dd></div><div><dt>Progress</dt><dd>{progress}%</dd></div></dl>
+        </section>
 
-            <section className="scanner-progress-grid">
-              <article>
-                <span>To pick</span>
-                <strong>{formatQuantity(totalToPick)}</strong>
-              </article>
-              <article>
-                <span>Picked</span>
-                <strong>{formatQuantity(totalPicked)}</strong>
-              </article>
-              <article>
-                <span>Prepared</span>
-                <strong>{formatQuantity(totalPrepared)}</strong>
-              </article>
-              <article>
-                <span>Remaining</span>
-                <strong>{formatQuantity(totalRemaining)}</strong>
-              </article>
-            </section>
+        <section className="concept-summary-strip">
+          <span>Task: <strong>{work ? `#${work.picking_job.id}` : "—"}</strong></span><span>Cart: <strong>{work?.cart_code ?? "—"}</strong></span><span>Progress: <strong>{progress}%</strong></span><span>To pick: <strong>{formatQuantity(totalToPick)}</strong></span><span>Picked: <strong>{formatQuantity(totalPicked)}</strong></span><span>Prepared: <strong>{formatQuantity(totalPrepared)}</strong></span><span>Remaining: <strong>{formatQuantity(totalRemaining)}</strong></span>
+        </section>
 
-            {!instruction || pickingState === "completed" ? (
-              <section className="scanner-workflow-panel">
-                <header>
-                  <span>Done</span>
-                  <h2>Picking completed</h2>
-                </header>
-                <p>All required picking work for this cart is complete.</p>
-                <Link className="scanner-confirm-button" to="/scanner/control">
-                  Go to Control
-                </Link>
-              </section>
-            ) : pickingState === "waiting_for_product" ? (
-              <section className="scanner-workflow-panel">
-                <header>
-                  <span>B</span>
-                  <h2>Location confirmed</h2>
-                </header>
-                <section className="scanner-instruction-card">
-                  <span>Confirmed location</span>
-                  <strong>{instruction.location.code}</strong>
-                  <small>{instruction.location.name}</small>
-                </section>
-                <section className="scanner-result-card">
-                  <div>
-                    <span>Expected product</span>
-                    <strong>{instruction.product.sku}</strong>
-                  </div>
-                  <div>
-                    <span>Name</span>
-                    <strong>{instruction.product.name}</strong>
-                  </div>
-                  <div>
-                    <span>Remaining</span>
-                    <strong>{formatQuantity(instruction.remaining_quantity)}</strong>
-                  </div>
-                </section>
-                <form className="scanner-scan-form" onSubmit={handlePick}>
-                  <label htmlFor="pick-product-code">
-                    <span>Scan product barcode or SKU</span>
-                    <input
-                      autoComplete="off"
-                      autoFocus
-                      id="pick-product-code"
-                      onChange={(event) => setProductCode(event.target.value)}
-                      placeholder="Barcode, SKU, or product code"
-                      ref={productInputRef}
-                      value={productCode}
-                    />
-                  </label>
-                  <label htmlFor="pick-quantity">
-                    <span>Quantity</span>
-                    <input
-                      id="pick-quantity"
-                      inputMode="numeric"
-                      onChange={(event) => setPickQuantity(event.target.value.replace(/\D/g, ""))}
-                      pattern="[0-9]*"
-                      placeholder="1"
-                      type="text"
-                      value={pickQuantity}
-                    />
-                  </label>
-                  <button className="sr-only" disabled={scannerPick.isPending || !productCode.trim() || !pickQuantity.trim()} type="submit">
-                    Submit product scan
-                  </button>
-                  <button className="scanner-camera-button" disabled={scannerPick.isPending} onClick={() => setCameraMode("product")} type="button">
-                    <Camera size={19} />
-                    Scan with camera
-                  </button>
-                </form>
-              </section>
-            ) : (
-              <form className="scanner-workflow-panel" onSubmit={handleConfirmLocation}>
-                <header>
-                  <span>A</span>
-                  <h2>Go to location</h2>
-                </header>
-                <section className="scanner-instruction-card scanner-instruction-card--primary">
-                  <span>Next location</span>
-                  <strong>{instruction.location.code}</strong>
-                  <small>{instruction.location.name}</small>
-                </section>
-                <section className="scanner-result-card">
-                  <div>
-                    <span>Next product</span>
-                    <strong>{instruction.product.sku}</strong>
-                  </div>
-                  <div>
-                    <span>Name</span>
-                    <strong>{instruction.product.name}</strong>
-                  </div>
-                  <div>
-                    <span>Remaining</span>
-                    <strong>{formatQuantity(instruction.remaining_quantity)}</strong>
-                  </div>
-                </section>
-                <label htmlFor="pick-location-code">
-                  <span>Scan location</span>
-                  <input
-                    autoComplete="off"
-                    autoFocus
-                    id="pick-location-code"
-                    onChange={(event) => setLocationCode(event.target.value)}
-                    placeholder="Location barcode"
-                    ref={locationInputRef}
-                    value={locationCode}
-                  />
-                </label>
-                <button className="sr-only" disabled={confirmLocation.isPending || !locationCode.trim()} type="submit">
-                  Submit location scan
-                </button>
-                <button className="scanner-camera-button" disabled={confirmLocation.isPending} onClick={() => setCameraMode("location")} type="button">
-                  <Camera size={19} />
-                  Scan with camera
-                </button>
-              </form>
-            )}
+        <section className="concept-product-card">
+          <div className="concept-product-visual"><ProductImage alt={instruction?.product.name ?? "Product"} imageUrl={instruction?.product.image_url} /></div>
+          <div className="concept-product-copy"><span className="concept-eyebrow">{instruction?.product.brand || "Brand unavailable"}</span><h1>{instruction?.product.name ?? "No active product"}</h1><strong className="concept-sku">{instruction?.product.sku ?? "—"}</strong><p>{instruction?.product.description || "Product description unavailable."}</p><dl><div><dt>Location</dt><dd>{instruction?.location.code ?? "—"}</dd></div><div><dt>Cart</dt><dd>{work?.cart_code ?? "—"}</dd></div><div><dt>Order</dt><dd>{instruction?.order_reference ?? "—"}</dd></div></dl></div>
+          <dl className="concept-product-quantities"><div><dt>To pick</dt><dd>{formatQuantity(currentTask?.quantity_to_pick ?? 0)}</dd></div><div><dt>Picked</dt><dd>{formatQuantity(currentTask?.quantity_picked ?? 0)}</dd></div><div><dt>Prepared</dt><dd>{formatQuantity(currentTask?.quantity_prepared ?? 0)}</dd></div><div><dt>Remaining</dt><dd>{formatQuantity(currentTask?.remaining_quantity ?? 0)}</dd></div></dl>
+        </section>
 
-            <section className="picking-list">
-              {tasks.map((task) => (
-                <article className={`picking-row ${task.status === "completed" ? "picking-row--completed" : ""}`} key={task.id}>
-                  <div className="picking-location">
-                    <span>Location</span>
-                    <strong>{task.source_location_code}</strong>
-                    {task.source_location_name && <small>{task.source_location_name}</small>}
-                  </div>
-                  <div className="picking-product">
-                    <span className="mono">{task.product_sku}</span>
-                    <h2>{task.product_name}</h2>
-                    <p>Order {task.order_reference}</p>
-                    <p>Status {formatStatus(task.status)}</p>
-                  </div>
-                  <div className="picking-quantities">
-                    <div>
-                      <span>To pick</span>
-                      <strong>{formatQuantity(task.quantity_to_pick)}</strong>
-                    </div>
-                    <div>
-                      <span>Picked</span>
-                      <strong>{formatQuantity(task.quantity_picked)}</strong>
-                    </div>
-                    <div>
-                      <span>Prepared</span>
-                      <strong>{formatQuantity(task.quantity_prepared)}</strong>
-                    </div>
-                    <div>
-                      <span>Remaining</span>
-                      <strong>{formatQuantity(task.remaining_quantity)}</strong>
-                    </div>
-                  </div>
-                  <span className={`route-label route-label--${task.status === "picked" || task.status === "completed" ? "selectable" : "neutral"}`}>
-                    {formatStatus(task.status)}
-                  </span>
-                </article>
-              ))}
-            </section>
-          </>
-        )}
+        <section className="concept-scan-grid">
+          <form className={`concept-scan-card ${pickingState === "waiting_for_location" && active ? "concept-scan-card--active" : ""}`} onSubmit={handleConfirmLocation}><header><span>Scan location</span><strong>Scan the required warehouse location.</strong></header><p>Expected: <b>{instruction?.location.code ?? "—"}</b></p><div className="concept-scan-controls"><input ref={locationInputRef} disabled={!active || pickingState !== "waiting_for_location"} value={locationCode} onChange={(event) => setLocationCode(event.target.value)} placeholder="Scan location barcode" autoComplete="off" /><button type="button" disabled={!active || pickingState !== "waiting_for_location"} onClick={() => setCameraMode("location")}><Camera size={18} /></button></div><button className="sr-only" type="submit">Confirm location</button></form>
+          <form className={`concept-scan-card ${pickingState === "waiting_for_product" && active ? "concept-scan-card--active" : ""}`} onSubmit={handlePick}><header><span>Scan product</span><strong>Scan the product barcode to confirm the pick.</strong></header><p>Expected: <b>{instruction?.product.sku ?? "—"}</b></p><div className="concept-scan-controls"><input ref={productInputRef} disabled={!active || pickingState !== "waiting_for_product"} value={productCode} onChange={(event) => setProductCode(event.target.value)} placeholder="Scan product barcode" autoComplete="off" /><input className="concept-quantity-input" disabled={!active || pickingState !== "waiting_for_product"} inputMode="numeric" value={pickQuantity} onChange={(event) => setPickQuantity(event.target.value.replace(/\D/g, ""))} /><button type="button" disabled={!active || pickingState !== "waiting_for_product"} onClick={() => setCameraMode("product")}><Camera size={18} /></button></div><button className="sr-only" type="submit">Confirm product</button></form>
+        </section>
+
+        {!instruction && work && pickingState === "completed" && <section className="concept-complete-card"><strong>Picking completed</strong><span>All required work for this cart is complete.</span><Link to="/scanner/control">Go to Control</Link></section>}
+
+        <section className="concept-manifest">
+          <header><div><span>Manifest</span><strong>{tasks.length} products</strong></div></header>
+          {locationGroups.length === 0 ? <div className="concept-manifest-empty"><PackageSearch size={32} /><strong>No manifest loaded</strong><span>Select a task to start picking.</span></div> : locationGroups.map((group) => {
+            const expanded = expandedLocation === group.location;
+            const complete = group.remaining <= 0;
+            return <article className={`concept-location-group ${complete ? "concept-location-group--complete" : ""}`} key={group.location}><button className="concept-location-toggle" onClick={() => setExpandedLocation(expanded ? null : group.location)} type="button"><div><strong>{group.location}</strong><span>{group.name}</span></div><div><span>{group.tasks.length} products</span><span>To pick: {formatQuantity(group.toPick)}</span><span>Picked: {formatQuantity(group.picked)}</span><span>Remaining: {formatQuantity(group.remaining)}</span></div><ChevronDown className={expanded ? "is-open" : ""} size={20} /></button>{expanded && <div className="concept-manifest-products">{group.tasks.map((task) => {
+              const isCurrent = task.id === instruction?.picking_task_id;
+              const isComplete = toNumber(task.remaining_quantity) <= 0;
+              const statusLabel = isCurrent ? "Current" : isComplete ? "Completed" : task.status === "open" ? "Open" : "Next";
+              return <div className={`concept-manifest-row ${isComplete ? "concept-manifest-row--complete" : ""}`} key={task.id}><ProductImage compact alt={task.product_name} imageUrl={task.product_image_url} /><div className="concept-manifest-product"><strong>{task.product_sku}</strong><span>{task.product_name}</span><small>{task.product_brand || "Brand unavailable"} · {task.order_reference}</small></div><dl><div><dt>To pick</dt><dd>{formatQuantity(task.quantity_to_pick)}</dd></div><div><dt>Picked</dt><dd>{formatQuantity(task.quantity_picked)}</dd></div><div><dt>Prepared</dt><dd>{formatQuantity(task.quantity_prepared)}</dd></div><div><dt>Remaining</dt><dd>{formatQuantity(task.remaining_quantity)}</dd></div></dl><span className={`concept-row-status concept-row-status--${statusLabel.toLowerCase()}`}>{statusLabel}</span></div>;
+            })}</div>}</article>;
+          })}
+        </section>
+
+        <details className="concept-recent-actions"><summary>Recent actions</summary>{(work ? recentActions.data?.results ?? [] : []).slice(0, 5).map((event) => <div key={event.id}><time>{new Date(event.created_at).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}</time><span>{event.message}</span></div>)}{(!work || (recentActions.data?.results.length ?? 0) === 0) && <p>No picking actions yet.</p>}<Link to={`/wms/current-events?event_type=pick${work ? `&cart=${encodeURIComponent(work.cart_code)}` : ""}`}>View all</Link></details>
       </DataState>
-    </>
+
+      <nav className="concept-mobile-nav"><Link to="/scanner/tasks"><ClipboardList size={20} /><span>Tasks</span></Link><Link className="active" to="/scanner/picking"><Archive size={20} /><span>Picking</span></Link><Link to="/wms/inventory"><PackageSearch size={20} /><span>Inventory</span></Link><Link to="/wms/current-events"><History size={20} /><span>History</span></Link><Link to="/scanner"><Menu size={20} /><span>More</span></Link></nav>
+    </div>
   );
 }

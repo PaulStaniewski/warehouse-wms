@@ -291,6 +291,9 @@ class PickingTaskSerializer(serializers.ModelSerializer):
     order_reference = serializers.CharField(source="order_line.order.external_reference", read_only=True)
     product_sku = serializers.CharField(source="order_line.product.sku", read_only=True)
     product_name = serializers.CharField(source="order_line.product.name", read_only=True)
+    product_brand = serializers.CharField(source="order_line.product.brand", read_only=True)
+    product_description = serializers.CharField(source="order_line.product.description", read_only=True)
+    product_image_url = serializers.CharField(source="order_line.product.image_url", read_only=True)
     source_location_code = serializers.CharField(source="source_location.code", read_only=True)
     source_location_name = serializers.CharField(source="source_location.name", read_only=True)
     assigned_to_username = serializers.CharField(source="assigned_to.username", read_only=True)
@@ -313,6 +316,9 @@ class PickingTaskSerializer(serializers.ModelSerializer):
             "order_reference",
             "product_sku",
             "product_name",
+            "product_brand",
+            "product_description",
+            "product_image_url",
             "source_location",
             "source_location_code",
             "source_location_name",

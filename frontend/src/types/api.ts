@@ -135,6 +135,9 @@ export type PickingTask = {
   order_reference: string;
   product_sku: string;
   product_name: string;
+  product_brand: string;
+  product_description: string;
+  product_image_url: string;
   source_location: number;
   source_location_code: string;
   source_location_name: string;
@@ -1016,11 +1019,15 @@ export type PickInstruction = {
     code: string;
     name: string;
   };
+  order_reference: string;
   product: {
     id: number;
     sku: string;
     barcode: string | null;
     name: string;
+    brand: string;
+    description: string;
+    image_url: string;
   };
   required_quantity: string;
   picked_quantity: string;
