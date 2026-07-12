@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { AlertTriangle, Clock3, RefreshCw } from "lucide-react";
 
 import { useActiveBranch } from "../api/ActiveBranchContext";
 import { useCloseRouteRun, useInterBranchMMTasks, usePrintRouteDocuments, useRouteRuns } from "../api/queries";
 import { DataState } from "../components/DataState";
 import { PageHeader } from "../components/PageHeader";
-import type { RouteRun } from "../types/api";
+import type { InterBranchMMTask, RouteRun } from "../types/api";
 
 
 function formatStatus(status: string) {
@@ -14,6 +15,31 @@ function formatStatus(status: string) {
 
 function formatTime(value: string) {
   return value.slice(0, 5);
+}
+
+function formatDateTime(value: string) {
+  return new Date(value).toLocaleString("en-GB", {
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    month: "2-digit",
+  });
+}
+
+function formatUnits(value: number) {
+  return new Intl.NumberFormat("en-GB", { maximumFractionDigits: 0 }).format(value);
+}
+
+function getMmProgress(task: InterBranchMMTask) {
+  if (task.expected_units <= 0) {
+    return 0;
+  }
+
+  return Math.min(100, Math.round((task.put_away_units / task.expected_units) * 100));
+}
+
+function getMmStatusLabel(task: InterBranchMMTask) {
+  return task.status === "receiving" || task.put_away_units > 0 ? "Receiving" : "Waiting for receiving";
 }
 
 function isClosed(run: RouteRun) {
@@ -67,6 +93,101 @@ function ProgressCell({ run }: { run: RouteRun }) {
         <div className="monitor-progress-fill" style={{ width: `${progress}%` }} />
       </div>
     </div>
+  );
+}
+
+function MMTasksSection({ tasks }: { tasks: InterBranchMMTask[] }) {
+  return (
+    <section className="monitor-mm-section">
+      <header className="monitor-section-header">
+        <div>
+          <h2>MM / Inter-branch transfers</h2>
+          <p>Pallets waiting for put-away at the active branch.</p>
+        </div>
+        <strong>
+          {tasks.length} active {tasks.length === 1 ? "task" : "tasks"}
+        </strong>
+      </header>
+
+      {tasks.length === 0 ? (
+        <div className="monitor-empty-state">No pallets are waiting for receiving.</div>
+      ) : (
+        <div className="monitor-mm-list">
+          {tasks.map((task) => {
+            const progress = getMmProgress(task);
+
+            return (
+              <article className="monitor-mm-card" key={task.pallet_id}>
+                <div className="monitor-mm-primary">
+                  <div>
+                    <span>Pallet</span>
+                    <strong>{task.pallet_code}</strong>
+                  </div>
+                  <span className={`monitor-mm-status monitor-mm-status--${task.status}`}>
+                    {getMmStatusLabel(task)}
+                  </span>
+                </div>
+
+                <div className="monitor-mm-route">
+                  <div>
+                    <span>Transfer</span>
+                    <strong>{task.transfer_reference}</strong>
+                  </div>
+                  <div>
+                    <span>From</span>
+                    <strong>{task.source_branch}</strong>
+                  </div>
+                  <div>
+                    <span>To</span>
+                    <strong>{task.destination_branch}</strong>
+                  </div>
+                  <div>
+                    <span>Arrived</span>
+                    <strong>{formatDateTime(task.arrived_at)}</strong>
+                  </div>
+                </div>
+
+                <div className="monitor-mm-quantities">
+                  <div>
+                    <span>Expected units</span>
+                    <strong>{formatUnits(task.expected_units)}</strong>
+                  </div>
+                  <div>
+                    <span>Put away units</span>
+                    <strong>{formatUnits(task.put_away_units)}</strong>
+                  </div>
+                  <div className="monitor-mm-remaining">
+                    <span>Remaining units</span>
+                    <strong>{formatUnits(task.remaining_units)}</strong>
+                  </div>
+                </div>
+
+                <div className="monitor-mm-footer">
+                  <div className="monitor-mm-progress">
+                    <div>
+                      <strong>
+                        {formatUnits(task.put_away_units)} / {formatUnits(task.expected_units)} put away
+                      </strong>
+                      <span>{progress}%</span>
+                    </div>
+                    <div className="monitor-progress-track">
+                      <div className="monitor-progress-fill" style={{ width: `${progress}%` }} />
+                    </div>
+                  </div>
+
+                  <Link
+                    className="monitor-mm-action"
+                    to={`/scanner/receiving?pallet=${encodeURIComponent(task.pallet_code)}`}
+                  >
+                    Open receiving
+                  </Link>
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -152,13 +273,17 @@ export function RouteMonitorPage() {
   }, [activeBranchCode]);
 
   useEffect(() => {
+    if (!activeBranchCode) {
+      return undefined;
+    }
+
     const refresh = window.setInterval(() => {
       routeRuns.refetch();
       mmTasks.refetch();
     }, 10000);
 
     return () => window.clearInterval(refresh);
-  }, [routeRuns]);
+  }, [activeBranchCode]);
 
   function refreshMonitor() {
     routeRuns.refetch();
@@ -242,6 +367,13 @@ export function RouteMonitorPage() {
                   selectedRouteRunId={selectedRouteRun?.id}
                 />
               )}
+
+              <MMTasksSection tasks={mmTasks.data?.results ?? []} />
+
+              <section className="monitor-side-section monitor-inventory-section">
+                <h2>Inventory tasks</h2>
+                <p>No inventory tasks</p>
+              </section>
             </section>
 
             <aside className="monitor-side-panel">
@@ -306,21 +438,6 @@ export function RouteMonitorPage() {
                     </div>
                   </>
                 )}
-              </section>
-
-              <section className="monitor-side-section">
-                <h2>MM / Inter-branch transfers</h2>
-                <p>MM tasks: {mmTasks.data?.results.length ?? 0}</p>
-                {(mmTasks.data?.results.length ?? 0) === 0 ? <p>No MM tasks</p> : (
-                  <div className="table-wrap"><table><thead><tr><th>Pallet</th><th>Transfer</th><th>From</th><th>Arrived</th><th>Expected</th><th>Put away</th><th>Remaining</th><th>Status</th><th>Open</th></tr></thead>
-                    <tbody>{mmTasks.data?.results.map((task) => <tr key={task.pallet_id}><td>{task.pallet_code}</td><td>{task.transfer_reference}</td><td>{task.source_branch}</td><td>{new Date(task.arrived_at).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}</td><td>{task.expected_units}</td><td>{task.put_away_units}</td><td>{task.remaining_units}</td><td>{formatStatus(task.status)}</td><td><a href={`/scanner/receiving?pallet=${encodeURIComponent(task.pallet_code)}`}>Open receiving</a></td></tr>)}</tbody>
-                  </table></div>
-                )}
-              </section>
-
-              <section className="monitor-side-section">
-                <h2>Inventory tasks</h2>
-                <p>No inventory tasks</p>
               </section>
             </aside>
           </div>
