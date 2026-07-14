@@ -159,6 +159,7 @@ class Order(TimestampedModel):
     )
     external_reference = models.CharField(max_length=128, unique=True)
     customer_name = models.CharField(max_length=255, blank=True)
+    customer_alias = models.CharField(max_length=128, blank=True)
     status = models.CharField(max_length=32, choices=Status.choices, default=Status.IMPORTED)
     requested_ship_date = models.DateField(blank=True, null=True)
 
@@ -258,6 +259,7 @@ class PickingTask(TimestampedModel):
         ASSIGNED = "assigned", "Assigned"
         IN_PROGRESS = "in_progress", "In progress"
         PICKED = "picked", "Picked"
+        WAITING_REPLENISHMENT = "waiting_replenishment", "Waiting for replenishment"
         COMPLETED = "completed", "Completed"
         CANCELLED = "cancelled", "Cancelled"
 
@@ -274,6 +276,7 @@ class PickingTask(TimestampedModel):
     status = models.CharField(max_length=32, choices=Status.choices, default=Status.OPEN)
     quantity_to_pick = models.DecimalField(max_digits=12, decimal_places=3)
     quantity_picked = models.DecimalField(max_digits=12, decimal_places=3, default=0)
+    shortage_quantity = models.DecimalField(max_digits=12, decimal_places=3, default=0)
     quantity_prepared = models.DecimalField(max_digits=12, decimal_places=3, default=0)
 
     class Meta:
@@ -286,11 +289,283 @@ class PickingTask(TimestampedModel):
         constraints = [
             models.CheckConstraint(check=models.Q(quantity_to_pick__gt=0), name="picking_quantity_positive"),
             models.CheckConstraint(check=models.Q(quantity_picked__gte=0), name="picking_picked_non_negative"),
+            models.CheckConstraint(check=models.Q(shortage_quantity__gte=0), name="picking_shortage_non_negative"),
             models.CheckConstraint(check=models.Q(quantity_prepared__gte=0), name="picking_prepared_non_negative"),
         ]
 
     def __str__(self) -> str:
         return f"Pick {self.order_line.product.sku} for {self.order_line.order.external_reference}"
+
+
+class PickingShortage(TimestampedModel):
+    class Status(models.TextChoices):
+        OPEN = "open", "Open - awaiting later stock search"
+        FOUND = "found", "Found"
+        CONFIRMED_MISSING = "confirmed_missing", "Confirmed missing"
+
+    reference = models.CharField(max_length=128, unique=True, blank=True, null=True)
+    picking_task = models.ForeignKey(PickingTask, on_delete=models.PROTECT, related_name="shortages")
+    order = models.ForeignKey(Order, on_delete=models.PROTECT, related_name="picking_shortages")
+    branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="picking_shortages")
+    product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name="picking_shortages")
+    reported_location = models.ForeignKey(Location, on_delete=models.PROTECT, related_name="reported_picking_shortages")
+    unconfirmed_location = models.ForeignKey(Location, on_delete=models.PROTECT, related_name="unconfirmed_picking_shortages")
+    cart = models.ForeignKey("ScannerCart", on_delete=models.SET_NULL, related_name="picking_shortages", blank=True, null=True)
+    quantity = models.DecimalField(max_digits=12, decimal_places=3)
+    alternative_allocated_quantity = models.DecimalField(max_digits=12, decimal_places=3, default=0)
+    customer_unfulfilled_quantity = models.DecimalField(max_digits=12, decimal_places=3, default=0)
+    recovered_quantity = models.DecimalField(max_digits=12, decimal_places=3, default=0)
+    confirmed_missing_quantity = models.DecimalField(max_digits=12, decimal_places=3, default=0)
+    customer_alias_snapshot = models.CharField(max_length=128, blank=True)
+    reported_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="reported_picking_shortages",
+        blank=True,
+        null=True,
+    )
+    reported_by_worker_code = models.CharField(max_length=64, blank=True)
+    reported_at = models.DateTimeField(default=timezone.now)
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.OPEN)
+    confirmation_nonce = models.CharField(max_length=128, unique=True)
+    client_operation_id = models.CharField(max_length=128, unique=True, blank=True, null=True)
+    found_location = models.ForeignKey(
+        Location,
+        on_delete=models.SET_NULL,
+        related_name="found_picking_shortages",
+        blank=True,
+        null=True,
+    )
+    found_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="found_picking_shortages",
+        blank=True,
+        null=True,
+    )
+    found_by_worker_code = models.CharField(max_length=64, blank=True)
+    found_at = models.DateTimeField(blank=True, null=True)
+    confirmed_missing_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="confirmed_missing_picking_shortages",
+        blank=True,
+        null=True,
+    )
+    confirmed_missing_by_worker_code = models.CharField(max_length=64, blank=True)
+    confirmed_missing_at = models.DateTimeField(blank=True, null=True)
+    note = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["-reported_at"]
+        indexes = [
+            models.Index(fields=["branch", "status"]),
+            models.Index(fields=["product"]),
+            models.Index(fields=["reported_location"]),
+            models.Index(fields=["reported_at"]),
+            models.Index(fields=["reference"]),
+        ]
+        constraints = [
+            models.CheckConstraint(check=models.Q(quantity__gt=0), name="picking_shortage_quantity_positive"),
+            models.CheckConstraint(
+                check=models.Q(alternative_allocated_quantity__gte=0),
+                name="picking_shortage_alternative_allocated_non_negative",
+            ),
+            models.CheckConstraint(
+                check=models.Q(customer_unfulfilled_quantity__gte=0),
+                name="picking_shortage_customer_unfulfilled_non_negative",
+            ),
+            models.CheckConstraint(check=models.Q(recovered_quantity__gte=0), name="picking_shortage_recovered_non_negative"),
+            models.CheckConstraint(
+                check=models.Q(confirmed_missing_quantity__gte=0),
+                name="picking_shortage_confirmed_missing_non_negative",
+            ),
+        ]
+
+    @property
+    def unresolved_quantity(self):
+        return self.quantity - self.recovered_quantity - self.confirmed_missing_quantity
+
+    @property
+    def location_missing_quantity(self):
+        return self.quantity
+
+    @property
+    def unresolved_unconfirmed_quantity(self):
+        return self.unresolved_quantity
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        if not self.reference:
+            self.reference = f"PS-{self.id:06d}"
+            super().save(update_fields=["reference"])
+
+    def __str__(self) -> str:
+        return self.reference or f"Picking shortage {self.id}"
+
+
+class PickingShortageAllocation(TimestampedModel):
+    class Status(models.TextChoices):
+        ALLOCATED = "allocated", "Allocated"
+        PICKING = "picking", "Picking"
+        COMPLETED = "completed", "Completed"
+        RELEASED = "released", "Released"
+
+    shortage = models.ForeignKey(PickingShortage, on_delete=models.PROTECT, related_name="allocations")
+    original_picking_task = models.ForeignKey(
+        PickingTask,
+        on_delete=models.PROTECT,
+        related_name="shortage_original_allocations",
+    )
+    replacement_picking_task = models.OneToOneField(
+        PickingTask,
+        on_delete=models.PROTECT,
+        related_name="shortage_replacement_allocation",
+    )
+    branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="picking_shortage_allocations")
+    product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name="picking_shortage_allocations")
+    source_location = models.ForeignKey(Location, on_delete=models.PROTECT, related_name="picking_shortage_allocations")
+    quantity = models.DecimalField(max_digits=12, decimal_places=3)
+    picked_quantity = models.DecimalField(max_digits=12, decimal_places=3, default=0)
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.ALLOCATED)
+
+    class Meta:
+        ordering = ["source_location__code", "created_at"]
+        indexes = [
+            models.Index(fields=["shortage"]),
+            models.Index(fields=["branch", "status"]),
+            models.Index(fields=["product"]),
+            models.Index(fields=["source_location"]),
+        ]
+        constraints = [
+            models.CheckConstraint(check=models.Q(quantity__gt=0), name="picking_shortage_allocation_quantity_positive"),
+            models.CheckConstraint(check=models.Q(picked_quantity__gte=0), name="picking_shortage_allocation_picked_non_negative"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.shortage.reference} / {self.source_location.code} / {self.quantity}"
+
+
+class PickingTaskReallocation(TimestampedModel):
+    class Reason(models.TextChoices):
+        SYSTEM_STOCK_UNAVAILABLE = "system_stock_unavailable", "System stock unavailable"
+
+    original_picking_task = models.ForeignKey(
+        PickingTask,
+        on_delete=models.PROTECT,
+        related_name="system_reallocations",
+    )
+    replacement_picking_task = models.OneToOneField(
+        PickingTask,
+        on_delete=models.PROTECT,
+        related_name="system_reallocation_source",
+    )
+    branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="picking_task_reallocations")
+    product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name="picking_task_reallocations")
+    original_location = models.ForeignKey(
+        Location,
+        on_delete=models.PROTECT,
+        related_name="outgoing_picking_task_reallocations",
+    )
+    replacement_location = models.ForeignKey(
+        Location,
+        on_delete=models.PROTECT,
+        related_name="incoming_picking_task_reallocations",
+    )
+    quantity = models.DecimalField(max_digits=12, decimal_places=3)
+    reason = models.CharField(max_length=64, choices=Reason.choices, default=Reason.SYSTEM_STOCK_UNAVAILABLE)
+
+    class Meta:
+        ordering = ["replacement_location__code", "created_at"]
+        indexes = [
+            models.Index(fields=["original_picking_task"]),
+            models.Index(fields=["replacement_picking_task"]),
+            models.Index(fields=["branch", "product"]),
+            models.Index(fields=["original_location"]),
+            models.Index(fields=["replacement_location"]),
+        ]
+        constraints = [
+            models.CheckConstraint(check=models.Q(quantity__gt=0), name="picking_task_reallocation_quantity_positive"),
+        ]
+
+    def __str__(self) -> str:
+        return f"Reallocated {self.quantity} {self.product.sku} from {self.original_location.code} to {self.replacement_location.code}"
+
+
+class ReplenishmentRequest(TimestampedModel):
+    class Reason(models.TextChoices):
+        PICKING_SHORTAGE = "picking_shortage", "Picking shortage"
+        SYSTEM_STOCK_UNAVAILABLE = "system_stock_unavailable", "System stock unavailable"
+
+    class Status(models.TextChoices):
+        PENDING_ORDER = "pending_order", "Pending order"
+        ORDERED_MANUALLY = "ordered_manually", "Ordered manually"
+        EXPORTED_TO_AX = "exported_to_ax", "Exported to AX"
+        CANCELLED = "cancelled", "Cancelled"
+
+    reference = models.CharField(max_length=128, unique=True, blank=True, null=True)
+    picking_shortage = models.OneToOneField(
+        PickingShortage,
+        on_delete=models.PROTECT,
+        related_name="replenishment_request",
+        blank=True,
+        null=True,
+    )
+    picking_task = models.ForeignKey(
+        PickingTask,
+        on_delete=models.PROTECT,
+        related_name="replenishment_requests",
+        blank=True,
+        null=True,
+    )
+    branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="replenishment_requests")
+    customer_alias = models.CharField(max_length=128)
+    order_reference = models.CharField(max_length=128)
+    product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name="replenishment_requests")
+    quantity = models.DecimalField(max_digits=12, decimal_places=3)
+    reason = models.CharField(max_length=32, choices=Reason.choices, default=Reason.PICKING_SHORTAGE)
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.PENDING_ORDER)
+    external_system = models.CharField(max_length=64, default="AX")
+    external_reference = models.CharField(max_length=128, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="created_replenishment_requests",
+        blank=True,
+        null=True,
+    )
+    ordered_at = models.DateTimeField(blank=True, null=True)
+    ordered_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="ordered_replenishment_requests",
+        blank=True,
+        null=True,
+    )
+    ordered_by_worker_code = models.CharField(max_length=64, blank=True)
+    note = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["branch", "status"]),
+            models.Index(fields=["product"]),
+            models.Index(fields=["customer_alias"]),
+            models.Index(fields=["order_reference"]),
+            models.Index(fields=["reference"]),
+        ]
+        constraints = [
+            models.CheckConstraint(check=models.Q(quantity__gt=0), name="replenishment_request_quantity_positive"),
+        ]
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        if not self.reference:
+            self.reference = f"REP-{self.id:06d}"
+            super().save(update_fields=["reference"])
+
+    def __str__(self) -> str:
+        return self.reference or f"Replenishment request {self.id}"
 
 
 class PickingJob(TimestampedModel):
@@ -739,6 +1014,9 @@ class StockMovement(TimestampedModel):
         DISCREPANCY_RECOVERY = "discrepancy_recovery", "Discrepancy recovery"
         DISCREPANCY_SHORTAGE = "discrepancy_shortage", "Discrepancy shortage"
         SOURCE_DISCREPANCY_RECOVERY = "source_discrepancy_recovery", "Source discrepancy recovery"
+        PICKING_SHORTAGE = "picking_shortage", "Picking shortage"
+        PICKING_SHORTAGE_FOUND = "picking_shortage_found", "Picking shortage found"
+        PICKING_SHORTAGE_CONFIRMED_MISSING = "picking_shortage_confirmed_missing", "Picking shortage confirmed missing"
 
     branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="stock_movements")
     product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name="stock_movements")
@@ -763,7 +1041,7 @@ class StockMovement(TimestampedModel):
         blank=True,
         null=True,
     )
-    movement_type = models.CharField(max_length=32, choices=MovementType.choices)
+    movement_type = models.CharField(max_length=64, choices=MovementType.choices)
     quantity = models.DecimalField(max_digits=12, decimal_places=3)
     reference = models.CharField(max_length=128, blank=True)
     performed_by = models.ForeignKey(

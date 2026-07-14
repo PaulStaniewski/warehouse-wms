@@ -8,7 +8,11 @@ from operations.models import (
     DeliveryRoute,
     Order,
     OrderLine,
+    PickingShortage,
+    PickingShortageAllocation,
+    PickingTaskReallocation,
     PickingTask,
+    ReplenishmentRequest,
     ReturnBatch,
     ReturnLine,
     RouteRun,
@@ -106,7 +110,7 @@ class RouteRunSerializer(serializers.ModelSerializer):
 
     def get_progress_percent(self, obj: RouteRun) -> float:
         tasks = self._get_picking_tasks(obj)
-        total_quantity = sum((task.quantity_to_pick for task in tasks), Decimal("0"))
+        total_quantity = sum((task.quantity_to_pick - task.shortage_quantity for task in tasks), Decimal("0"))
         picked_quantity = sum((task.quantity_picked for task in tasks), Decimal("0"))
 
         if total_quantity <= 0:
@@ -199,6 +203,7 @@ class OrderSerializer(serializers.ModelSerializer):
             "route_run_label",
             "external_reference",
             "customer_name",
+            "customer_alias",
             "status",
             "requested_ship_date",
             "created_at",
@@ -299,12 +304,54 @@ class PickingTaskSerializer(serializers.ModelSerializer):
     assigned_to_username = serializers.CharField(source="assigned_to.username", read_only=True)
     remaining_quantity = serializers.SerializerMethodField()
     remaining_to_prepare = serializers.SerializerMethodField()
+    is_replacement_pick = serializers.SerializerMethodField()
+    replacement_shortage_reference = serializers.SerializerMethodField()
+    original_shortage_location_code = serializers.SerializerMethodField()
+    is_system_reallocated_pick = serializers.SerializerMethodField()
+    reallocation_reason = serializers.SerializerMethodField()
+    reallocated_from_location_code = serializers.SerializerMethodField()
 
     def get_remaining_quantity(self, obj: PickingTask) -> str:
-        return str(obj.quantity_to_pick - obj.quantity_picked)
+        return str(obj.quantity_to_pick - obj.quantity_picked - obj.shortage_quantity)
 
     def get_remaining_to_prepare(self, obj: PickingTask) -> str:
         return str(obj.quantity_to_pick - obj.quantity_prepared)
+
+    def _replacement_allocation(self, obj: PickingTask):
+        return getattr(obj, "shortage_replacement_allocation", None)
+
+    def get_is_replacement_pick(self, obj: PickingTask) -> bool:
+        return self._replacement_allocation(obj) is not None
+
+    def get_replacement_shortage_reference(self, obj: PickingTask) -> str | None:
+        allocation = self._replacement_allocation(obj)
+        if allocation is None:
+            return None
+        return allocation.shortage.reference
+
+    def get_original_shortage_location_code(self, obj: PickingTask) -> str | None:
+        allocation = self._replacement_allocation(obj)
+        if allocation is None:
+            return None
+        return allocation.shortage.reported_location.code
+
+    def _system_reallocation(self, obj: PickingTask):
+        return getattr(obj, "system_reallocation_source", None)
+
+    def get_is_system_reallocated_pick(self, obj: PickingTask) -> bool:
+        return self._system_reallocation(obj) is not None
+
+    def get_reallocation_reason(self, obj: PickingTask) -> str | None:
+        reallocation = self._system_reallocation(obj)
+        if reallocation is None:
+            return None
+        return "Reallocated because no system stock remained at " + reallocation.original_location.code
+
+    def get_reallocated_from_location_code(self, obj: PickingTask) -> str | None:
+        reallocation = self._system_reallocation(obj)
+        if reallocation is None:
+            return None
+        return reallocation.original_location.code
 
     class Meta:
         model = PickingTask
@@ -327,9 +374,214 @@ class PickingTaskSerializer(serializers.ModelSerializer):
             "status",
             "quantity_to_pick",
             "quantity_picked",
+            "shortage_quantity",
             "quantity_prepared",
             "remaining_quantity",
             "remaining_to_prepare",
+            "is_replacement_pick",
+            "replacement_shortage_reference",
+            "original_shortage_location_code",
+            "is_system_reallocated_pick",
+            "reallocation_reason",
+            "reallocated_from_location_code",
+            "created_at",
+            "updated_at",
+        ]
+
+
+class PickingShortageSerializer(serializers.ModelSerializer):
+    branch_code = serializers.CharField(source="branch.code", read_only=True)
+    product_sku = serializers.CharField(source="product.sku", read_only=True)
+    product_name = serializers.CharField(source="product.name", read_only=True)
+    product_brand = serializers.CharField(source="product.brand", read_only=True)
+    reported_location_code = serializers.CharField(source="reported_location.code", read_only=True)
+    unconfirmed_location_code = serializers.CharField(source="unconfirmed_location.code", read_only=True)
+    found_location_code = serializers.CharField(source="found_location.code", read_only=True)
+    cart_code = serializers.CharField(source="cart.code", read_only=True)
+    order_reference = serializers.CharField(source="order.external_reference", read_only=True)
+    reported_by_username = serializers.CharField(source="reported_by.username", read_only=True)
+    found_by_username = serializers.CharField(source="found_by.username", read_only=True)
+    confirmed_missing_by_username = serializers.CharField(source="confirmed_missing_by.username", read_only=True)
+    unresolved_quantity = serializers.SerializerMethodField()
+    location_missing_quantity = serializers.SerializerMethodField()
+    unresolved_unconfirmed_quantity = serializers.SerializerMethodField()
+    status_label = serializers.CharField(source="get_status_display", read_only=True)
+    allocations = serializers.SerializerMethodField()
+    replenishment_reference = serializers.SerializerMethodField()
+    replenishment_quantity = serializers.SerializerMethodField()
+
+    def get_unresolved_quantity(self, obj: PickingShortage) -> str:
+        return str(obj.unresolved_quantity)
+
+    def get_location_missing_quantity(self, obj: PickingShortage) -> str:
+        return str(obj.location_missing_quantity)
+
+    def get_unresolved_unconfirmed_quantity(self, obj: PickingShortage) -> str:
+        return str(obj.unresolved_unconfirmed_quantity)
+
+    def get_allocations(self, obj: PickingShortage) -> list[dict]:
+        allocations = obj.allocations.select_related("source_location", "replacement_picking_task").order_by("source_location__code", "id")
+        return [
+            {
+                "id": allocation.id,
+                "location_code": allocation.source_location.code,
+                "quantity": str(allocation.quantity),
+                "picked_quantity": str(allocation.picked_quantity),
+                "status": allocation.status,
+                "status_label": allocation.get_status_display(),
+                "replacement_picking_task": allocation.replacement_picking_task_id,
+            }
+            for allocation in allocations
+        ]
+
+    def get_replenishment_reference(self, obj: PickingShortage) -> str | None:
+        request = getattr(obj, "replenishment_request", None)
+        return request.reference if request is not None else None
+
+    def get_replenishment_quantity(self, obj: PickingShortage) -> str | None:
+        request = getattr(obj, "replenishment_request", None)
+        return str(request.quantity) if request is not None else None
+
+    class Meta:
+        model = PickingShortage
+        fields = [
+            "id",
+            "reference",
+            "picking_task",
+            "order",
+            "order_reference",
+            "branch",
+            "branch_code",
+            "product",
+            "product_sku",
+            "product_name",
+            "product_brand",
+            "reported_location",
+            "reported_location_code",
+            "unconfirmed_location",
+            "unconfirmed_location_code",
+            "cart",
+            "cart_code",
+            "quantity",
+            "location_missing_quantity",
+            "alternative_allocated_quantity",
+            "customer_unfulfilled_quantity",
+            "recovered_quantity",
+            "confirmed_missing_quantity",
+            "unresolved_quantity",
+            "unresolved_unconfirmed_quantity",
+            "customer_alias_snapshot",
+            "reported_by",
+            "reported_by_username",
+            "reported_by_worker_code",
+            "reported_at",
+            "status",
+            "status_label",
+            "found_location",
+            "found_location_code",
+            "found_by",
+            "found_by_username",
+            "found_by_worker_code",
+            "found_at",
+            "confirmed_missing_by",
+            "confirmed_missing_by_username",
+            "confirmed_missing_by_worker_code",
+            "confirmed_missing_at",
+            "note",
+            "allocations",
+            "replenishment_reference",
+            "replenishment_quantity",
+            "created_at",
+            "updated_at",
+        ]
+
+
+class ReplenishmentRequestSerializer(serializers.ModelSerializer):
+    branch_code = serializers.CharField(source="branch.code", read_only=True)
+    product_sku = serializers.CharField(source="product.sku", read_only=True)
+    product_name = serializers.CharField(source="product.name", read_only=True)
+    product_brand = serializers.CharField(source="product.brand", read_only=True)
+    shortage_reference = serializers.SerializerMethodField()
+    cart_code = serializers.SerializerMethodField()
+    reported_location_code = serializers.SerializerMethodField()
+    reported_by_worker_code = serializers.SerializerMethodField()
+    reported_at = serializers.SerializerMethodField()
+    created_by_username = serializers.CharField(source="created_by.username", read_only=True)
+    ordered_by_username = serializers.CharField(source="ordered_by.username", read_only=True)
+    status_label = serializers.CharField(source="get_status_display", read_only=True)
+    reason_label = serializers.CharField(source="get_reason_display", read_only=True)
+    ax_payload = serializers.SerializerMethodField()
+
+    def get_ax_payload(self, obj: ReplenishmentRequest) -> dict:
+        return {
+            "request_reference": obj.reference,
+            "customer_alias": obj.customer_alias,
+            "product_sku": obj.product.sku,
+            "quantity": str(obj.quantity),
+            "order_reference": obj.order_reference,
+            "branch": obj.branch.code,
+            "reason": obj.reason,
+        }
+
+    def get_shortage_reference(self, obj: ReplenishmentRequest) -> str | None:
+        shortage = getattr(obj, "picking_shortage", None)
+        return shortage.reference if shortage else None
+
+    def get_cart_code(self, obj: ReplenishmentRequest) -> str | None:
+        shortage = getattr(obj, "picking_shortage", None)
+        return shortage.cart.code if shortage and shortage.cart else None
+
+    def get_reported_location_code(self, obj: ReplenishmentRequest) -> str | None:
+        shortage = getattr(obj, "picking_shortage", None)
+        if shortage:
+            return shortage.reported_location.code
+        if obj.picking_task_id:
+            return obj.picking_task.source_location.code
+        return None
+
+    def get_reported_by_worker_code(self, obj: ReplenishmentRequest) -> str:
+        shortage = getattr(obj, "picking_shortage", None)
+        return shortage.reported_by_worker_code if shortage else ""
+
+    def get_reported_at(self, obj: ReplenishmentRequest) -> str | None:
+        shortage = getattr(obj, "picking_shortage", None)
+        return shortage.reported_at.isoformat() if shortage else None
+
+    class Meta:
+        model = ReplenishmentRequest
+        fields = [
+            "id",
+            "reference",
+            "picking_shortage",
+            "picking_task",
+            "shortage_reference",
+            "branch",
+            "branch_code",
+            "customer_alias",
+            "order_reference",
+            "product",
+            "product_sku",
+            "product_name",
+            "product_brand",
+            "quantity",
+            "reason",
+            "reason_label",
+            "status",
+            "status_label",
+            "external_system",
+            "external_reference",
+            "cart_code",
+            "reported_location_code",
+            "reported_by_worker_code",
+            "reported_at",
+            "created_by",
+            "created_by_username",
+            "ordered_at",
+            "ordered_by",
+            "ordered_by_username",
+            "ordered_by_worker_code",
+            "note",
+            "ax_payload",
             "created_at",
             "updated_at",
         ]

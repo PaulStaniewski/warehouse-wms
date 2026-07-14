@@ -2,7 +2,6 @@ from datetime import datetime
 from decimal import Decimal
 
 from django.db import transaction
-from django.db.models import F
 from django.utils import timezone
 
 from operations.models import (
@@ -515,12 +514,40 @@ def route_close_result(route_run: RouteRun) -> str:
     return "late" if is_route_late(route_run, route_run.closed_at) else "on_time"
 
 
+def effective_task_required_quantity(task: PickingTask) -> Decimal:
+    customer_unfulfilled = sum(
+        (shortage.customer_unfulfilled_quantity for shortage in task.shortages.all()),
+        Decimal("0"),
+    )
+    return task.quantity_to_pick - task.shortage_quantity + customer_unfulfilled
+
+
+def is_task_effectively_prepared(task: PickingTask) -> bool:
+    return task.quantity_prepared >= effective_task_required_quantity(task)
+
+
 def is_route_work_fully_prepared(route_run: RouteRun) -> bool:
-    tasks = PickingTask.objects.filter(order_line__order__route_run=route_run)
-    if not tasks.exists():
+    tasks = list(
+        PickingTask.objects.prefetch_related("shortages")
+        .filter(order_line__order__route_run=route_run)
+        .exclude(status=PickingTask.Status.CANCELLED)
+    )
+    if not tasks:
         return False
 
-    return not tasks.filter(quantity_prepared__lt=F("quantity_to_pick")).exists()
+    return all(is_task_effectively_prepared(task) for task in tasks)
+
+
+def is_picking_job_work_fully_prepared(picking_job) -> bool:
+    tasks = list(
+        PickingTask.objects.prefetch_related("shortages")
+        .filter(job_task__picking_job=picking_job)
+        .exclude(status=PickingTask.Status.CANCELLED)
+    )
+    if not tasks:
+        return False
+
+    return all(is_task_effectively_prepared(task) for task in tasks)
 
 
 @transaction.atomic

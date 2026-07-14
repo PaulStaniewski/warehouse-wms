@@ -4,6 +4,7 @@ import axios from "axios";
 import {
   Archive,
   ArrowLeft,
+  AlertTriangle,
   Camera,
   CheckCircle2,
   ChevronDown,
@@ -15,11 +16,18 @@ import {
 import { Link } from "react-router-dom";
 
 import { useActiveBranch } from "../api/ActiveBranchContext";
-import { useCurrentAuditLogs, useScannerCartWork, useScannerConfirmLocation, useScannerPickingPick } from "../api/queries";
+import {
+  useCurrentAuditLogs,
+  useScannerCartWork,
+  useScannerConfirmLocation,
+  useScannerPickingPick,
+  useScannerPickingReportShortage,
+  useScannerPickingShortageChallenge,
+} from "../api/queries";
 import { useStoredScannerSession } from "../api/scannerSession";
 import { CameraBarcodeScanner } from "../components/scanner/CameraBarcodeScanner";
 import { DataState } from "../components/DataState";
-import type { AuditLog, PickingTask, PickInstruction } from "../types/api";
+import type { AuditLog, PickingShortageChallenge, PickingTask, PickInstruction } from "../types/api";
 
 type ScanMessage = {
   type: "success" | "error" | "warning";
@@ -121,6 +129,10 @@ function getTaskStatus(task: PickingTask, instruction: PickInstruction | null, n
     return "Current";
   }
 
+  if (task.status === "waiting_replenishment") {
+    return "Location shortage";
+  }
+
   if (toNumber(task.remaining_quantity) <= 0) {
     return "Completed";
   }
@@ -132,6 +144,10 @@ function getTaskStatus(task: PickingTask, instruction: PickInstruction | null, n
   return "Open";
 }
 
+function statusClassName(statusLabel: string) {
+  return statusLabel.toLowerCase().replace(/\s+/g, "-");
+}
+
 export function ScannerPickingPage() {
   const { activeBranchCode } = useActiveBranch();
   const queryClient = useQueryClient();
@@ -139,12 +155,19 @@ export function ScannerPickingPage() {
   const cartWork = useScannerCartWork(activeSession?.id, activeSession?.cart_work_session);
   const confirmLocation = useScannerConfirmLocation();
   const scannerPick = useScannerPickingPick();
+  const shortageChallengeMutation = useScannerPickingShortageChallenge();
+  const reportShortageMutation = useScannerPickingReportShortage();
   const [workerCode] = useState(activeSession?.worker_code || "DEMO");
   const [locationCode, setLocationCode] = useState("");
   const [productCode, setProductCode] = useState("");
   const [pickQuantity, setPickQuantity] = useState("1");
   const [cameraMode, setCameraMode] = useState<"location" | "product" | null>(null);
   const [message, setMessage] = useState<ScanMessage | null>(null);
+  const [shortageOpen, setShortageOpen] = useState(false);
+  const [shortageQuantity, setShortageQuantity] = useState("1");
+  const [shortageChallenge, setShortageChallenge] = useState<PickingShortageChallenge | null>(null);
+  const [shortageCode, setShortageCode] = useState("");
+  const [shortageNote, setShortageNote] = useState("");
   const [autoExpandedLocation, setAutoExpandedLocation] = useState<string | null>(null);
   const [manualExpandedLocations, setManualExpandedLocations] = useState<Set<string>>(() => new Set());
   const locationInputRef = useRef<HTMLInputElement | null>(null);
@@ -189,6 +212,20 @@ export function ScannerPickingPage() {
   }, [currentLocation]);
 
   useEffect(() => {
+    const repairs = cartWork.data?.repair_messages ?? [];
+    if (repairs.length === 0) {
+      return;
+    }
+    setMessage({
+      type: "success",
+      title: "Picking location updated.",
+      detail: repairs[repairs.length - 1],
+    });
+    setLocationCode("");
+    window.setTimeout(() => locationInputRef.current?.focus(), 0);
+  }, [cartWork.data?.repair_messages]);
+
+  useEffect(() => {
     const max = Math.max(1, Math.floor(currentRemaining));
     setPickQuantity((current) => String(clampQuantity(Number.parseInt(current || "1", 10), max)));
   }, [currentRemaining, instruction?.picking_task_id]);
@@ -200,6 +237,8 @@ export function ScannerPickingPage() {
       queryClient.invalidateQueries({ queryKey: ["scanner-jobs"] }),
       queryClient.invalidateQueries({ queryKey: ["route-runs"] }),
       queryClient.invalidateQueries({ queryKey: ["audit-logs", "current"] }),
+      queryClient.invalidateQueries({ queryKey: ["picking-shortages"] }),
+      queryClient.invalidateQueries({ queryKey: ["replenishment-requests"] }),
     ]);
   }, [activeSession?.id, queryClient]);
 
@@ -319,6 +358,63 @@ export function ScannerPickingPage() {
   function adjustQuantity(delta: number) {
     setPickQuantity((current) => String(clampQuantity(Number.parseInt(current || "1", 10) + delta, currentRemaining)));
     window.setTimeout(() => productInputRef.current?.focus(), 0);
+  }
+
+  function openShortagePanel() {
+    setShortageOpen(true);
+    setShortageChallenge(null);
+    setShortageCode("");
+    setShortageNote("");
+    setShortageQuantity(String(clampQuantity(Math.floor(currentRemaining), currentRemaining)));
+  }
+
+  async function generateShortageChallenge() {
+    if (!work || !instruction) {
+      return;
+    }
+    const quantity = clampQuantity(Number.parseInt(shortageQuantity || "1", 10), currentRemaining);
+    setShortageQuantity(String(quantity));
+    setMessage(null);
+    try {
+      const challenge = await shortageChallengeMutation.mutateAsync({
+        cartWorkSessionId: work.id,
+        quantity: String(quantity),
+        workerCode,
+      });
+      setShortageChallenge(challenge);
+      setShortageCode("");
+    } catch (error) {
+      setMessage({ type: "error", title: "Could not generate missing-stock confirmation.", detail: getErrorMessage(error, "Try again.") });
+    }
+  }
+
+  async function confirmShortage(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!shortageChallenge) {
+      await generateShortageChallenge();
+      return;
+    }
+    try {
+      const response = await reportShortageMutation.mutateAsync({
+        challengeToken: shortageChallenge.challenge_token,
+        confirmationCode: shortageCode,
+        clientOperationId: crypto.randomUUID(),
+        note: shortageNote,
+      });
+      setMessage({
+        type: "success",
+        title: "Missing stock recorded.",
+        detail: response.message,
+      });
+      setShortageOpen(false);
+      setShortageChallenge(null);
+      setShortageCode("");
+      setShortageNote("");
+      await refreshPickingData();
+      window.setTimeout(() => locationInputRef.current?.focus(), 0);
+    } catch (error) {
+      setMessage({ type: "error", title: "Could not record missing stock.", detail: getErrorMessage(error, "Try again.") });
+    }
   }
 
   function toggleLocation(location: string) {
@@ -482,10 +578,80 @@ export function ScannerPickingPage() {
           <dl className="concept-product-quantities">
             <div><dt>To pick</dt><dd>{formatQuantity(currentTask?.quantity_to_pick ?? 0)}</dd></div>
             <div><dt>Picked</dt><dd>{formatQuantity(currentTask?.quantity_picked ?? 0)}</dd></div>
+            <div><dt>Missing at location</dt><dd>{formatQuantity(currentTask?.shortage_quantity ?? 0)}</dd></div>
             <div><dt>Prepared</dt><dd>{formatQuantity(currentTask?.quantity_prepared ?? 0)}</dd></div>
             <div><dt>Remaining</dt><dd>{formatQuantity(currentTask?.remaining_quantity ?? 0)}</dd></div>
+            <button
+              className="concept-shortage-button"
+              disabled={!active || pickingState !== "waiting_for_product" || currentRemaining <= 0}
+              onClick={openShortagePanel}
+              type="button"
+            >
+              <AlertTriangle size={18} />
+              Report missing at location
+            </button>
           </dl>
         </section>
+
+        {shortageOpen && instruction && work && (
+          <section className="concept-shortage-panel">
+            <header>
+              <div>
+                <span>REPORT MISSING STOCK AT LOCATION</span>
+                <h2>{instruction.product.sku} - {instruction.product.name}</h2>
+                <p>Record missing stock at the expected location. The system will check alternative locations before customer replenishment.</p>
+              </div>
+              <button type="button" onClick={() => setShortageOpen(false)}>Close</button>
+            </header>
+            <form onSubmit={confirmShortage}>
+              <dl>
+                <div><dt>Brand</dt><dd>{instruction.product.brand || "Brand unavailable"}</dd></div>
+                <div><dt>Location</dt><dd>{activeBranchCode} / {instruction.location.code}</dd></div>
+                <div><dt>Order</dt><dd>{instruction.order_reference}</dd></div>
+                <div><dt>Customer alias</dt><dd>{instruction.customer_alias || "-"}</dd></div>
+                <div><dt>Required</dt><dd>{formatQuantity(instruction.required_quantity)}</dd></div>
+                <div><dt>Picked</dt><dd>{formatQuantity(instruction.picked_quantity)}</dd></div>
+              </dl>
+              <label>
+                <span>Missing quantity at location</span>
+                <input
+                  disabled={Boolean(shortageChallenge)}
+                  inputMode="numeric"
+                  max={Math.max(1, Math.floor(currentRemaining))}
+                  min={1}
+                  value={shortageQuantity}
+                  onChange={(event) => setShortageQuantity(String(clampQuantity(Number.parseInt(event.target.value || "1", 10), currentRemaining)))}
+                />
+              </label>
+              {!shortageChallenge ? (
+                <button disabled={shortageChallengeMutation.isPending} type="button" onClick={generateShortageChallenge}>
+                  Generate confirmation code
+                </button>
+              ) : (
+                <div className="concept-shortage-challenge">
+                  <span>Confirmation code</span>
+                  <strong>{shortageChallenge.confirmation_code}</strong>
+                  <label>
+                    <span>Enter the displayed code</span>
+                    <input
+                      inputMode="numeric"
+                      maxLength={4}
+                      value={shortageCode}
+                      onChange={(event) => setShortageCode(event.target.value.replace(/\D/g, "").slice(0, 4))}
+                    />
+                  </label>
+                  <label>
+                    <span>Note</span>
+                    <input value={shortageNote} onChange={(event) => setShortageNote(event.target.value)} />
+                  </label>
+                  <button disabled={reportShortageMutation.isPending || shortageCode.length !== 4} type="submit">
+                    Confirm missing stock
+                  </button>
+                </div>
+              )}
+            </form>
+          </section>
+        )}
 
         <section className="concept-scan-grid">
           <form
@@ -633,10 +799,23 @@ export function ScannerPickingPage() {
                             <dl>
                               <div><dt>To pick</dt><dd>{formatQuantity(task.quantity_to_pick)}</dd></div>
                               <div><dt>Picked</dt><dd>{formatQuantity(task.quantity_picked)}</dd></div>
+                              <div className={toNumber(task.shortage_quantity) > 0 ? "concept-shortage-cell" : ""}>
+                                <dt>Missing</dt><dd>{formatQuantity(task.shortage_quantity)}</dd>
+                              </div>
                               <div><dt>Prepared</dt><dd>{formatQuantity(task.quantity_prepared)}</dd></div>
                               <div><dt>Remaining</dt><dd>{formatQuantity(task.remaining_quantity)}</dd></div>
                             </dl>
-                            <span className={`concept-row-status concept-row-status--${statusLabel.toLowerCase()}`}>{statusLabel}</span>
+                            {task.is_replacement_pick && (
+                              <span className="concept-replacement-note">
+                                Replacement for {task.replacement_shortage_reference} from {task.original_shortage_location_code}
+                              </span>
+                            )}
+                            {task.is_system_reallocated_pick && (
+                              <span className="concept-replacement-note">
+                                {task.reallocation_reason || `Reallocated from ${task.reallocated_from_location_code}`}
+                              </span>
+                            )}
+                            <span className={`concept-row-status concept-row-status--${statusClassName(statusLabel)}`}>{statusLabel}</span>
                           </div>
                         );
                       })}

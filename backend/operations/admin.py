@@ -12,7 +12,11 @@ from operations.models import (
     PalletReceivingSession,
     PickingJob,
     PickingJobTask,
+    PickingShortage,
+    PickingShortageAllocation,
+    PickingTaskReallocation,
     PickingTask,
+    ReplenishmentRequest,
     ReturnBatch,
     ReturnLine,
     RouteRun,
@@ -119,6 +123,7 @@ class PickingTaskAdmin(admin.ModelAdmin):
         "status",
         "quantity_to_pick",
         "quantity_picked",
+        "shortage_quantity",
     ]
     list_filter = ["status", "branch", "assigned_to"]
     search_fields = [
@@ -126,6 +131,50 @@ class PickingTaskAdmin(admin.ModelAdmin):
         "order_line__product__sku",
         "source_location__code",
     ]
+
+
+@admin.register(PickingShortage)
+class PickingShortageAdmin(admin.ModelAdmin):
+    list_display = [
+        "reference",
+        "branch",
+        "product",
+        "quantity",
+        "alternative_allocated_quantity",
+        "customer_unfulfilled_quantity",
+        "reported_location",
+        "cart",
+        "status",
+        "reported_at",
+    ]
+    list_filter = ["branch", "status", "product", "reported_location"]
+    search_fields = ["reference", "product__sku", "order__external_reference", "cart__code", "customer_alias_snapshot"]
+
+
+@admin.register(PickingShortageAllocation)
+class PickingShortageAllocationAdmin(admin.ModelAdmin):
+    list_display = ["shortage", "replacement_picking_task", "source_location", "quantity", "picked_quantity", "status"]
+    list_filter = ["status", "branch", "source_location"]
+    search_fields = ["shortage__reference", "product__sku", "source_location__code"]
+
+
+@admin.register(PickingTaskReallocation)
+class PickingTaskReallocationAdmin(admin.ModelAdmin):
+    list_display = ["original_picking_task", "replacement_picking_task", "replacement_location", "quantity", "reason"]
+    list_filter = ["branch", "product", "original_location", "replacement_location", "reason"]
+    search_fields = [
+        "product__sku",
+        "original_location__code",
+        "replacement_location__code",
+        "original_picking_task__order_line__order__external_reference",
+    ]
+
+
+@admin.register(ReplenishmentRequest)
+class ReplenishmentRequestAdmin(admin.ModelAdmin):
+    list_display = ["reference", "branch", "customer_alias", "product", "quantity", "status", "created_at"]
+    list_filter = ["branch", "status", "reason", "product"]
+    search_fields = ["reference", "customer_alias", "product__sku", "order_reference", "picking_shortage__cart__code"]
 
 
 class PickingJobTaskInline(admin.TabularInline):

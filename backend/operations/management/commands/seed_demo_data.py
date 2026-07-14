@@ -18,7 +18,11 @@ from operations.models import (
     PalletReceivingScan,
     PalletReceivingSession,
     PickingJob,
+    PickingShortage,
+    PickingShortageAllocation,
     PickingTask,
+    PickingTaskReallocation,
+    ReplenishmentRequest,
     ReturnBatch,
     ReturnLine,
     RouteRun,
@@ -110,6 +114,16 @@ class Command(BaseCommand):
             | models.Q(job_tasks__picking_task__order_line__order__external_reference__in=demo_order_refs)
         ).distinct()
 
+        demo_shortages = PickingShortage.objects.filter(order__external_reference__in=demo_order_refs)
+        PickingShortageAllocation.objects.filter(shortage__in=demo_shortages).delete()
+        PickingTaskReallocation.objects.filter(
+            models.Q(original_picking_task__order_line__order__external_reference__in=demo_order_refs)
+            | models.Q(replacement_picking_task__order_line__order__external_reference__in=demo_order_refs)
+        ).delete()
+        ReplenishmentRequest.objects.filter(picking_shortage__in=demo_shortages).delete()
+        ReplenishmentRequest.objects.filter(picking_task__order_line__order__external_reference__in=demo_order_refs).delete()
+        StockMovement.objects.filter(reference__startswith="PS-").delete()
+        demo_shortages.delete()
         ScannerCustomerLabel.objects.filter(session__in=demo_sessions).delete()
         CartPickedItem.objects.filter(
             models.Q(session__in=demo_sessions) | models.Q(cart_work_session__in=demo_cart_work)
@@ -118,6 +132,7 @@ class Command(BaseCommand):
         demo_sessions.update(status=ScannerSession.Status.CLOSED, ended_at=timezone.now())
         ScannerCart.objects.filter(cart_code_filter).update(status=ScannerCart.Status.AVAILABLE)
         demo_jobs.delete()
+        PickingTask.objects.filter(order_line__order__external_reference__in=demo_order_refs).delete()
 
         demo_pallets = TransferPallet.objects.filter(scan_code__in=demo_pallet_codes)
         TransferPalletArrival.objects.filter(pallet__in=demo_pallets).delete()
@@ -206,6 +221,8 @@ class Command(BaseCommand):
             ("GDY", "A-01-02", Location.LocationType.STORAGE),
             ("GDY", "A-02-01", Location.LocationType.PICKING),
             ("GDY", "A-03-01", Location.LocationType.STORAGE),
+            ("GDY", "B-02-01", Location.LocationType.PICKING),
+            ("GDY", "C-01-03", Location.LocationType.PICKING),
             ("GDY", "RET-01", Location.LocationType.RETURNS),
             ("GDY", "PACK-01", Location.LocationType.SHIPPING),
             ("GDY", "UNCONFIRMED", Location.LocationType.RECEIVING),
@@ -260,7 +277,9 @@ class Command(BaseCommand):
     def create_inventory_items(self, branches, locations, products):
         inventory_data = [
             ("GDY", "A-01-01", "FILTR-001", "10", "0"),
-            ("GDY", "A-01-02", "OLEJ-001", "24", "0"),
+            ("GDY", "A-01-02", "OLEJ-001", "5", "0"),
+            ("GDY", "B-02-01", "OLEJ-001", "2", "0"),
+            ("GDY", "C-01-03", "OLEJ-001", "2", "0"),
             ("GDY", "A-02-01", "FILTR-001", "12", "0"),
             ("GDY", "A-02-01", "KLOCKI-001", "6", "0"),
             ("GDY", "RET-01", "WYCIER-001", "3", "0"),
@@ -412,17 +431,19 @@ class Command(BaseCommand):
                 "AX-ORDER-0001",
                 "GDY",
                 "Demo Client One",
+                "ABC-CAR",
                 ("GDY", "ROUTE-01", 1),
-                [("FILTR-001", 1, "2"), ("OLEJ-001", 2, "4")],
+                [("FILTR-001", 1, "2"), ("OLEJ-001", 2, "5")],
             ),
-            ("AX-ORDER-0002", "GDY", "Demo Client Two", ("GDY", "ROUTE-01", 2), [("KLOCKI-001", 1, "1")]),
-            ("AX-ORDER-0003", "GDA", "Demo Client Three", ("GDA", "ROUTE-01", 1), [("FILTR-001", 1, "3")]),
-            ("AX-ORDER-0004", "GDY", "Demo Client Four", ("GDY", "ROUTE-02", 1), [("OLEJ-001", 1, "2")]),
-            ("AX-ORDER-0005", "GDA", "Demo Client Five", ("GDA", "ROUTE-02", 1), [("OLEJ-001", 1, "2")]),
+            ("AX-ORDER-0002", "GDY", "Demo Client Two", "BRAKE-PL", ("GDY", "ROUTE-01", 2), [("KLOCKI-001", 1, "1")]),
+            ("AX-ORDER-0003", "GDA", "Demo Client Three", "GDA-AUTO", ("GDA", "ROUTE-01", 1), [("FILTR-001", 1, "3")]),
+            ("AX-ORDER-0004", "GDY", "Demo Client Four", "OIL-SHOP", ("GDY", "ROUTE-02", 1), [("OLEJ-001", 1, "2")]),
+            ("AX-ORDER-0005", "GDA", "Demo Client Five", "GDA-FLEET", ("GDA", "ROUTE-02", 1), [("OLEJ-001", 1, "2")]),
             (
                 "AX-ORDER-LABEL-TEST",
                 "GDY",
                 "Demo Client Label Test",
+                "LABEL-TEST",
                 ("GDY", "ROUTE-04", 1),
                 [("FILTR-001", 1, "3"), ("OLEJ-001", 2, "2")],
             ),
@@ -430,13 +451,14 @@ class Command(BaseCommand):
 
         orders = {}
         order_lines = {}
-        for reference, branch_code, customer_name, route_run_key, lines in orders_data:
+        for reference, branch_code, customer_name, customer_alias, route_run_key, lines in orders_data:
             order, _ = Order.objects.update_or_create(
                 external_reference=reference,
                 defaults={
                     "branch": branches[branch_code],
                     "route_run": route_runs[route_run_key],
                     "customer_name": customer_name,
+                    "customer_alias": customer_alias,
                     "status": Order.Status.IMPORTED,
                     "requested_ship_date": None,
                 },
@@ -511,6 +533,7 @@ class Command(BaseCommand):
                     "status": status,
                     "quantity_to_pick": order_line.quantity_ordered,
                     "quantity_picked": Decimal("0"),
+                    "shortage_quantity": Decimal("0"),
                     "quantity_prepared": Decimal("0"),
                 },
             )

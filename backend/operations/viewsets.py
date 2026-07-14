@@ -26,7 +26,9 @@ from operations.models import (
     Order,
     OrderLine,
     PalletReceivingScan,
+    PickingShortage,
     PickingTask,
+    ReplenishmentRequest,
     ReturnBatch,
     ReturnLine,
     RouteRun,
@@ -49,6 +51,8 @@ from operations.serializers import (
     OrderLineSerializer,
     OrderSerializer,
     PickingTaskSerializer,
+    PickingShortageSerializer,
+    ReplenishmentRequestSerializer,
     ReturnBatchSerializer,
     ReturnLineSerializer,
     RouteRunSerializer,
@@ -193,6 +197,35 @@ class PickingTaskFilter(django_filters.FilterSet):
     class Meta:
         model = PickingTask
         fields = ["branch", "status", "assigned_to", "route_run"]
+
+
+class PickingShortageFilter(django_filters.FilterSet):
+    branch = django_filters.CharFilter(field_name="branch__code", lookup_expr="iexact")
+    product = django_filters.CharFilter(field_name="product__sku", lookup_expr="iexact")
+    location = django_filters.CharFilter(field_name="reported_location__code", lookup_expr="iexact")
+    actor = django_filters.CharFilter(method="filter_actor")
+    date_from = django_filters.DateFilter(field_name="reported_at", lookup_expr="date__gte")
+    date_to = django_filters.DateFilter(field_name="reported_at", lookup_expr="date__lte")
+
+    def filter_actor(self, queryset, name, value):
+        return queryset.filter(
+            models.Q(reported_by__username__iexact=value) | models.Q(reported_by_worker_code__iexact=value)
+        )
+
+    class Meta:
+        model = PickingShortage
+        fields = ["branch", "status", "product", "location", "actor", "date_from", "date_to"]
+
+
+class ReplenishmentRequestFilter(django_filters.FilterSet):
+    branch = django_filters.CharFilter(field_name="branch__code", lookup_expr="iexact")
+    product = django_filters.CharFilter(field_name="product__sku", lookup_expr="iexact")
+    customer_alias = django_filters.CharFilter(field_name="customer_alias", lookup_expr="icontains")
+    order = django_filters.CharFilter(field_name="order_reference", lookup_expr="iexact")
+
+    class Meta:
+        model = ReplenishmentRequest
+        fields = ["branch", "status", "product", "customer_alias", "order"]
 
 
 class RouteRunViewSet(ReadOnlyModelViewSet):
@@ -467,6 +500,276 @@ class PickingTaskViewSet(ReadOnlyModelViewSet):
             },
             status=status.HTTP_200_OK,
         )
+
+
+class PickingShortageViewSet(ReadOnlyModelViewSet):
+    queryset = PickingShortage.objects.select_related(
+        "branch",
+        "product",
+        "reported_location",
+        "unconfirmed_location",
+        "cart",
+        "order",
+        "reported_by",
+        "found_location",
+        "found_by",
+        "confirmed_missing_by",
+    )
+    serializer_class = PickingShortageSerializer
+    filterset_class = PickingShortageFilter
+    search_fields = [
+        "reference",
+        "product__sku",
+        "product__name",
+        "reported_location__code",
+        "cart__code",
+        "order__external_reference",
+        "customer_alias_snapshot",
+        "reported_by__username",
+        "reported_by_worker_code",
+    ]
+    ordering_fields = ["reported_at", "status", "quantity", "created_at", "updated_at"]
+
+    def get_queryset(self):
+        return filter_branch_queryset(super().get_queryset(), self.request, "branch")
+
+    @action(detail=True, methods=["post"], url_path="found-stock")
+    def found_stock(self, request, pk=None):
+        quantity = Decimal(str(request.data.get("quantity", "0")))
+        location_code = str(request.data.get("location_code", "")).strip()
+        worker_code = str(request.data.get("worker_code", "")).strip()
+        note = str(request.data.get("note", "")).strip()
+        if quantity <= 0:
+            return Response({"detail": "quantity must be greater than zero."}, status=status.HTTP_400_BAD_REQUEST)
+        if not location_code:
+            return Response({"detail": "location_code is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            shortage = (
+                PickingShortage.objects.select_for_update(of=("self",))
+                .select_related("branch", "product", "reported_location", "unconfirmed_location", "order")
+                .get(pk=pk)
+            )
+            require_branch_access(request.user, shortage.branch)
+            if quantity > shortage.unresolved_quantity:
+                return Response({"detail": "Found quantity exceeds unresolved shortage quantity."}, status=status.HTTP_400_BAD_REQUEST)
+            destination = Location.objects.filter(branch=shortage.branch, code__iexact=location_code).first()
+            if destination is None:
+                return Response({"detail": "Destination location not found in this branch."}, status=status.HTTP_400_BAD_REQUEST)
+            if destination.id == shortage.unconfirmed_location_id:
+                return Response({"detail": "UNCONFIRMED cannot be the found stock destination."}, status=status.HTTP_400_BAD_REQUEST)
+
+            source_item = InventoryItem.objects.select_for_update().filter(
+                branch=shortage.branch, location=shortage.unconfirmed_location, product=shortage.product
+            ).first()
+            if source_item is None or source_item.quantity_on_hand < quantity:
+                return Response({"detail": "UNCONFIRMED inventory is insufficient."}, status=status.HTTP_400_BAD_REQUEST)
+            destination_item, _ = InventoryItem.objects.select_for_update().get_or_create(
+                branch=shortage.branch,
+                location=destination,
+                product=shortage.product,
+                defaults={"quantity_on_hand": Decimal("0"), "quantity_reserved": Decimal("0")},
+            )
+            source_item.quantity_on_hand = F("quantity_on_hand") - quantity
+            source_item.save(update_fields=["quantity_on_hand", "updated_at"])
+            destination_item.quantity_on_hand = F("quantity_on_hand") + quantity
+            destination_item.save(update_fields=["quantity_on_hand", "updated_at"])
+            movement = StockMovement.objects.create(
+                branch=shortage.branch,
+                product=shortage.product,
+                inventory_item=destination_item,
+                source_location=shortage.unconfirmed_location,
+                destination_location=destination,
+                movement_type=StockMovement.MovementType.PICKING_SHORTAGE_FOUND,
+                quantity=quantity,
+                reference=shortage.reference,
+                performed_by=request.user if request.user.is_authenticated else None,
+            )
+            shortage.recovered_quantity = F("recovered_quantity") + quantity
+            shortage.found_location = destination
+            shortage.found_by = request.user if request.user.is_authenticated else None
+            shortage.found_by_worker_code = worker_code
+            shortage.found_at = timezone.now()
+            shortage.note = note or shortage.note
+            shortage.save(update_fields=[
+                "recovered_quantity",
+                "found_location",
+                "found_by",
+                "found_by_worker_code",
+                "found_at",
+                "note",
+                "updated_at",
+            ])
+            shortage.refresh_from_db()
+            if shortage.unresolved_quantity <= 0 and shortage.status != PickingShortage.Status.FOUND:
+                shortage.status = PickingShortage.Status.FOUND
+                shortage.save(update_fields=["status", "updated_at"])
+
+            AuditLog.objects.create(
+                actor=request.user if request.user.is_authenticated else None,
+                action_type=AuditLog.ActionType.UPDATE,
+                event_type="picking_shortage_found",
+                branch=shortage.branch,
+                product=shortage.product,
+                quantity=quantity,
+                source_location=shortage.unconfirmed_location,
+                destination_location=destination,
+                source_label=shortage.unconfirmed_location.code,
+                destination_label=destination.code,
+                cart=shortage.cart,
+                order=shortage.order,
+                reference=shortage.reference,
+                entity_name="PickingShortage",
+                entity_id=str(shortage.id),
+                message=(
+                    f"Worker {worker_code or request.user.username} found {format_piece_quantity(quantity)} {shortage.product.sku} "
+                    f"and moved it from {shortage.unconfirmed_location.code} to {destination.code}."
+                ),
+            )
+
+        shortage = self.get_queryset().get(pk=shortage.pk)
+        return Response({"message": "Stock found recorded.", "shortage": self.get_serializer(shortage).data})
+
+    @action(detail=True, methods=["post"], url_path="confirm-missing")
+    def confirm_missing(self, request, pk=None):
+        worker_code = str(request.data.get("worker_code", "")).strip()
+        note = str(request.data.get("note", "")).strip()
+        with transaction.atomic():
+            shortage = (
+                PickingShortage.objects.select_for_update(of=("self",))
+                .select_related("branch", "product", "unconfirmed_location", "order")
+                .get(pk=pk)
+            )
+            require_branch_access(request.user, shortage.branch, leader_required=True)
+            quantity = shortage.unresolved_quantity
+            if quantity <= 0:
+                return Response({"detail": "Shortage has no unresolved quantity."}, status=status.HTTP_400_BAD_REQUEST)
+            source_item = InventoryItem.objects.select_for_update().filter(
+                branch=shortage.branch, location=shortage.unconfirmed_location, product=shortage.product
+            ).first()
+            if source_item is None or source_item.quantity_on_hand < quantity:
+                return Response({"detail": "UNCONFIRMED inventory is insufficient."}, status=status.HTTP_400_BAD_REQUEST)
+            source_item.quantity_on_hand = F("quantity_on_hand") - quantity
+            source_item.save(update_fields=["quantity_on_hand", "updated_at"])
+            StockMovement.objects.create(
+                branch=shortage.branch,
+                product=shortage.product,
+                inventory_item=source_item,
+                source_location=shortage.unconfirmed_location,
+                movement_type=StockMovement.MovementType.PICKING_SHORTAGE_CONFIRMED_MISSING,
+                quantity=quantity,
+                reference=shortage.reference,
+                performed_by=request.user if request.user.is_authenticated else None,
+            )
+            shortage.confirmed_missing_quantity = F("confirmed_missing_quantity") + quantity
+            shortage.confirmed_missing_by = request.user if request.user.is_authenticated else None
+            shortage.confirmed_missing_by_worker_code = worker_code
+            shortage.confirmed_missing_at = timezone.now()
+            shortage.status = PickingShortage.Status.CONFIRMED_MISSING
+            shortage.note = note or shortage.note
+            shortage.save(update_fields=[
+                "confirmed_missing_quantity",
+                "confirmed_missing_by",
+                "confirmed_missing_by_worker_code",
+                "confirmed_missing_at",
+                "status",
+                "note",
+                "updated_at",
+            ])
+            shortage.refresh_from_db()
+            AuditLog.objects.create(
+                actor=request.user if request.user.is_authenticated else None,
+                action_type=AuditLog.ActionType.UPDATE,
+                event_type="picking_shortage_confirmed_missing",
+                branch=shortage.branch,
+                product=shortage.product,
+                quantity=quantity,
+                source_location=shortage.unconfirmed_location,
+                source_label=shortage.unconfirmed_location.code,
+                cart=shortage.cart,
+                order=shortage.order,
+                reference=shortage.reference,
+                entity_name="PickingShortage",
+                entity_id=str(shortage.id),
+                message=f"Worker {worker_code or request.user.username} confirmed {format_piece_quantity(quantity)} {shortage.product.sku} as physically missing.",
+            )
+
+        shortage = self.get_queryset().get(pk=shortage.pk)
+        return Response({"message": "Physical loss confirmed.", "shortage": self.get_serializer(shortage).data})
+
+
+class ReplenishmentRequestViewSet(ReadOnlyModelViewSet):
+    queryset = ReplenishmentRequest.objects.select_related(
+        "branch",
+        "product",
+        "picking_shortage",
+        "picking_shortage__cart",
+        "picking_shortage__reported_location",
+        "picking_task",
+        "picking_task__order_line__order",
+        "picking_task__source_location",
+        "created_by",
+        "ordered_by",
+    )
+    serializer_class = ReplenishmentRequestSerializer
+    filterset_class = ReplenishmentRequestFilter
+    search_fields = [
+        "reference",
+        "customer_alias",
+        "product__sku",
+        "order_reference",
+        "picking_shortage__cart__code",
+        "picking_shortage__reported_by_worker_code",
+        "created_by__username",
+    ]
+    ordering_fields = ["created_at", "status", "quantity", "updated_at"]
+
+    def get_queryset(self):
+        return filter_branch_queryset(super().get_queryset(), self.request, "branch")
+
+    @action(detail=True, methods=["post"], url_path="mark-ordered-manually")
+    def mark_ordered_manually(self, request, pk=None):
+        with transaction.atomic():
+            replenishment = self.get_queryset().select_for_update().get(pk=pk)
+            require_branch_access(request.user, replenishment.branch, leader_required=True)
+            if replenishment.status != ReplenishmentRequest.Status.PENDING_ORDER:
+                return Response({"detail": "Only pending requests can be marked as ordered."}, status=status.HTTP_400_BAD_REQUEST)
+            replenishment.status = ReplenishmentRequest.Status.ORDERED_MANUALLY
+            replenishment.external_reference = str(request.data.get("external_reference", "")).strip()
+            replenishment.note = str(request.data.get("note", "")).strip()
+            replenishment.ordered_at = timezone.now()
+            replenishment.ordered_by = request.user if request.user.is_authenticated else None
+            replenishment.ordered_by_worker_code = str(request.data.get("worker_code", "")).strip()
+            replenishment.save(update_fields=[
+                "status",
+                "external_reference",
+                "note",
+                "ordered_at",
+                "ordered_by",
+                "ordered_by_worker_code",
+                "updated_at",
+            ])
+            AuditLog.objects.create(
+                actor=request.user if request.user.is_authenticated else None,
+                action_type=AuditLog.ActionType.UPDATE,
+                event_type="replenishment_ordered",
+                branch=replenishment.branch,
+                product=replenishment.product,
+                quantity=replenishment.quantity,
+                order=(
+                    replenishment.picking_shortage.order
+                    if replenishment.picking_shortage_id
+                    else replenishment.picking_task.order_line.order
+                    if replenishment.picking_task_id
+                    else None
+                ),
+                cart=replenishment.picking_shortage.cart if replenishment.picking_shortage_id else None,
+                reference=replenishment.reference,
+                entity_name="ReplenishmentRequest",
+                entity_id=str(replenishment.id),
+                message=f"Worker {request.user.username} marked replenishment request {replenishment.reference} as ordered manually.",
+            )
+        return Response({"message": "Replenishment request marked as ordered manually.", "request": self.get_serializer(replenishment).data})
 
 
 class StockMovementViewSet(ReadOnlyModelViewSet):

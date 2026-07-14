@@ -25,7 +25,11 @@ from operations.models import (
     PalletReceivingScan,
     PalletReceivingSession,
     PickingJob,
+    PickingShortage,
+    PickingShortageAllocation,
     PickingTask,
+    PickingTaskReallocation,
+    ReplenishmentRequest,
     RouteRun,
     ScannerCart,
     ScannerCustomerLabel,
@@ -3657,6 +3661,18 @@ class ScannerPickingJobWorkflowTests(APITestCase):
             name="J-99-01",
             location_type=Location.LocationType.PICKING,
         )
+        self.third_location = Location.objects.create(
+            branch=self.branch,
+            code="K-01-01",
+            name="K-01-01",
+            location_type=Location.LocationType.PICKING,
+        )
+        self.unconfirmed_location = Location.objects.create(
+            branch=self.branch,
+            code="UNCONFIRMED",
+            name="UNCONFIRMED",
+            location_type=Location.LocationType.RECEIVING,
+        )
         self.product_a = Product.objects.create(
             sku="JOB-A",
             name="Job Product A",
@@ -3686,11 +3702,25 @@ class ScannerPickingJobWorkflowTests(APITestCase):
             quantity_on_hand=Decimal("7"),
             quantity_reserved=Decimal("0"),
         )
+        self.third_product_a_inventory = InventoryItem.objects.create(
+            branch=self.branch,
+            location=self.third_location,
+            product=self.product_a,
+            quantity_on_hand=Decimal("0"),
+            quantity_reserved=Decimal("0"),
+        )
         InventoryItem.objects.create(
             branch=self.branch,
             location=self.location,
             product=self.product_b,
             quantity_on_hand=Decimal("5"),
+            quantity_reserved=Decimal("0"),
+        )
+        InventoryItem.objects.create(
+            branch=self.branch,
+            location=self.unconfirmed_location,
+            product=self.product_a,
+            quantity_on_hand=Decimal("0"),
             quantity_reserved=Decimal("0"),
         )
         self.route_1 = DeliveryRoute.objects.create(branch=self.branch, code="JOB-R1", name="Job Route 1")
@@ -3719,6 +3749,7 @@ class ScannerPickingJobWorkflowTests(APITestCase):
             route_run=route_run,
             external_reference=reference,
             customer_name="Job Customer",
+            customer_alias="JOB-CUST",
             status=Order.Status.IMPORTED,
         )
         OrderLine.objects.create(
@@ -3774,9 +3805,28 @@ class ScannerPickingJobWorkflowTests(APITestCase):
         order_line.save(update_fields=["quantity_ordered", "quantity_picked", "updated_at"])
         self.task_1.quantity_to_pick = quantity
         self.task_1.quantity_picked = Decimal("0")
+        self.task_1.shortage_quantity = Decimal("0")
         self.task_1.quantity_prepared = Decimal("0")
         self.task_1.status = PickingTask.Status.OPEN
-        self.task_1.save(update_fields=["quantity_to_pick", "quantity_picked", "quantity_prepared", "status", "updated_at"])
+        self.task_1.save(update_fields=["quantity_to_pick", "quantity_picked", "shortage_quantity", "quantity_prepared", "status", "updated_at"])
+
+    def create_shortage_challenge(self, cart_work_session_id, quantity="1", worker_code="DEMO"):
+        return self.client.post(
+            "/api/scanner/picking/shortage-challenge/",
+            {"cart_work_session_id": cart_work_session_id, "quantity": quantity, "worker_code": worker_code},
+            format="json",
+        )
+
+    def report_shortage(self, challenge, code=None, operation_id="shortage-op-1"):
+        return self.client.post(
+            "/api/scanner/picking/report-shortage/",
+            {
+                "challenge_token": challenge.data["challenge_token"],
+                "confirmation_code": code or challenge.data["confirmation_code"],
+                "client_operation_id": operation_id,
+            },
+            format="json",
+        )
 
     def test_merged_mode_creates_one_picking_job(self):
         response = self.create_jobs(mode="merged")
@@ -3885,6 +3935,139 @@ class ScannerPickingJobWorkflowTests(APITestCase):
         self.assertEqual(task["product_brand"], "Test Brand")
         self.assertEqual(task["product_image_url"], "/products/oil-filter.svg")
 
+    def test_stale_zero_stock_task_is_reallocated_before_current_pick(self):
+        self.set_task_1_quantity("2")
+        self.product_a_inventory.quantity_on_hand = Decimal("0")
+        self.product_a_inventory.save(update_fields=["quantity_on_hand", "updated_at"])
+        self.create_jobs(route_run_ids=[self.run_1.id])
+        job = PickingJob.objects.get()
+        start = self.start_job(job)
+
+        response = self.client.get(
+            "/api/scanner/cart-work/current/",
+            {"cart_work_session_id": start.data["cart_work_session"]["id"]},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["current_instruction"]["location"]["code"], "J-99-01")
+        self.assertEqual(response.data["current_instruction"]["product"]["sku"], "JOB-A")
+        self.assertEqual(response.data["current_instruction"]["remaining_quantity"], "2.000")
+        self.assertEqual(PickingShortage.objects.count(), 0)
+        self.assertEqual(ReplenishmentRequest.objects.count(), 0)
+        self.assertEqual(PickingTaskReallocation.objects.count(), 1)
+        self.task_1.refresh_from_db()
+        self.other_product_a_inventory.refresh_from_db()
+        self.assertEqual(self.task_1.status, PickingTask.Status.CANCELLED)
+        self.assertEqual(self.other_product_a_inventory.quantity_reserved, Decimal("2.000"))
+        self.assertFalse(StockMovement.objects.filter(movement_type=StockMovement.MovementType.PICKING_SHORTAGE).exists())
+        self.assertTrue(AuditLog.objects.filter(event_type="picking_task_reallocated").exists())
+
+        second = self.client.get(
+            "/api/scanner/cart-work/current/",
+            {"cart_work_session_id": start.data["cart_work_session"]["id"]},
+        )
+
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(PickingTaskReallocation.objects.count(), 1)
+        self.assertEqual(PickingTask.objects.filter(order_line=self.task_1.order_line).exclude(status=PickingTask.Status.CANCELLED).count(), 1)
+        self.other_product_a_inventory.refresh_from_db()
+        self.assertEqual(self.other_product_a_inventory.quantity_reserved, Decimal("2.000"))
+
+        confirm = self.confirm_location(start.data["cart_work_session"]["id"], "J-99-01")
+        pick = self.client.post(
+            "/api/scanner/picking/pick/",
+            {
+                "cart_work_session_id": start.data["cart_work_session"]["id"],
+                "product_code": "JOB-A",
+                "quantity": "2",
+                "worker_code": "DEMO",
+            },
+            format="json",
+        )
+
+        self.assertEqual(confirm.status_code, status.HTTP_200_OK)
+        self.assertEqual(pick.status_code, status.HTTP_200_OK)
+        self.other_product_a_inventory.refresh_from_db()
+        replacement_task = PickingTask.objects.get(order_line=self.task_1.order_line, source_location=self.other_location)
+        self.assertEqual(replacement_task.quantity_picked, Decimal("2.000"))
+        self.assertEqual(self.other_product_a_inventory.quantity_on_hand, Decimal("5.000"))
+        self.assertEqual(self.other_product_a_inventory.quantity_reserved, Decimal("0.000"))
+        self.assertEqual(pick.data["picking_job"]["total_quantity"], "2.000")
+        self.assertEqual(pick.data["picking_job"]["picked_quantity"], "2.000")
+
+    def test_stale_partial_original_stock_splits_work_without_duplicate_demand(self):
+        self.set_task_1_quantity("4")
+        self.product_a_inventory.quantity_on_hand = Decimal("1")
+        self.product_a_inventory.save(update_fields=["quantity_on_hand", "updated_at"])
+        self.other_product_a_inventory.quantity_on_hand = Decimal("2")
+        self.other_product_a_inventory.save(update_fields=["quantity_on_hand", "updated_at"])
+        self.third_product_a_inventory.quantity_on_hand = Decimal("1")
+        self.third_product_a_inventory.save(update_fields=["quantity_on_hand", "updated_at"])
+        self.create_jobs(route_run_ids=[self.run_1.id])
+        job = PickingJob.objects.get()
+        start = self.start_job(job)
+
+        response = self.client.get(
+            "/api/scanner/cart-work/current/",
+            {"cart_work_session_id": start.data["cart_work_session"]["id"]},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.task_1.refresh_from_db()
+        active_tasks = PickingTask.objects.filter(order_line=self.task_1.order_line).exclude(status=PickingTask.Status.CANCELLED)
+        self.assertEqual(self.task_1.quantity_to_pick, Decimal("1.000"))
+        self.assertEqual(active_tasks.count(), 3)
+        self.assertEqual(sum((task.quantity_to_pick for task in active_tasks), Decimal("0")), Decimal("4.000"))
+        self.assertEqual(PickingTaskReallocation.objects.count(), 2)
+        self.assertEqual(ReplenishmentRequest.objects.count(), 0)
+        self.assertEqual(response.data["cart_work_session"]["picking_job"]["total_quantity"], "4.000")
+        self.assertEqual(response.data["cart_work_session"]["picking_job"]["picked_quantity"], "0.000")
+
+    def test_stale_task_creates_replenishment_only_for_uncovered_system_stock(self):
+        self.set_task_1_quantity("4")
+        self.product_a_inventory.quantity_on_hand = Decimal("0")
+        self.product_a_inventory.save(update_fields=["quantity_on_hand", "updated_at"])
+        self.other_product_a_inventory.quantity_on_hand = Decimal("2")
+        self.other_product_a_inventory.save(update_fields=["quantity_on_hand", "updated_at"])
+        self.create_jobs(route_run_ids=[self.run_1.id])
+        job = PickingJob.objects.get()
+        start = self.start_job(job)
+
+        response = self.client.get(
+            "/api/scanner/cart-work/current/",
+            {"cart_work_session_id": start.data["cart_work_session"]["id"]},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        replenishment = ReplenishmentRequest.objects.get()
+        self.assertEqual(PickingShortage.objects.count(), 0)
+        self.assertEqual(PickingTaskReallocation.objects.count(), 1)
+        self.assertEqual(replenishment.quantity, Decimal("2.000"))
+        self.assertEqual(replenishment.reason, ReplenishmentRequest.Reason.SYSTEM_STOCK_UNAVAILABLE)
+        self.assertEqual(replenishment.picking_task, self.task_1)
+
+    def test_stale_task_with_no_branch_stock_creates_replenishment_and_no_current_pick(self):
+        self.set_task_1_quantity("4")
+        self.product_a_inventory.quantity_on_hand = Decimal("0")
+        self.product_a_inventory.save(update_fields=["quantity_on_hand", "updated_at"])
+        self.other_product_a_inventory.quantity_on_hand = Decimal("0")
+        self.other_product_a_inventory.save(update_fields=["quantity_on_hand", "updated_at"])
+        self.create_jobs(route_run_ids=[self.run_1.id])
+        job = PickingJob.objects.get()
+        start = self.start_job(job)
+
+        response = self.client.get(
+            "/api/scanner/cart-work/current/",
+            {"cart_work_session_id": start.data["cart_work_session"]["id"]},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(response.data["current_instruction"])
+        replenishment = ReplenishmentRequest.objects.get()
+        self.assertEqual(replenishment.quantity, Decimal("4.000"))
+        self.assertEqual(PickingShortage.objects.count(), 0)
+        self.assertEqual(PickingTaskReallocation.objects.count(), 0)
+
     def test_correct_location_confirmation_succeeds(self):
         self.create_jobs(route_run_ids=[self.run_1.id])
         job = PickingJob.objects.get()
@@ -3935,7 +4118,7 @@ class ScannerPickingJobWorkflowTests(APITestCase):
         self.assertIn("location", response.data["detail"])
 
     def test_wrong_product_is_rejected_after_location_confirmation(self):
-        self.create_jobs()
+        self.create_jobs(route_run_ids=[self.run_1.id])
         job = PickingJob.objects.get()
         start = self.start_job(job)
         self.confirm_location(start.data["cart_work_session"]["id"])
@@ -4069,7 +4252,7 @@ class ScannerPickingJobWorkflowTests(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("confirmed location", response.data["detail"])
+        self.assertIn("remaining", response.data["detail"])
 
     def test_picking_accepts_product_barcode(self):
         self.create_jobs(route_run_ids=[self.run_1.id])
@@ -4090,6 +4273,223 @@ class ScannerPickingJobWorkflowTests(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_shortage_challenge_generates_four_digit_code(self):
+        self.set_task_1_quantity("3")
+        self.create_jobs(route_run_ids=[self.run_1.id])
+        job = PickingJob.objects.get()
+        start = self.start_job(job)
+        cart_work_session_id = start.data["cart_work_session"]["id"]
+        self.confirm_location(cart_work_session_id)
+
+        response = self.create_shortage_challenge(cart_work_session_id, quantity="2", worker_code="DEMO")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertRegex(response.data["confirmation_code"], r"^\d{4}$")
+        self.assertEqual(response.data["summary"]["product_sku"], "JOB-A")
+        self.assertEqual(response.data["summary"]["customer_alias"], "JOB-CUST")
+
+    def test_shortage_wrong_confirmation_code_is_rejected(self):
+        self.set_task_1_quantity("3")
+        self.create_jobs(route_run_ids=[self.run_1.id])
+        job = PickingJob.objects.get()
+        start = self.start_job(job)
+        cart_work_session_id = start.data["cart_work_session"]["id"]
+        self.confirm_location(cart_work_session_id)
+        challenge = self.create_shortage_challenge(cart_work_session_id, quantity="2")
+
+        wrong_code = "0000" if challenge.data["confirmation_code"] != "0000" else "0001"
+        response = self.report_shortage(challenge, code=wrong_code)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(PickingShortage.objects.exists())
+
+    def test_location_shortage_allocates_alternative_stock_before_replenishment(self):
+        self.set_task_1_quantity("4")
+        self.create_jobs(route_run_ids=[self.run_1.id])
+        job = PickingJob.objects.get()
+        start = self.start_job(job)
+        cart_work_session_id = start.data["cart_work_session"]["id"]
+        self.confirm_location(cart_work_session_id)
+        pick = self.client.post(
+            "/api/scanner/picking/pick/",
+            {
+                "cart_work_session_id": cart_work_session_id,
+                "product_code": "JOB-A",
+                "quantity": "2",
+                "worker_code": "DEMO",
+            },
+            format="json",
+        )
+        self.assertEqual(pick.status_code, status.HTTP_200_OK)
+        challenge = self.create_shortage_challenge(cart_work_session_id, quantity="2")
+
+        response = self.report_shortage(challenge)
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.task_1.refresh_from_db()
+        self.product_a_inventory.refresh_from_db()
+        unconfirmed = InventoryItem.objects.get(branch=self.branch, location=self.unconfirmed_location, product=self.product_a)
+        self.assertEqual(self.task_1.quantity_picked, Decimal("2.000"))
+        self.assertEqual(self.task_1.shortage_quantity, Decimal("2.000"))
+        self.assertEqual(self.task_1.status, PickingTask.Status.PICKED)
+        self.assertEqual(self.product_a_inventory.quantity_on_hand, Decimal("1.000"))
+        self.assertEqual(unconfirmed.quantity_on_hand, Decimal("2.000"))
+        self.assertEqual(PickingShortage.objects.count(), 1)
+        shortage = PickingShortage.objects.get()
+        self.assertEqual(shortage.location_missing_quantity, Decimal("2.000"))
+        self.assertEqual(shortage.alternative_allocated_quantity, Decimal("2.000"))
+        self.assertEqual(shortage.customer_unfulfilled_quantity, Decimal("0.000"))
+        self.assertEqual(PickingShortageAllocation.objects.count(), 1)
+        allocation = PickingShortageAllocation.objects.get()
+        replacement_task = allocation.replacement_picking_task
+        self.assertEqual(replacement_task.source_location, self.other_location)
+        self.assertEqual(replacement_task.quantity_to_pick, Decimal("2.000"))
+        self.other_product_a_inventory.refresh_from_db()
+        self.assertEqual(self.other_product_a_inventory.quantity_reserved, Decimal("2.000"))
+        self.assertEqual(ReplenishmentRequest.objects.count(), 0)
+        self.assertEqual(response.data["current_instruction"]["location"]["code"], "J-99-01")
+        self.assertEqual(response.data["current_instruction"]["product"]["sku"], "JOB-A")
+        self.assertEqual(response.data["replenishment_request"], None)
+        self.assertEqual(response.data["alternative_allocations"][0]["location_code"], "J-99-01")
+        self.assertTrue(AuditLog.objects.filter(event_type="picking_location_shortage", product=self.product_a).exists())
+        self.assertTrue(AuditLog.objects.filter(event_type="alternative_stock_allocated", product=self.product_a).exists())
+
+    def test_replacement_picking_updates_allocation_without_expression_crash(self):
+        self.set_task_1_quantity("4")
+        self.create_jobs(route_run_ids=[self.run_1.id])
+        job = PickingJob.objects.get()
+        start = self.start_job(job)
+        cart_work_session_id = start.data["cart_work_session"]["id"]
+        self.confirm_location(cart_work_session_id)
+        self.client.post(
+            "/api/scanner/picking/pick/",
+            {
+                "cart_work_session_id": cart_work_session_id,
+                "product_code": "JOB-A",
+                "quantity": "2",
+                "worker_code": "DEMO",
+            },
+            format="json",
+        )
+        challenge = self.create_shortage_challenge(cart_work_session_id, quantity="2")
+        report = self.report_shortage(challenge)
+        self.assertEqual(report.status_code, status.HTTP_201_CREATED)
+
+        location = self.confirm_location(cart_work_session_id, "J-99-01")
+        pick = self.client.post(
+            "/api/scanner/picking/pick/",
+            {
+                "cart_work_session_id": cart_work_session_id,
+                "product_code": "JOB-A",
+                "quantity": "2",
+                "worker_code": "DEMO",
+            },
+            format="json",
+        )
+
+        self.assertEqual(location.status_code, status.HTTP_200_OK)
+        self.assertEqual(pick.status_code, status.HTTP_200_OK)
+        allocation = PickingShortageAllocation.objects.get()
+        replacement_task = allocation.replacement_picking_task
+        self.other_product_a_inventory.refresh_from_db()
+        self.assertEqual(allocation.picked_quantity, Decimal("2.000"))
+        self.assertEqual(allocation.status, PickingShortageAllocation.Status.COMPLETED)
+        self.assertEqual(replacement_task.quantity_picked, Decimal("2.000"))
+        self.assertEqual(replacement_task.status, PickingTask.Status.PICKED)
+        self.assertEqual(self.other_product_a_inventory.quantity_reserved, Decimal("0.000"))
+
+    def test_location_shortage_creates_replenishment_only_for_residual_quantity(self):
+        self.set_task_1_quantity("5")
+        self.other_product_a_inventory.quantity_on_hand = Decimal("2")
+        self.other_product_a_inventory.save(update_fields=["quantity_on_hand", "updated_at"])
+        self.create_jobs(route_run_ids=[self.run_1.id])
+        job = PickingJob.objects.get()
+        start = self.start_job(job)
+        cart_work_session_id = start.data["cart_work_session"]["id"]
+        self.confirm_location(cart_work_session_id)
+        challenge = self.create_shortage_challenge(cart_work_session_id, quantity="5")
+
+        response = self.report_shortage(challenge)
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        shortage = PickingShortage.objects.get()
+        replenishment = ReplenishmentRequest.objects.get()
+        self.assertEqual(shortage.alternative_allocated_quantity, Decimal("2.000"))
+        self.assertEqual(shortage.customer_unfulfilled_quantity, Decimal("3.000"))
+        self.assertEqual(replenishment.quantity, Decimal("3.000"))
+        self.task_1.refresh_from_db()
+        self.assertEqual(self.task_1.status, PickingTask.Status.WAITING_REPLENISHMENT)
+        self.assertEqual(response.data["replenishment_request"]["quantity"], "3.000")
+
+    def test_location_shortage_without_alternative_stock_creates_full_replenishment(self):
+        self.set_task_1_quantity("2")
+        self.other_product_a_inventory.quantity_reserved = Decimal("7")
+        self.other_product_a_inventory.save(update_fields=["quantity_reserved", "updated_at"])
+        self.create_jobs(route_run_ids=[self.run_1.id])
+        job = PickingJob.objects.get()
+        start = self.start_job(job)
+        cart_work_session_id = start.data["cart_work_session"]["id"]
+        self.confirm_location(cart_work_session_id)
+        challenge = self.create_shortage_challenge(cart_work_session_id, quantity="2")
+
+        response = self.report_shortage(challenge)
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        shortage = PickingShortage.objects.get()
+        replenishment = ReplenishmentRequest.objects.get()
+        self.assertEqual(PickingShortageAllocation.objects.count(), 0)
+        self.assertEqual(shortage.alternative_allocated_quantity, Decimal("0.000"))
+        self.assertEqual(shortage.customer_unfulfilled_quantity, Decimal("2.000"))
+        self.assertEqual(replenishment.quantity, Decimal("2.000"))
+
+    def test_shortage_retry_does_not_duplicate_replenishment_or_movement(self):
+        self.set_task_1_quantity("2")
+        self.create_jobs(route_run_ids=[self.run_1.id])
+        job = PickingJob.objects.get()
+        start = self.start_job(job)
+        cart_work_session_id = start.data["cart_work_session"]["id"]
+        self.confirm_location(cart_work_session_id)
+        challenge = self.create_shortage_challenge(cart_work_session_id, quantity="2")
+
+        first = self.report_shortage(challenge, operation_id="same-op")
+        second = self.report_shortage(challenge, operation_id="same-op")
+
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(PickingShortage.objects.count(), 1)
+        self.assertEqual(ReplenishmentRequest.objects.count(), 0)
+        self.assertEqual(StockMovement.objects.filter(movement_type=StockMovement.MovementType.PICKING_SHORTAGE).count(), 1)
+
+    def test_found_stock_moves_unconfirmed_to_real_location(self):
+        self.set_task_1_quantity("2")
+        self.other_product_a_inventory.quantity_reserved = Decimal("7")
+        self.other_product_a_inventory.save(update_fields=["quantity_reserved", "updated_at"])
+        self.create_jobs(route_run_ids=[self.run_1.id])
+        job = PickingJob.objects.get()
+        start = self.start_job(job)
+        cart_work_session_id = start.data["cart_work_session"]["id"]
+        self.confirm_location(cart_work_session_id)
+        challenge = self.create_shortage_challenge(cart_work_session_id, quantity="2")
+        self.report_shortage(challenge)
+        shortage = PickingShortage.objects.get()
+        UserBranchMembership.objects.create(user=self.gdy_worker, branch=self.branch, role=UserBranchMembership.Role.WORKER)
+        self.client.force_authenticate(self.gdy_worker)
+
+        response = self.client.post(
+            f"/api/picking-shortages/{shortage.id}/found-stock/",
+            {"quantity": "2", "location_code": "J-99-01", "worker_code": "GDY_WORKER"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        shortage.refresh_from_db()
+        unconfirmed = InventoryItem.objects.get(branch=self.branch, location=self.unconfirmed_location, product=self.product_a)
+        found = InventoryItem.objects.get(branch=self.branch, location=self.other_location, product=self.product_a)
+        self.assertEqual(shortage.status, PickingShortage.Status.FOUND)
+        self.assertEqual(unconfirmed.quantity_on_hand, Decimal("0.000"))
+        self.assertEqual(found.quantity_on_hand, Decimal("9.000"))
+        self.assertEqual(ReplenishmentRequest.objects.count(), 1)
 
     def test_same_job_cannot_be_assigned_to_two_carts(self):
         self.create_jobs(route_run_ids=[self.run_1.id])

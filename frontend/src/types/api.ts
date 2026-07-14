@@ -73,6 +73,7 @@ export type Order = {
   route_run_label: string | null;
   external_reference: string;
   customer_name: string;
+  customer_alias: string;
   status: string;
   requested_ship_date: string | null;
 };
@@ -146,9 +147,16 @@ export type PickingTask = {
   status: string;
   quantity_to_pick: string;
   quantity_picked: string;
+  shortage_quantity: string;
   quantity_prepared: string;
   remaining_quantity: string;
   remaining_to_prepare: string;
+  is_replacement_pick?: boolean;
+  replacement_shortage_reference?: string | null;
+  original_shortage_location_code?: string | null;
+  is_system_reallocated_pick?: boolean;
+  reallocation_reason?: string | null;
+  reallocated_from_location_code?: string | null;
 };
 
 export type ReturnBatch = {
@@ -1031,7 +1039,129 @@ export type PickInstruction = {
   };
   required_quantity: string;
   picked_quantity: string;
+  shortage_quantity: string;
   remaining_quantity: string;
+  customer_alias: string;
+};
+
+export type PickingShortageChallenge = {
+  confirmation_code: string;
+  challenge_token: string;
+  expires_at: string;
+  summary: {
+    picking_task_id: number;
+    product_sku: string;
+    product_name: string;
+    product_brand: string;
+    branch_code: string;
+    location_code: string;
+    order_reference: string;
+    customer_alias: string;
+    cart_code: string;
+    required_quantity: string;
+    picked_quantity: string;
+    shortage_quantity: string;
+  };
+};
+
+export type ScannerPickingShortageResponse = {
+  message: string;
+  shortage: {
+    id: number;
+    reference: string;
+    quantity: string;
+    location_missing_quantity: string;
+    alternative_allocated_quantity: string;
+    customer_unfulfilled_quantity: string;
+    unresolved_unconfirmed_quantity: string;
+    status: string;
+    product_sku: string;
+    reported_location_code: string;
+    unconfirmed_location_code: string;
+    allocations: PickingShortageAllocation[];
+  };
+  alternative_allocations: PickingShortageAllocation[];
+  replenishment_request: {
+    id: number;
+    reference: string;
+    status: string;
+    quantity: string;
+  } | null;
+  task: PickingTask;
+  picking_job: PickingJob;
+  cart_work_session: CartWorkSession;
+  state: "waiting_for_location" | "waiting_for_product" | "completed";
+  confirmed_location_code?: string | null;
+  current_instruction?: PickInstruction | null;
+};
+
+export type PickingShortageAllocation = {
+  id: number;
+  location?: number;
+  location_code: string;
+  location_name?: string;
+  quantity: string;
+  picked_quantity: string;
+  status: string;
+  status_label?: string;
+  replacement_picking_task: number;
+};
+
+export type PickingShortage = {
+  id: number;
+  reference: string;
+  branch_code: string;
+  product_sku: string;
+  product_name: string;
+  product_brand: string;
+  quantity: string;
+  location_missing_quantity: string;
+  alternative_allocated_quantity: string;
+  customer_unfulfilled_quantity: string;
+  recovered_quantity: string;
+  confirmed_missing_quantity: string;
+  unresolved_quantity: string;
+  unresolved_unconfirmed_quantity: string;
+  allocations: PickingShortageAllocation[];
+  replenishment_reference: string | null;
+  replenishment_quantity: string | null;
+  reported_location_code: string;
+  unconfirmed_location_code: string;
+  found_location_code: string | null;
+  cart_code: string | null;
+  order_reference: string;
+  customer_alias_snapshot: string;
+  reported_by_username: string | null;
+  reported_by_worker_code: string;
+  reported_at: string;
+  status: string;
+  status_label: string;
+};
+
+export type ReplenishmentRequest = {
+  id: number;
+  reference: string;
+  shortage_reference: string;
+  branch_code: string;
+  customer_alias: string;
+  order_reference: string;
+  product_sku: string;
+  product_name: string;
+  product_brand: string;
+  quantity: string;
+  reason: string;
+  reason_label: string;
+  status: string;
+  status_label: string;
+  external_system: string;
+  external_reference: string;
+  cart_code: string | null;
+  reported_location_code: string;
+  reported_by_worker_code: string;
+  reported_at: string;
+  created_at: string;
+  ordered_at: string | null;
+  note: string;
 };
 
 export type ScannerProformasResponse = {
@@ -1060,6 +1190,7 @@ export type ScannerCartWorkResponse = {
   confirmed_location_code?: string | null;
   cart_work_session: CartWorkSession;
   current_instruction?: PickInstruction | null;
+  repair_messages?: string[];
   session?: ScannerSession;
   tasks?: PickingTask[];
 };

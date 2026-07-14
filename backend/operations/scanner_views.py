@@ -1,5 +1,8 @@
 from decimal import Decimal
+import random
+import uuid
 
+from django.core import signing
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.db.models import F, Q
@@ -20,7 +23,11 @@ from operations.models import (
     PalletReceivingSession,
     PickingJob,
     PickingJobTask,
+    PickingShortage,
+    PickingShortageAllocation,
     PickingTask,
+    PickingTaskReallocation,
+    ReplenishmentRequest,
     RouteRun,
     ScannerCart,
     ScannerCustomerLabel,
@@ -35,15 +42,20 @@ from operations.models import (
 from operations.contents import ContentsLookupError, resolve_contents_code
 from operations.serializers import PickingTaskSerializer, RouteRunSerializer
 from operations.services import (
+    DiscrepancyLocationMissing,
     TERMINAL_ROUTE_STATUSES,
     discrepancy_line_remaining,
+    get_discrepancy_location,
     get_discrepancy_investigation_totals,
+    is_picking_job_work_fully_prepared,
     recalculate_route_readiness,
 )
 from warehouse.models import Branch, InventoryItem, Location, Product
 
 
 User = get_user_model()
+PICKING_SHORTAGE_CHALLENGE_SALT = "warehouse-wms-picking-shortage"
+PICKING_SHORTAGE_CHALLENGE_MAX_AGE = 10 * 60
 
 
 def _scanner_actor(request, worker_code=""):
@@ -178,7 +190,7 @@ def _cart_item_data(item: CartPickedItem):
 
 
 def _task_remaining(task: PickingTask):
-    return task.quantity_to_pick - task.quantity_picked
+    return task.quantity_to_pick - task.quantity_picked - task.shortage_quantity
 
 
 def _job_tasks(picking_job: PickingJob):
@@ -187,7 +199,7 @@ def _job_tasks(picking_job: PickingJob):
         "order_line__order__route_run__route",
         "order_line__product",
         "source_location",
-    ).filter(job_task__picking_job=picking_job)
+    ).filter(job_task__picking_job=picking_job).exclude(status=PickingTask.Status.CANCELLED)
 
 
 def _job_summary(picking_job: PickingJob):
@@ -203,10 +215,10 @@ def _job_summary(picking_job: PickingJob):
         }
         for route in picking_job.route_runs.select_related("route", "route__branch").order_by("route__code", "run_number")
     ]
-    total_quantity = sum((task.quantity_to_pick for task in tasks), Decimal("0"))
+    total_quantity = sum((task.quantity_to_pick - task.shortage_quantity for task in tasks), Decimal("0"))
     picked_quantity = sum((task.quantity_picked for task in tasks), Decimal("0"))
     prepared_quantity = sum((task.quantity_prepared for task in tasks), Decimal("0"))
-    remaining_lines = sum(task.quantity_picked < task.quantity_to_pick for task in tasks)
+    remaining_lines = sum((task.quantity_picked + task.shortage_quantity) < task.quantity_to_pick for task in tasks)
     progress = round(float((picked_quantity / total_quantity) * 100), 1) if total_quantity > 0 else 0
     active_work = picking_job.cart_work_sessions.select_related("cart").filter(
         status__in=[CartWorkSession.Status.ACTIVE, CartWorkSession.Status.CONTROL]
@@ -256,9 +268,202 @@ def _current_pick_task_queryset(picking_job: PickingJob):
         )
         .filter(job_task__picking_job=picking_job)
         .exclude(status__in=[PickingTask.Status.COMPLETED, PickingTask.Status.CANCELLED])
-        .filter(quantity_picked__lt=F("quantity_to_pick"))
+        .filter(quantity_picked__lt=F("quantity_to_pick") - F("shortage_quantity"))
         .order_by("source_location__code", "created_at", "id")
     )
+
+
+def _own_reallocation_reserved_quantity(task: PickingTask):
+    reallocation = getattr(task, "system_reallocation_source", None)
+    if reallocation is not None:
+        return max(reallocation.quantity - task.quantity_picked, Decimal("0"))
+
+    allocation = getattr(task, "shortage_replacement_allocation", None)
+    if allocation is not None:
+        return max(allocation.quantity - allocation.picked_quantity, Decimal("0"))
+
+    return Decimal("0")
+
+
+def _available_quantity_for_task(item: InventoryItem, task: PickingTask):
+    return item.quantity_on_hand - item.quantity_reserved + _own_reallocation_reserved_quantity(task)
+
+
+def _eligible_alternative_inventory(task: PickingTask):
+    return (
+        InventoryItem.objects.select_for_update()
+        .select_related("location", "branch", "product")
+        .filter(
+            branch=task.branch,
+            product=task.order_line.product,
+            location__is_active=True,
+            location__location_type__in=[Location.LocationType.PICKING, Location.LocationType.STORAGE],
+            quantity_on_hand__gt=F("quantity_reserved"),
+        )
+        .exclude(location=task.source_location)
+        .exclude(location__code__iexact="UNCONFIRMED")
+        .order_by("location__code", "id")
+    )
+
+
+def _repair_stale_current_task(cart_work_session: CartWorkSession, request=None):
+    task = _current_pick_task_queryset(cart_work_session.picking_job).select_for_update(of=("self",)).first()
+    if task is None:
+        return []
+
+    if (
+        hasattr(task, "system_reallocation_source")
+        or hasattr(task, "shortage_replacement_allocation")
+        or task.system_reallocations.exists()
+    ):
+        return []
+
+    remaining = _task_remaining(task)
+    if remaining <= 0:
+        return []
+
+    product = task.order_line.product
+    source_item = (
+        InventoryItem.objects.select_for_update()
+        .filter(branch=task.branch, location=task.source_location, product=product)
+        .first()
+    )
+    source_available = _available_quantity_for_task(source_item, task) if source_item is not None else Decimal("0")
+    if source_available >= remaining:
+        return []
+
+    source_available = max(source_available, Decimal("0"))
+    uncovered_quantity = remaining - source_available
+    original_location = task.source_location
+    original_quantity = task.quantity_to_pick
+    if source_available > 0:
+        task.quantity_to_pick = task.quantity_picked + task.shortage_quantity + source_available
+        task.status = PickingTask.Status.IN_PROGRESS if task.quantity_picked > 0 else PickingTask.Status.OPEN
+        task.save(update_fields=["quantity_to_pick", "status", "updated_at"])
+    else:
+        task.status = PickingTask.Status.CANCELLED
+        task.save(update_fields=["status", "updated_at"])
+
+    actor = _scanner_actor(request, cart_work_session.scanner_session.worker_code if request else "")
+    worker_code = _scanner_actor_code(request, cart_work_session.scanner_session.worker_code if request else "")
+    messages = []
+    allocated_total = Decimal("0")
+    for item in _eligible_alternative_inventory(task):
+        if uncovered_quantity <= 0:
+            break
+        available = item.quantity_on_hand - item.quantity_reserved
+        if available <= 0:
+            continue
+        quantity = min(uncovered_quantity, available)
+        replacement_task = PickingTask.objects.create(
+            branch=task.branch,
+            order_line=task.order_line,
+            source_location=item.location,
+            status=PickingTask.Status.OPEN,
+            quantity_to_pick=quantity,
+            quantity_picked=Decimal("0"),
+            quantity_prepared=Decimal("0"),
+            shortage_quantity=Decimal("0"),
+        )
+        PickingJobTask.objects.create(picking_job=cart_work_session.picking_job, picking_task=replacement_task)
+        reallocation = PickingTaskReallocation.objects.create(
+            original_picking_task=task,
+            replacement_picking_task=replacement_task,
+            branch=task.branch,
+            product=product,
+            original_location=original_location,
+            replacement_location=item.location,
+            quantity=quantity,
+        )
+        item.quantity_reserved = F("quantity_reserved") + quantity
+        item.save(update_fields=["quantity_reserved", "updated_at"])
+        uncovered_quantity -= quantity
+        allocated_total += quantity
+        message = (
+            f"Picking task for {_piece_value(quantity)} {product.sku} was reallocated from "
+            f"{original_location.code} to {item.location.code} because no available stock remained at the original location."
+        )
+        messages.append(message)
+        AuditLog.objects.create(
+            actor=actor,
+            action_type=AuditLog.ActionType.UPDATE,
+            event_type="picking_task_reallocated",
+            branch=task.branch,
+            product=product,
+            quantity=quantity,
+            source_location=original_location,
+            destination_location=item.location,
+            source_label=original_location.code,
+            destination_label=item.location.code,
+            cart=cart_work_session.cart,
+            order=task.order_line.order,
+            route_run=task.order_line.order.route_run,
+            reference=task.order_line.order.external_reference,
+            result="reallocated",
+            entity_name="PickingTaskReallocation",
+            entity_id=str(reallocation.id),
+            message=message,
+        )
+
+    if uncovered_quantity > 0:
+        order = task.order_line.order
+        customer_alias = order.customer_alias or order.customer_name
+        replenishment = ReplenishmentRequest.objects.filter(
+            picking_task=task,
+            reason=ReplenishmentRequest.Reason.SYSTEM_STOCK_UNAVAILABLE,
+            status=ReplenishmentRequest.Status.PENDING_ORDER,
+        ).first()
+        if replenishment is None:
+            replenishment = ReplenishmentRequest.objects.create(
+                picking_task=task,
+                branch=task.branch,
+                customer_alias=customer_alias,
+                order_reference=order.external_reference,
+                product=product,
+                quantity=uncovered_quantity,
+                reason=ReplenishmentRequest.Reason.SYSTEM_STOCK_UNAVAILABLE,
+                created_by=actor,
+                note=f"System stock unavailable at {original_location.code}. Original task quantity was {original_quantity}.",
+            )
+            AuditLog.objects.create(
+                actor=actor,
+                action_type=AuditLog.ActionType.CREATE,
+                event_type="replenishment_requested",
+                branch=task.branch,
+                product=product,
+                quantity=uncovered_quantity,
+                cart=cart_work_session.cart,
+                order=order,
+                route_run=order.route_run,
+                reference=replenishment.reference,
+                result="system_stock_unavailable",
+                entity_name="ReplenishmentRequest",
+                entity_id=str(replenishment.id),
+                message=(
+                    f"Replenishment request {replenishment.reference} was created for customer {customer_alias}: "
+                    f"{_piece_value(uncovered_quantity)} {product.sku} could not be allocated from branch stock."
+                ),
+            )
+        elif replenishment.quantity != uncovered_quantity:
+            replenishment.quantity = uncovered_quantity
+            replenishment.save(update_fields=["quantity", "updated_at"])
+
+    if allocated_total > 0:
+        cart_work_session.confirmed_location = None
+        cart_work_session.save(update_fields=["confirmed_location", "updated_at"])
+
+    return messages
+
+
+def _repair_stale_current_tasks(cart_work_session: CartWorkSession, request=None):
+    messages = []
+    for _ in range(10):
+        repaired_messages = _repair_stale_current_task(cart_work_session, request)
+        if not repaired_messages:
+            break
+        messages.extend(repaired_messages)
+        cart_work_session.refresh_from_db()
+    return messages
 
 
 def _pick_instruction_data(task: PickingTask | None):
@@ -286,7 +491,9 @@ def _pick_instruction_data(task: PickingTask | None):
         "order_reference": task.order_line.order.external_reference,
         "required_quantity": str(task.quantity_to_pick),
         "picked_quantity": str(task.quantity_picked),
-        "remaining_quantity": str(task.quantity_to_pick - task.quantity_picked),
+        "shortage_quantity": str(task.shortage_quantity),
+        "remaining_quantity": str(task.quantity_to_pick - task.quantity_picked - task.shortage_quantity),
+        "customer_alias": task.order_line.order.customer_alias or task.order_line.order.customer_name,
     }
 
 
@@ -312,6 +519,185 @@ def _picking_state(cart_work_session: CartWorkSession):
 def _piece_value(value):
     value = Decimal(value)
     return int(value) if value == value.to_integral_value() else float(value)
+
+
+def _picking_shortage_summary(task: PickingTask, quantity: Decimal, cart_work_session: CartWorkSession):
+    order = task.order_line.order
+    product = task.order_line.product
+    return {
+        "picking_task_id": task.id,
+        "product_sku": product.sku,
+        "product_name": product.name,
+        "product_brand": product.brand,
+        "branch_code": task.branch.code,
+        "location_code": task.source_location.code,
+        "order_reference": order.external_reference,
+        "customer_alias": order.customer_alias or order.customer_name,
+        "cart_code": cart_work_session.cart.code,
+        "required_quantity": str(task.quantity_to_pick),
+        "picked_quantity": str(task.quantity_picked),
+        "shortage_quantity": str(quantity),
+    }
+
+
+def _allocation_data(allocation: PickingShortageAllocation):
+    return {
+        "id": allocation.id,
+        "location": allocation.source_location_id,
+        "location_code": allocation.source_location.code,
+        "location_name": allocation.source_location.name,
+        "quantity": str(allocation.quantity),
+        "picked_quantity": str(allocation.picked_quantity),
+        "status": allocation.status,
+        "replacement_picking_task": allocation.replacement_picking_task_id,
+    }
+
+
+def _shortage_response(
+    shortage: PickingShortage,
+    replenishment: ReplenishmentRequest | None,
+    cart_work_session: CartWorkSession,
+):
+    state, confirmed_location_code, instruction = _picking_state(cart_work_session)
+    allocations = list(shortage.allocations.select_related("source_location").order_by("source_location__code", "id"))
+    allocated_quantity = sum((allocation.quantity for allocation in allocations), Decimal("0"))
+    residual_quantity = shortage.customer_unfulfilled_quantity
+    if residual_quantity > 0 and allocated_quantity > 0:
+        message = (
+            f"Missing stock at {shortage.reported_location.code} was recorded. "
+            f"{_piece_value(allocated_quantity)} x {shortage.product.sku} was allocated from alternative locations. "
+            f"{_piece_value(residual_quantity)} remains for customer replenishment."
+        )
+    elif allocated_quantity > 0:
+        message = (
+            f"Missing stock at {shortage.reported_location.code} was recorded. "
+            f"{_piece_value(allocated_quantity)} x {shortage.product.sku} was allocated from alternative locations."
+        )
+    else:
+        message = (
+            f"Missing stock at {shortage.reported_location.code} was recorded. "
+            f"{_piece_value(residual_quantity)} x {shortage.product.sku} requires customer replenishment."
+        )
+
+    return {
+        "message": message,
+        "shortage": {
+            "id": shortage.id,
+            "reference": shortage.reference,
+            "quantity": str(shortage.quantity),
+            "location_missing_quantity": str(shortage.location_missing_quantity),
+            "alternative_allocated_quantity": str(shortage.alternative_allocated_quantity),
+            "customer_unfulfilled_quantity": str(shortage.customer_unfulfilled_quantity),
+            "unresolved_unconfirmed_quantity": str(shortage.unresolved_unconfirmed_quantity),
+            "status": shortage.status,
+            "product_sku": shortage.product.sku,
+            "reported_location_code": shortage.reported_location.code,
+            "unconfirmed_location_code": shortage.unconfirmed_location.code,
+            "allocations": [_allocation_data(allocation) for allocation in allocations],
+        },
+        "alternative_allocations": [_allocation_data(allocation) for allocation in allocations],
+        "replenishment_request": (
+            {
+                "id": replenishment.id,
+                "reference": replenishment.reference,
+                "status": replenishment.status,
+                "quantity": str(replenishment.quantity),
+            }
+            if replenishment is not None
+            else None
+        ),
+        "task": PickingTaskSerializer(shortage.picking_task).data,
+        "picking_job": _job_summary(cart_work_session.picking_job),
+        "cart_work_session": _cart_work_session_data(cart_work_session),
+        "state": state,
+        "confirmed_location_code": confirmed_location_code,
+        "current_instruction": instruction,
+    }
+
+
+def _allocate_alternative_stock(
+    *,
+    shortage: PickingShortage,
+    original_task: PickingTask,
+    picking_job: PickingJob,
+    quantity_needed: Decimal,
+    actor,
+    worker_code: str,
+) -> Decimal:
+    remaining = quantity_needed
+    allocated_total = Decimal("0")
+    product = original_task.order_line.product
+    inventory_items = (
+        InventoryItem.objects.select_for_update()
+        .select_related("location", "branch", "product")
+        .filter(
+            branch=original_task.branch,
+            product=product,
+            location__is_active=True,
+            location__location_type__in=[Location.LocationType.PICKING, Location.LocationType.STORAGE],
+            quantity_on_hand__gt=F("quantity_reserved"),
+        )
+        .exclude(location=original_task.source_location)
+        .exclude(location__code__iexact="UNCONFIRMED")
+        .order_by("location__code", "id")
+    )
+
+    for item in inventory_items:
+        if remaining <= 0:
+            break
+
+        available = item.quantity_on_hand - item.quantity_reserved
+        if available <= 0:
+            continue
+
+        quantity = min(remaining, available)
+        replacement_task = PickingTask.objects.create(
+            branch=original_task.branch,
+            order_line=original_task.order_line,
+            source_location=item.location,
+            status=PickingTask.Status.OPEN,
+            quantity_to_pick=quantity,
+            quantity_picked=Decimal("0"),
+            quantity_prepared=Decimal("0"),
+            shortage_quantity=Decimal("0"),
+        )
+        PickingJobTask.objects.create(picking_job=picking_job, picking_task=replacement_task)
+        allocation = PickingShortageAllocation.objects.create(
+            shortage=shortage,
+            original_picking_task=original_task,
+            replacement_picking_task=replacement_task,
+            branch=original_task.branch,
+            product=product,
+            source_location=item.location,
+            quantity=quantity,
+        )
+        item.quantity_reserved = F("quantity_reserved") + quantity
+        item.save(update_fields=["quantity_reserved", "updated_at"])
+        allocated_total += quantity
+        remaining -= quantity
+
+        AuditLog.objects.create(
+            actor=actor,
+            action_type=AuditLog.ActionType.UPDATE,
+            event_type="alternative_stock_allocated",
+            branch=original_task.branch,
+            product=product,
+            quantity=quantity,
+            source_location=item.location,
+            source_label=item.location.code,
+            cart=shortage.cart,
+            order=original_task.order_line.order,
+            route_run=original_task.order_line.order.route_run,
+            reference=shortage.reference,
+            entity_name="PickingShortageAllocation",
+            entity_id=str(allocation.id),
+            message=(
+                f"Worker {worker_code} allocated {_piece_value(quantity)} {product.sku} "
+                f"from alternative location {item.location.code} for shortage {shortage.reference}."
+            ),
+        )
+
+    return allocated_total
 
 
 def _pallet_item_data(item: TransferPalletItem):
@@ -682,7 +1068,7 @@ def _pick_for_cart_work(request):
         if product_code.lower() not in {product.sku.lower(), (product.barcode or "").lower()}:
             return Response({"detail": f"Wrong product. Expected {product.sku}."}, status=status.HTTP_400_BAD_REQUEST)
 
-        task_remaining = task.quantity_to_pick - task.quantity_picked
+        task_remaining = task.quantity_to_pick - task.quantity_picked - task.shortage_quantity
         order_remaining = order_line.quantity_ordered - order_line.quantity_picked
         if quantity > task_remaining or quantity > order_remaining:
             return Response(
@@ -703,6 +1089,31 @@ def _pick_for_cart_work(request):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        replacement_allocation = (
+            PickingShortageAllocation.objects.select_for_update()
+            .filter(replacement_picking_task=task)
+            .first()
+        )
+        system_reallocation = (
+            PickingTaskReallocation.objects.select_for_update()
+            .filter(replacement_picking_task=task)
+            .first()
+        )
+        new_allocation_picked_quantity = None
+        if replacement_allocation is not None or system_reallocation is not None:
+            if inventory_item.quantity_reserved < quantity:
+                return Response(
+                    {"detail": "Quantity exceeds the reserved reallocated quantity."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        if replacement_allocation is not None:
+            new_allocation_picked_quantity = replacement_allocation.picked_quantity + quantity
+            if new_allocation_picked_quantity > replacement_allocation.quantity:
+                return Response(
+                    {"detail": "Quantity exceeds the remaining replacement allocation."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
         task.quantity_picked = F("quantity_picked") + quantity
         task.status = PickingTask.Status.IN_PROGRESS
         task.save(update_fields=["quantity_picked", "status", "updated_at"])
@@ -716,7 +1127,20 @@ def _pick_for_cart_work(request):
         order_line.save(update_fields=["quantity_picked", "updated_at"])
 
         inventory_item.quantity_on_hand = F("quantity_on_hand") - quantity
-        inventory_item.save(update_fields=["quantity_on_hand", "updated_at"])
+        if replacement_allocation is not None or system_reallocation is not None:
+            inventory_item.quantity_reserved = F("quantity_reserved") - quantity
+            inventory_item.save(update_fields=["quantity_on_hand", "quantity_reserved", "updated_at"])
+        else:
+            inventory_item.save(update_fields=["quantity_on_hand", "updated_at"])
+
+        if replacement_allocation is not None:
+            replacement_allocation.picked_quantity = new_allocation_picked_quantity
+            replacement_allocation.status = (
+                PickingShortageAllocation.Status.COMPLETED
+                if new_allocation_picked_quantity >= replacement_allocation.quantity
+                else PickingShortageAllocation.Status.PICKING
+            )
+            replacement_allocation.save(update_fields=["picked_quantity", "status", "updated_at"])
 
         StockMovement.objects.create(
             branch=task.branch,
@@ -742,7 +1166,7 @@ def _pick_for_cart_work(request):
         cart_item.save(update_fields=["quantity_picked", "updated_at"])
         cart_item.refresh_from_db()
 
-        if not _job_tasks(picking_job).filter(quantity_picked__lt=F("quantity_to_pick")).exists():
+        if not _job_tasks(picking_job).filter(quantity_picked__lt=F("quantity_to_pick") - F("shortage_quantity")).exists():
             picking_job.status = PickingJob.Status.PICKED
             picking_job.save(update_fields=["status", "updated_at"])
 
@@ -773,12 +1197,14 @@ def _pick_for_cart_work(request):
                 f"for order {order_line.order.external_reference}."
             ),
         )
+        repair_messages = _repair_stale_current_tasks(cart_work_session, request)
 
     cart_work_session.refresh_from_db()
     state, confirmed_location_code, instruction = _picking_state(cart_work_session)
     return Response(
         {
             "message": "Pick scan accepted.",
+            "repair_messages": repair_messages,
             "task": PickingTaskSerializer(task).data,
             "picking_job": _job_summary(picking_job),
             "cart_work_session": _cart_work_session_data(cart_work_session),
@@ -826,7 +1252,7 @@ def _pick_from_shelf(request, allow_legacy_without_session=False):
         )
         task = (
             matching_tasks.exclude(status__in=[PickingTask.Status.COMPLETED, PickingTask.Status.CANCELLED])
-            .filter(quantity_picked__lt=F("quantity_to_pick"))
+            .filter(quantity_picked__lt=F("quantity_to_pick") - F("shortage_quantity"))
             .first()
         )
 
@@ -845,7 +1271,7 @@ def _pick_from_shelf(request, allow_legacy_without_session=False):
 
         order_line = task.order_line
         product = order_line.product
-        task_remaining = task.quantity_to_pick - task.quantity_picked
+        task_remaining = task.quantity_to_pick - task.quantity_picked - task.shortage_quantity
         order_remaining = order_line.quantity_ordered - order_line.quantity_picked
 
         if quantity > task_remaining or quantity > order_remaining:
@@ -870,7 +1296,7 @@ def _pick_from_shelf(request, allow_legacy_without_session=False):
         task.save(update_fields=["quantity_picked", "status", "updated_at"])
         task.refresh_from_db()
 
-        if task.quantity_picked >= task.quantity_to_pick:
+        if task.quantity_picked + task.shortage_quantity >= task.quantity_to_pick:
             task.status = PickingTask.Status.PICKED
             task.save(update_fields=["status", "updated_at"])
             task.refresh_from_db()
@@ -1125,6 +1551,262 @@ class ScannerPickingPickView(APIView):
         return _pick_from_shelf(request)
 
 
+class ScannerPickingShortageChallengeView(APIView):
+    def post(self, request):
+        cart_work_session_id = request.data.get("cart_work_session_id")
+        quantity, error = _parse_positive_piece_quantity(request.data.get("quantity", 1))
+        if error is not None:
+            return error
+        worker_code = str(request.data.get("worker_code", "")).strip() or "DEMO"
+
+        with transaction.atomic():
+            cart_work_session = (
+                CartWorkSession.objects.select_for_update(of=("self",))
+                .select_related("cart", "picking_job", "scanner_session", "confirmed_location")
+                .filter(pk=cart_work_session_id)
+                .first()
+            )
+            if cart_work_session is None:
+                return Response({"detail": "Cart work session not found."}, status=status.HTTP_404_NOT_FOUND)
+            _repair_stale_current_tasks(cart_work_session, request)
+            task = _current_pick_task_queryset(cart_work_session.picking_job).select_for_update(of=("self",)).first()
+            if task is None:
+                return Response({"detail": "Picking job has no remaining work."}, status=status.HTTP_400_BAD_REQUEST)
+            if cart_work_session.confirmed_location_id != task.source_location_id:
+                return Response({"detail": "Scan the expected location before reporting missing stock."}, status=status.HTTP_400_BAD_REQUEST)
+
+            remaining = task.quantity_to_pick - task.quantity_picked - task.shortage_quantity
+            if quantity > remaining:
+                return Response({"detail": "Missing quantity exceeds remaining picking quantity."}, status=status.HTTP_400_BAD_REQUEST)
+
+            source_item = (
+                InventoryItem.objects.select_for_update()
+                .filter(branch=task.branch, location=task.source_location, product=task.order_line.product)
+                .first()
+            )
+            source_available = _available_quantity_for_task(source_item, task) if source_item is not None else Decimal("0")
+            if source_available < quantity:
+                return Response(
+                    {"detail": "System stock at this location is already insufficient. Refresh picking to get an updated location."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            code = f"{random.SystemRandom().randint(0, 9999):04d}"
+            payload = {
+                "nonce": uuid.uuid4().hex,
+                "code": code,
+                "cart_work_session_id": cart_work_session.id,
+                "picking_task_id": task.id,
+                "product_id": task.order_line.product_id,
+                "quantity": str(quantity),
+                "worker_code": worker_code,
+            }
+        return Response(
+            {
+                "confirmation_code": code,
+                "challenge_token": signing.dumps(payload, salt=PICKING_SHORTAGE_CHALLENGE_SALT),
+                "expires_at": (timezone.now() + timezone.timedelta(seconds=PICKING_SHORTAGE_CHALLENGE_MAX_AGE)).isoformat(),
+                "summary": _picking_shortage_summary(task, quantity, cart_work_session),
+            }
+        )
+
+
+class ScannerPickingReportShortageView(APIView):
+    def post(self, request):
+        token = str(request.data.get("challenge_token", "")).strip()
+        confirmation_code = str(request.data.get("confirmation_code", "")).strip()
+        client_operation_id = str(request.data.get("client_operation_id", "")).strip() or None
+        if not token:
+            return Response({"detail": "challenge_token is required."}, status=status.HTTP_400_BAD_REQUEST)
+        if not confirmation_code:
+            return Response({"detail": "confirmation_code is required."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            payload = signing.loads(token, salt=PICKING_SHORTAGE_CHALLENGE_SALT, max_age=PICKING_SHORTAGE_CHALLENGE_MAX_AGE)
+        except signing.SignatureExpired:
+            return Response({"detail": "Confirmation code expired."}, status=status.HTTP_400_BAD_REQUEST)
+        except signing.BadSignature:
+            return Response({"detail": "Invalid confirmation challenge."}, status=status.HTTP_400_BAD_REQUEST)
+        if confirmation_code != payload.get("code"):
+            return Response({"detail": "Confirmation code is incorrect."}, status=status.HTTP_400_BAD_REQUEST)
+
+        existing = PickingShortage.objects.select_related("product", "branch", "unconfirmed_location", "picking_task").filter(
+            confirmation_nonce=payload["nonce"]
+        ).first()
+        if existing is not None:
+            cart_work_session = CartWorkSession.objects.select_related("cart", "picking_job", "scanner_session").get(
+                pk=payload["cart_work_session_id"]
+            )
+            return Response(_shortage_response(existing, getattr(existing, "replenishment_request", None), cart_work_session))
+
+        quantity = Decimal(payload["quantity"])
+        worker_code = payload.get("worker_code") or "DEMO"
+        with transaction.atomic():
+            cart_work_session = (
+                CartWorkSession.objects.select_for_update(of=("self",))
+                .select_related("cart", "picking_job", "scanner_session", "confirmed_location")
+                .get(pk=payload["cart_work_session_id"])
+            )
+            task = (
+                PickingTask.objects.select_for_update()
+                .select_related("branch", "order_line__order", "order_line__product", "source_location")
+                .get(pk=payload["picking_task_id"], job_task__picking_job=cart_work_session.picking_job)
+            )
+            if cart_work_session.confirmed_location_id != task.source_location_id:
+                return Response({"detail": "Current confirmed location changed. Generate a new challenge."}, status=status.HTTP_400_BAD_REQUEST)
+            if task.order_line.product_id != payload["product_id"]:
+                return Response({"detail": "Product changed. Generate a new challenge."}, status=status.HTTP_400_BAD_REQUEST)
+            remaining = task.quantity_to_pick - task.quantity_picked - task.shortage_quantity
+            if quantity > remaining:
+                return Response({"detail": "Shortage quantity exceeds remaining picking quantity."}, status=status.HTTP_400_BAD_REQUEST)
+
+            try:
+                unconfirmed_location = get_discrepancy_location(task.branch)
+            except DiscrepancyLocationMissing as exc:
+                return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+            product = task.order_line.product
+            source_item = InventoryItem.objects.select_for_update().filter(branch=task.branch, location=task.source_location, product=product).first()
+            if source_item is None or source_item.quantity_on_hand < quantity:
+                return Response({"detail": "Not enough stock at the expected location."}, status=status.HTTP_400_BAD_REQUEST)
+            unconfirmed_item, _ = InventoryItem.objects.select_for_update().get_or_create(
+                branch=task.branch,
+                location=unconfirmed_location,
+                product=product,
+                defaults={"quantity_on_hand": Decimal("0"), "quantity_reserved": Decimal("0")},
+            )
+            source_item.quantity_on_hand = F("quantity_on_hand") - quantity
+            source_item.save(update_fields=["quantity_on_hand", "updated_at"])
+            unconfirmed_item.quantity_on_hand = F("quantity_on_hand") + quantity
+            unconfirmed_item.save(update_fields=["quantity_on_hand", "updated_at"])
+
+            order = task.order_line.order
+            actor = _scanner_actor(request, worker_code)
+            customer_alias = order.customer_alias or order.customer_name
+            shortage = PickingShortage.objects.create(
+                picking_task=task,
+                order=order,
+                branch=task.branch,
+                product=product,
+                reported_location=task.source_location,
+                unconfirmed_location=unconfirmed_location,
+                cart=cart_work_session.cart,
+                quantity=quantity,
+                customer_alias_snapshot=customer_alias,
+                reported_by=actor,
+                reported_by_worker_code=worker_code,
+                confirmation_nonce=payload["nonce"],
+                client_operation_id=client_operation_id,
+                note=str(request.data.get("note", "")).strip(),
+            )
+            StockMovement.objects.create(
+                branch=task.branch,
+                product=product,
+                inventory_item=unconfirmed_item,
+                source_location=task.source_location,
+                destination_location=unconfirmed_location,
+                movement_type=StockMovement.MovementType.PICKING_SHORTAGE,
+                quantity=quantity,
+                reference=shortage.reference,
+                performed_by=actor,
+            )
+            allocated_quantity = _allocate_alternative_stock(
+                shortage=shortage,
+                original_task=task,
+                picking_job=cart_work_session.picking_job,
+                quantity_needed=quantity,
+                actor=actor,
+                worker_code=worker_code,
+            )
+            customer_unfulfilled_quantity = quantity - allocated_quantity
+            shortage.alternative_allocated_quantity = allocated_quantity
+            shortage.customer_unfulfilled_quantity = customer_unfulfilled_quantity
+            shortage.save(
+                update_fields=[
+                    "alternative_allocated_quantity",
+                    "customer_unfulfilled_quantity",
+                    "updated_at",
+                ]
+            )
+            task.shortage_quantity = F("shortage_quantity") + quantity
+            task.status = (
+                PickingTask.Status.WAITING_REPLENISHMENT
+                if customer_unfulfilled_quantity > 0
+                else (
+                    PickingTask.Status.PICKED
+                    if task.quantity_picked + quantity >= task.quantity_to_pick
+                    else PickingTask.Status.IN_PROGRESS
+                )
+            )
+            task.save(update_fields=["shortage_quantity", "status", "updated_at"])
+            task.refresh_from_db()
+            replenishment = None
+            if customer_unfulfilled_quantity > 0:
+                replenishment = ReplenishmentRequest.objects.create(
+                    picking_shortage=shortage,
+                    branch=task.branch,
+                    customer_alias=customer_alias,
+                    order_reference=order.external_reference,
+                    product=product,
+                    quantity=customer_unfulfilled_quantity,
+                    created_by=actor,
+                )
+            if not _job_tasks(cart_work_session.picking_job).filter(quantity_picked__lt=F("quantity_to_pick") - F("shortage_quantity")).exists():
+                cart_work_session.picking_job.status = PickingJob.Status.PICKED
+                cart_work_session.picking_job.save(update_fields=["status", "updated_at"])
+            next_task = _current_pick_task_queryset(cart_work_session.picking_job).first()
+            if next_task is None or next_task.source_location_id != cart_work_session.confirmed_location_id:
+                cart_work_session.confirmed_location = None
+                cart_work_session.save(update_fields=["confirmed_location", "updated_at"])
+
+            AuditLog.objects.create(
+                actor=actor,
+                action_type=AuditLog.ActionType.CREATE,
+                event_type="picking_location_shortage",
+                branch=task.branch,
+                product=product,
+                quantity=quantity,
+                source_location=task.source_location,
+                destination_location=unconfirmed_location,
+                source_label=task.source_location.code,
+                destination_label=unconfirmed_location.code,
+                cart=cart_work_session.cart,
+                order=order,
+                route_run=order.route_run,
+                reference=shortage.reference,
+                entity_name="PickingShortage",
+                entity_id=str(shortage.id),
+                message=(
+                    f"Worker {worker_code} reported missing stock at location {task.source_location.code}: "
+                    f"{_piece_value(quantity)} {product.sku} for order {order.external_reference}."
+                ),
+            )
+            if replenishment is not None:
+                AuditLog.objects.create(
+                    actor=actor,
+                    action_type=AuditLog.ActionType.CREATE,
+                    event_type="replenishment_requested",
+                    branch=task.branch,
+                    product=product,
+                    quantity=customer_unfulfilled_quantity,
+                    cart=cart_work_session.cart,
+                    order=order,
+                    route_run=order.route_run,
+                    reference=replenishment.reference,
+                    entity_name="ReplenishmentRequest",
+                    entity_id=str(replenishment.id),
+                    message=(
+                        f"Replenishment request {replenishment.reference} was created for customer "
+                        f"{customer_alias}: {_piece_value(customer_unfulfilled_quantity)} {product.sku}."
+                    ),
+                )
+
+        cart_work_session.refresh_from_db()
+        shortage.refresh_from_db()
+        if replenishment is not None:
+            replenishment.refresh_from_db()
+        return Response(_shortage_response(shortage, replenishment, cart_work_session), status=status.HTTP_201_CREATED)
+
+
 class ScannerPickingConfirmLocationView(APIView):
     def post(self, request):
         location_code = str(request.data.get("location_code", "")).strip()
@@ -1143,6 +1825,7 @@ class ScannerPickingConfirmLocationView(APIView):
             if cart_work_session.status not in [CartWorkSession.Status.ACTIVE, CartWorkSession.Status.CONTROL]:
                 return Response({"detail": "Cart work session is not active."}, status=status.HTTP_400_BAD_REQUEST)
 
+            repair_messages = _repair_stale_current_tasks(cart_work_session, request)
             task = _current_pick_task_queryset(cart_work_session.picking_job).first()
             if task is None:
                 cart_work_session.confirmed_location = None
@@ -1155,6 +1838,7 @@ class ScannerPickingConfirmLocationView(APIView):
                         "confirmed_location_code": confirmed_location_code,
                         "cart_work_session": _cart_work_session_data(cart_work_session),
                         "current_instruction": instruction,
+                        "repair_messages": repair_messages,
                     },
                     status=status.HTTP_200_OK,
                 )
@@ -1186,6 +1870,7 @@ class ScannerPickingConfirmLocationView(APIView):
         return Response(
             {
                 "message": "Location confirmed.",
+                "repair_messages": repair_messages,
                 "state": state,
                 "confirmed_location_code": confirmed_location_code,
                 "cart_work_session": _cart_work_session_data(cart_work_session),
@@ -1287,9 +1972,9 @@ def _route_proforma_data(route_run: RouteRun):
         "status": route_run.status,
         "departure_time": route_run.departure_time.isoformat(),
         "akt": len(available_tasks),
-        "lines": sum(task.quantity_picked < task.quantity_to_pick for task in available_tasks),
+        "lines": sum((task.quantity_picked + task.shortage_quantity) < task.quantity_to_pick for task in available_tasks),
         "started": len(started_tasks),
-        "picked": sum(task.quantity_picked >= task.quantity_to_pick for task in tasks),
+        "picked": sum((task.quantity_picked + task.shortage_quantity) >= task.quantity_to_pick for task in tasks),
         "prepared": sum(task.quantity_prepared >= task.quantity_to_pick for task in tasks),
         "is_selectable": bool(available_tasks) and route_run.status not in TERMINAL_ROUTE_STATUSES,
     }
@@ -1338,7 +2023,7 @@ class ScannerProformasCreateJobsView(APIView):
                     PickingTask.objects.select_for_update()
                     .filter(order_line__order__route_run__in=group)
                     .exclude(status__in=[PickingTask.Status.COMPLETED, PickingTask.Status.CANCELLED])
-                    .filter(quantity_picked__lt=F("quantity_to_pick"))
+                    .filter(quantity_picked__lt=F("quantity_to_pick") - F("shortage_quantity"))
                     .exclude(id__in=reserved_task_ids)
                     .order_by("id")
                 )
@@ -1458,6 +2143,14 @@ class ScannerCartWorkCurrentView(APIView):
         if cart_work_session is None:
             return Response({"detail": "Cart work session not found."}, status=status.HTTP_404_NOT_FOUND)
 
+        with transaction.atomic():
+            cart_work_session = (
+                CartWorkSession.objects.select_for_update(of=("self",))
+                .select_related("cart", "picking_job", "scanner_session")
+                .get(pk=cart_work_session.id)
+            )
+            repair_messages = _repair_stale_current_tasks(cart_work_session, request)
+
         tasks = _job_tasks(cart_work_session.picking_job).order_by("source_location__code", "created_at", "id")
         state, confirmed_location_code, instruction = _picking_state(cart_work_session)
         return Response(
@@ -1466,6 +2159,7 @@ class ScannerCartWorkCurrentView(APIView):
                 "state": state,
                 "confirmed_location_code": confirmed_location_code,
                 "current_instruction": instruction,
+                "repair_messages": repair_messages,
                 "tasks": [PickingTaskSerializer(task).data for task in tasks],
             }
         )
@@ -1630,7 +2324,7 @@ class ScannerControlFinishView(APIView):
                 cart_work_session.save(update_fields=["status", "finished_at", "updated_at"])
 
                 picking_job = cart_work_session.picking_job
-                if _job_tasks(picking_job).filter(quantity_prepared__lt=F("quantity_to_pick")).exists():
+                if not is_picking_job_work_fully_prepared(picking_job):
                     picking_job.status = PickingJob.Status.PICKED
                     picking_job.save(update_fields=["status", "updated_at"])
                 else:

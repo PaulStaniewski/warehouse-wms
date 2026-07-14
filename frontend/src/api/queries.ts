@@ -12,12 +12,16 @@ import type {
   Order,
   OrderLine,
   PickingTask,
+  PickingShortage,
+  PickingShortageChallenge,
   Product,
   ReturnBatch,
+  ReplenishmentRequest,
   RouteRun,
   ScannerContentsResponse,
   ScannerLocationContentsResponse,
   ScannerPickingScanResponse,
+  ScannerPickingShortageResponse,
   ScannerProductLookupResponse,
   ScannerQuickTransferResponse,
   ScannerReceivingResponse,
@@ -236,6 +240,51 @@ export function useScannerPickingPick() {
         cart_work_session_id: cartWorkSessionId,
         session_id: sessionId,
         worker_code: workerCode,
+      });
+      return response.data;
+    },
+  });
+}
+
+export function useScannerPickingShortageChallenge() {
+  return useMutation({
+    mutationFn: async ({
+      cartWorkSessionId,
+      quantity,
+      workerCode,
+    }: {
+      cartWorkSessionId: number;
+      quantity: string;
+      workerCode?: string;
+    }) => {
+      const response = await apiClient.post<PickingShortageChallenge>("/scanner/picking/shortage-challenge/", {
+        cart_work_session_id: cartWorkSessionId,
+        quantity,
+        worker_code: workerCode,
+      });
+      return response.data;
+    },
+  });
+}
+
+export function useScannerPickingReportShortage() {
+  return useMutation({
+    mutationFn: async ({
+      challengeToken,
+      confirmationCode,
+      clientOperationId,
+      note,
+    }: {
+      challengeToken: string;
+      confirmationCode: string;
+      clientOperationId: string;
+      note?: string;
+    }) => {
+      const response = await apiClient.post<ScannerPickingShortageResponse>("/scanner/picking/report-shortage/", {
+        challenge_token: challengeToken,
+        confirmation_code: confirmationCode,
+        client_operation_id: clientOperationId,
+        note,
       });
       return response.data;
     },
@@ -1116,6 +1165,118 @@ export function useCurrentAuditLogs(branch?: string, filters: CurrentEventFilter
       if (filters.actor) params.set("actor", filters.actor);
       const query = params.toString();
       return getList<AuditLog>(`/current-events/${query ? `?${query}` : ""}`);
+    },
+  });
+}
+
+export type PickingShortageFilters = {
+  actor?: string;
+  dateFrom?: string;
+  dateTo?: string;
+  location?: string;
+  product?: string;
+  search?: string;
+  status?: string;
+};
+
+export function usePickingShortages(branch?: string, filters: PickingShortageFilters = {}) {
+  return useQuery({
+    queryKey: ["picking-shortages", branch, filters],
+    queryFn: () => {
+      const params = new URLSearchParams();
+      if (branch) params.set("branch", branch);
+      if (filters.search) params.set("search", filters.search);
+      if (filters.status) params.set("status", filters.status);
+      if (filters.product) params.set("product", filters.product);
+      if (filters.location) params.set("location", filters.location);
+      if (filters.actor) params.set("actor", filters.actor);
+      if (filters.dateFrom) params.set("date_from", filters.dateFrom);
+      if (filters.dateTo) params.set("date_to", filters.dateTo);
+      const query = params.toString();
+      return getList<PickingShortage>(`/picking-shortages/${query ? `?${query}` : ""}`);
+    },
+  });
+}
+
+export function usePickingShortageFoundStock() {
+  return useMutation({
+    mutationFn: async ({
+      locationCode,
+      note,
+      quantity,
+      shortageId,
+      workerCode,
+    }: {
+      locationCode: string;
+      note?: string;
+      quantity: string;
+      shortageId: number;
+      workerCode?: string;
+    }) => {
+      const response = await apiClient.post<{ message: string; shortage: PickingShortage }>(
+        `/picking-shortages/${shortageId}/found-stock/`,
+        { location_code: locationCode, note, quantity, worker_code: workerCode },
+      );
+      return response.data;
+    },
+  });
+}
+
+export function usePickingShortageConfirmMissing() {
+  return useMutation({
+    mutationFn: async ({ note, shortageId, workerCode }: { note?: string; shortageId: number; workerCode?: string }) => {
+      const response = await apiClient.post<{ message: string; shortage: PickingShortage }>(
+        `/picking-shortages/${shortageId}/confirm-missing/`,
+        { note, worker_code: workerCode },
+      );
+      return response.data;
+    },
+  });
+}
+
+export type ReplenishmentRequestFilters = {
+  customerAlias?: string;
+  order?: string;
+  product?: string;
+  search?: string;
+  status?: string;
+};
+
+export function useReplenishmentRequests(branch?: string, filters: ReplenishmentRequestFilters = {}) {
+  return useQuery({
+    queryKey: ["replenishment-requests", branch, filters],
+    queryFn: () => {
+      const params = new URLSearchParams();
+      if (branch) params.set("branch", branch);
+      if (filters.search) params.set("search", filters.search);
+      if (filters.status) params.set("status", filters.status);
+      if (filters.product) params.set("product", filters.product);
+      if (filters.customerAlias) params.set("customer_alias", filters.customerAlias);
+      if (filters.order) params.set("order", filters.order);
+      const query = params.toString();
+      return getList<ReplenishmentRequest>(`/replenishment-requests/${query ? `?${query}` : ""}`);
+    },
+  });
+}
+
+export function useMarkReplenishmentOrderedManually() {
+  return useMutation({
+    mutationFn: async ({
+      externalReference,
+      note,
+      requestId,
+      workerCode,
+    }: {
+      externalReference?: string;
+      note?: string;
+      requestId: number;
+      workerCode?: string;
+    }) => {
+      const response = await apiClient.post<{ message: string; request: ReplenishmentRequest }>(
+        `/replenishment-requests/${requestId}/mark-ordered-manually/`,
+        { external_reference: externalReference, note, worker_code: workerCode },
+      );
+      return response.data;
     },
   });
 }

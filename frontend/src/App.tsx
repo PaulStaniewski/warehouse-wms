@@ -18,7 +18,9 @@ import { InventoryPage } from "./pages/InventoryPage";
 import { LocationsPage } from "./pages/LocationsPage";
 import { LoginPage } from "./pages/LoginPage";
 import { OrdersPage } from "./pages/OrdersPage";
+import { PickingShortagesPage } from "./pages/PickingShortagesPage";
 import { ProductsPage } from "./pages/ProductsPage";
+import { ReplenishmentRequestsPage } from "./pages/ReplenishmentRequestsPage";
 import { RouteMonitorPage } from "./pages/RouteMonitorPage";
 import { RouteArchivePage } from "./pages/RouteArchivePage";
 import { RouteDocumentsPage } from "./pages/RouteDocumentsPage";
@@ -76,6 +78,8 @@ function App() {
             <Route path="wms/routes-monitor" element={<RouteMonitorPage />} />
             <Route path="wms/routes/archive" element={<RouteArchivePage />} />
             <Route path="wms/discrepancy-actions" element={<DiscrepancyActionQueuePage />} />
+            <Route path="wms/replenishment-requests" element={<ReplenishmentRequestsPage />} />
+            <Route path="wms/picking-shortages" element={<PickingShortagesPage />} />
             <Route path="wms/discrepancies" element={<DiscrepanciesPage />} />
             <Route path="wms/discrepancies/:id" element={<DiscrepancyDetailPage />} />
             <Route path="wms/discrepancies/:id/report" element={<DiscrepancyReportPage />} />

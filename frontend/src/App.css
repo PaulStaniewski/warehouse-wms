@@ -2134,6 +2134,58 @@ tr:last-child td {
   color: #72838d;
 }
 
+.filter-panel,
+.action-panel {
+  display: grid;
+  gap: 12px;
+  border: 1px solid #dce3e8;
+  border-radius: 8px;
+  margin-bottom: 18px;
+  padding: 16px;
+  background: #ffffff;
+}
+
+.filter-panel {
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+
+.filter-panel input,
+.filter-panel select,
+.action-panel input,
+.action-panel select {
+  min-height: 40px;
+  border: 1px solid #c8d3d9;
+  border-radius: 8px;
+  padding: 0 12px;
+}
+
+.action-panel {
+  margin-top: 18px;
+}
+
+.action-panel strong {
+  color: #173f46;
+}
+
+.action-panel button,
+.table-wrap button {
+  min-height: 38px;
+  border: 0;
+  border-radius: 8px;
+  padding: 0 12px;
+  background: #176875;
+  color: #ffffff;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.action-panel button:disabled,
+.table-wrap button:disabled {
+  background: #c8d3d9;
+  color: #63777b;
+  cursor: not-allowed;
+}
+
 .state-box {
   border: 1px solid #dce3e8;
   border-radius: 8px;
@@ -3697,13 +3749,34 @@ tr:last-child td {
   margin: 0;
 }
 
-.concept-product-quantities div {
+.concept-product-quantities div,
+.concept-shortage-button {
   display: grid;
   align-content: center;
   min-width: 0;
   border-radius: 10px;
   padding: 14px;
   background: #f1f6f5;
+}
+
+.concept-shortage-button {
+  grid-column: 1 / -1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 48px;
+  border: 0;
+  background: #9a5b08;
+  color: #fff;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.concept-shortage-button:disabled {
+  background: #d3ddde;
+  color: #718387;
+  cursor: not-allowed;
 }
 
 .concept-product-quantities dd {
@@ -3718,6 +3791,124 @@ tr:last-child td {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
   margin-bottom: 20px;
+}
+
+.concept-shortage-panel {
+  display: grid;
+  gap: 16px;
+  margin-bottom: 20px;
+  border: 2px solid #d8912d;
+  border-radius: 14px;
+  padding: 18px;
+  background: #fff8e8;
+}
+
+.concept-shortage-panel header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.concept-shortage-panel header span {
+  color: #8a570f;
+  font-size: .78rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.concept-shortage-panel h2 {
+  margin: 5px 0;
+  color: #173f46;
+}
+
+.concept-shortage-panel p {
+  margin: 0;
+  color: #6d5a2e;
+  font-weight: 800;
+}
+
+.concept-shortage-panel header button {
+  border: 0;
+  border-radius: 8px;
+  padding: 9px 12px;
+  background: #ead7a9;
+  color: #5f430d;
+  font-weight: 900;
+}
+
+.concept-shortage-panel form {
+  display: grid;
+  gap: 14px;
+}
+
+.concept-shortage-panel dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.concept-shortage-panel dl div {
+  border-radius: 8px;
+  padding: 10px;
+  background: #fff;
+}
+
+.concept-shortage-panel dt,
+.concept-shortage-panel label span,
+.concept-shortage-challenge > span {
+  color: #7d6a3a;
+  font-size: .7rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.concept-shortage-panel dd {
+  margin: 4px 0 0;
+  color: #173f46;
+  font-weight: 900;
+}
+
+.concept-shortage-panel label,
+.concept-shortage-challenge {
+  display: grid;
+  gap: 6px;
+}
+
+.concept-shortage-panel input {
+  min-height: 44px;
+  border: 1px solid #d7bc73;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 1rem;
+}
+
+.concept-shortage-panel form > button,
+.concept-shortage-challenge button {
+  min-height: 46px;
+  border: 0;
+  border-radius: 8px;
+  background: #9a5b08;
+  color: #fff;
+  font-weight: 900;
+}
+
+.concept-shortage-panel button:disabled {
+  background: #d9c99e;
+  color: #7d6a3a;
+}
+
+.concept-shortage-challenge {
+  border-radius: 10px;
+  padding: 14px;
+  background: #fff;
+}
+
+.concept-shortage-challenge > strong {
+  color: #8a1f1f;
+  font-size: 2.2rem;
+  letter-spacing: .08em;
 }
 
 .concept-scan-card {
@@ -4025,9 +4216,13 @@ tr:last-child td {
 
 .concept-manifest-row dl {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 10px;
   margin: 0;
+}
+
+.concept-shortage-cell dd {
+  color: #9a5b08 !important;
 }
 
 .concept-manifest-row dt {
@@ -4065,6 +4260,18 @@ tr:last-child td {
 .concept-row-status--open {
   background: #eef1f2;
   color: #66787c;
+}
+
+.concept-row-status--location-shortage {
+  background: #fff7ed;
+  color: #c2410c;
+}
+
+.concept-replacement-note {
+  color: #0f766e;
+  font-size: .78rem;
+  font-weight: 900;
+  text-transform: uppercase;
 }
 
 .concept-recent-actions {

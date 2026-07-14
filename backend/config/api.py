@@ -6,9 +6,11 @@ from operations.viewsets import (
     DeliveryRouteViewSet,
     OrderLineViewSet,
     OrderViewSet,
+    PickingShortageViewSet,
     PickingTaskViewSet,
     ReturnBatchViewSet,
     ReturnLineViewSet,
+    ReplenishmentRequestViewSet,
     RouteRunViewSet,
     StockMovementViewSet,
     TransferDiscrepancyActionViewSet,
@@ -33,6 +35,8 @@ router.register("order-lines", OrderLineViewSet, basename="order-line")
 router.register("return-batches", ReturnBatchViewSet, basename="return-batch")
 router.register("return-lines", ReturnLineViewSet, basename="return-line")
 router.register("picking-tasks", PickingTaskViewSet, basename="picking-task")
+router.register("picking-shortages", PickingShortageViewSet, basename="picking-shortage")
+router.register("replenishment-requests", ReplenishmentRequestViewSet, basename="replenishment-request")
 router.register("stock-movements", StockMovementViewSet, basename="stock-movement")
 router.register("audit-logs", AuditLogViewSet, basename="audit-log")
 router.register("transfer-discrepancy-actions", TransferDiscrepancyActionViewSet, basename="transfer-discrepancy-action")
