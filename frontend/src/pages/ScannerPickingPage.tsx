@@ -19,12 +19,15 @@ import { useActiveBranch } from "../api/ActiveBranchContext";
 import {
   useCurrentAuditLogs,
   useScannerCartWork,
+  useScannerCartWorkClaim,
+  useScannerCartWorkJoin,
+  useScannerCartWorkLeave,
   useScannerConfirmLocation,
   useScannerPickingPick,
   useScannerPickingReportShortage,
   useScannerPickingShortageChallenge,
 } from "../api/queries";
-import { useStoredScannerSession } from "../api/scannerSession";
+import { clearStoredScannerCartWork, storeScannerSession, useStoredScannerSession } from "../api/scannerSession";
 import { CameraBarcodeScanner } from "../components/scanner/CameraBarcodeScanner";
 import { DataState } from "../components/DataState";
 import type { AuditLog, PickingShortageChallenge, PickingTask, PickInstruction } from "../types/api";
@@ -137,6 +140,10 @@ function getTaskStatus(task: PickingTask, instruction: PickInstruction | null, n
     return "Completed";
   }
 
+  if (task.claimed_by_username && !task.is_claimed_by_current_user) {
+    return `Handled by ${task.claimed_by_username}`;
+  }
+
   if (task.id === nextOpenTaskId) {
     return "Next";
   }
@@ -152,14 +159,25 @@ export function ScannerPickingPage() {
   const { activeBranchCode } = useActiveBranch();
   const queryClient = useQueryClient();
   const activeSession = useStoredScannerSession();
-  const cartWork = useScannerCartWork(activeSession?.id, activeSession?.cart_work_session);
+  const [staleSessionMessage, setStaleSessionMessage] = useState(false);
+  const cartWork = useScannerCartWork(activeSession?.id, activeSession?.cart_work_session, {
+    onStaleSession: () => {
+      clearStoredScannerCartWork();
+      queryClient.removeQueries({ queryKey: ["scanner-cart-work"] });
+      setStaleSessionMessage(true);
+    },
+  });
   const confirmLocation = useScannerConfirmLocation();
+  const joinCartWork = useScannerCartWorkJoin();
+  const claimLine = useScannerCartWorkClaim();
+  const leaveCartWork = useScannerCartWorkLeave();
   const scannerPick = useScannerPickingPick();
   const shortageChallengeMutation = useScannerPickingShortageChallenge();
   const reportShortageMutation = useScannerPickingReportShortage();
   const [workerCode] = useState(activeSession?.worker_code || "DEMO");
   const [locationCode, setLocationCode] = useState("");
   const [productCode, setProductCode] = useState("");
+  const [joinCartCode, setJoinCartCode] = useState("");
   const [pickQuantity, setPickQuantity] = useState("1");
   const [cameraMode, setCameraMode] = useState<"location" | "product" | null>(null);
   const [message, setMessage] = useState<ScanMessage | null>(null);
@@ -173,10 +191,11 @@ export function ScannerPickingPage() {
   const locationInputRef = useRef<HTMLInputElement | null>(null);
   const productInputRef = useRef<HTMLInputElement | null>(null);
 
-  const tasks = cartWork.data?.tasks ?? [];
-  const work = cartWork.data?.cart_work_session;
-  const instruction = cartWork.data?.current_instruction ?? null;
-  const pickingState = cartWork.data?.state ?? "waiting_for_location";
+  const hasStoredCartWork = Boolean(activeSession?.cart_work_session);
+  const tasks = hasStoredCartWork ? cartWork.data?.tasks ?? [] : [];
+  const work = activeSession?.cart_work_session ? cartWork.data?.cart_work_session : undefined;
+  const instruction = hasStoredCartWork ? cartWork.data?.current_instruction ?? null : null;
+  const pickingState = hasStoredCartWork ? cartWork.data?.state ?? "waiting_for_location" : "waiting_for_location";
   const active = Boolean(work && instruction && pickingState !== "completed");
   const currentTask = tasks.find((task) => task.id === instruction?.picking_task_id);
   const currentRemaining = toNumber(currentTask?.remaining_quantity ?? instruction?.remaining_quantity ?? 0);
@@ -188,6 +207,7 @@ export function ScannerPickingPage() {
   const progressText = `${formatQuantity(totalPicked)} / ${formatQuantity(totalToPick)} picked`;
   const currentLocation = instruction?.location.code ?? null;
   const recentActions = useCurrentAuditLogs(activeBranchCode, { cart: work?.cart_code, eventType: "pick" });
+  const activeWorkers = work?.participants ?? [];
 
   const locationGroups = useMemo<LocationGroup[]>(() => {
     const grouped = new Map<string, PickingTask[]>();
@@ -210,6 +230,17 @@ export function ScannerPickingPage() {
   useEffect(() => {
     setAutoExpandedLocation(currentLocation);
   }, [currentLocation]);
+
+  useEffect(() => {
+    if (!staleSessionMessage) {
+      return;
+    }
+    setMessage({
+      type: "warning",
+      title: "Previous picking session is no longer available.",
+      detail: "Open Tasks to start new work.",
+    });
+  }, [staleSessionMessage]);
 
   useEffect(() => {
     const repairs = cartWork.data?.repair_messages ?? [];
@@ -343,6 +374,70 @@ export function ScannerPickingPage() {
   function handlePick(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     void submitProduct(productCode);
+  }
+
+  async function handleJoinCartWork(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const cartBarcode = joinCartCode.trim();
+    if (!cartBarcode) {
+      return;
+    }
+    setMessage(null);
+    try {
+      const result = await joinCartWork.mutateAsync({ cartBarcode });
+      if (!result.session) {
+        throw new Error("Missing scanner session.");
+      }
+      storeScannerSession({
+        ...result.session,
+        cart_work_session: result.cart_work_session.id,
+        picking_job: result.cart_work_session.picking_job.id,
+      });
+      setJoinCartCode("");
+      setMessage({ type: "success", title: "Cart work joined.", detail: `You joined ${result.cart_work_session.cart_code}.` });
+      await refreshPickingData();
+    } catch (error) {
+      setMessage({ type: "error", title: "Could not join cart work.", detail: getErrorMessage(error, "Try again.") });
+    }
+  }
+
+  async function handleClaimLine(pickingTaskId?: number, direction?: "beginning" | "end") {
+    if (!work) {
+      return;
+    }
+    setMessage(null);
+    try {
+      const result = await claimLine.mutateAsync({
+        cartWorkSessionId: work.id,
+        direction,
+        pickingTaskId,
+      });
+      setMessage({
+        type: "success",
+        title: "Picking line selected.",
+        detail: result.current_instruction
+          ? `${result.current_instruction.product.sku} at ${result.current_instruction.location.code}`
+          : "No open picking lines remain.",
+      });
+      await refreshPickingData();
+      window.setTimeout(() => locationInputRef.current?.focus(), 0);
+    } catch (error) {
+      setMessage({ type: "error", title: "Could not select this line.", detail: getErrorMessage(error, "Try again.") });
+    }
+  }
+
+  async function handleLeaveCartWork() {
+    if (!work) {
+      return;
+    }
+    try {
+      await leaveCartWork.mutateAsync({ cartWorkSessionId: work.id });
+      clearStoredScannerCartWork();
+      queryClient.removeQueries({ queryKey: ["scanner-cart-work"] });
+      setMessage({ type: "success", title: "Cart work left.", detail: "Open Tasks or join another active cart." });
+    } catch (error) {
+      setMessage({ type: "error", title: "Could not leave cart work.", detail: getErrorMessage(error, "Try again.") });
+    }
   }
 
   function handleQuantityChange(value: string) {
@@ -537,15 +632,23 @@ export function ScannerPickingPage() {
         {!work && (
           <section className="concept-empty-guide">
             <div>
-              <strong>Start picking</strong>
-              <span>Use the normal scanner flow to load work onto a cart.</span>
+              <strong>No active picking work</strong>
+              <span>Join work already in progress or open Tasks to start new work.</span>
             </div>
-            <ol>
-              <li>Open Tasks</li>
-              <li>Choose a picking job</li>
-              <li>Scan a cart</li>
-              <li>Start picking</li>
-            </ol>
+            <form className="scanner-join-work" onSubmit={handleJoinCartWork}>
+              <label>
+                <span>Scan a cart already being picked by another operator.</span>
+                <input
+                  autoComplete="off"
+                  onChange={(event) => setJoinCartCode(event.target.value)}
+                  placeholder="Scan cart barcode"
+                  value={joinCartCode}
+                />
+              </label>
+              <button disabled={!joinCartCode.trim() || joinCartWork.isPending} type="submit">
+                Join cart work
+              </button>
+            </form>
             <Link to="/scanner/tasks">Open Tasks</Link>
           </section>
         )}
@@ -558,7 +661,26 @@ export function ScannerPickingPage() {
           <span>Picked: <strong>{formatQuantity(totalPicked)}</strong></span>
           <span>Prepared: <strong>{formatQuantity(totalPrepared)}</strong></span>
           <span>Remaining: <strong>{formatQuantity(totalRemaining)}</strong></span>
+          {work && (
+            <button disabled={leaveCartWork.isPending} onClick={() => void handleLeaveCartWork()} type="button">
+              Leave cart work
+            </button>
+          )}
         </section>
+
+        {work && (
+          <section className="scanner-workers-panel">
+            <strong>Active workers: {activeWorkers.length}</strong>
+            <div>
+              {activeWorkers.map((worker) => (
+                <span className={worker.is_current_user ? "is-current-worker" : ""} key={worker.id}>
+                  {worker.is_current_user ? "You" : worker.username}
+                  {worker.current_product_sku ? ` - ${worker.current_product_sku} / ${worker.current_location_code ?? "-"}` : " - no line selected"}
+                </span>
+              ))}
+            </div>
+          </section>
+        )}
 
         <section className="concept-product-card">
           <div className="concept-product-visual">
@@ -744,6 +866,16 @@ export function ScannerPickingPage() {
               <span>Manifest</span>
               <strong>{tasks.length} products grouped by location</strong>
             </div>
+            {work && (
+              <div className="scanner-claim-actions">
+                <button disabled={claimLine.isPending} onClick={() => void handleClaimLine(undefined, "beginning")} type="button">
+                  Pick from beginning
+                </button>
+                <button disabled={claimLine.isPending} onClick={() => void handleClaimLine(undefined, "end")} type="button">
+                  Pick from end
+                </button>
+              </div>
+            )}
           </header>
 
           {locationGroups.length === 0 ? (
@@ -782,6 +914,8 @@ export function ScannerPickingPage() {
                         const statusLabel = getTaskStatus(task, instruction, nextOpenTaskId);
                         const isComplete = statusLabel === "Completed";
                         const isCurrent = statusLabel === "Current";
+                        const handledByAnother = Boolean(task.claimed_by_username && !task.is_claimed_by_current_user && !isComplete);
+                        const openForClaim = work && !isComplete && !isCurrent && !handledByAnother && toNumber(task.remaining_quantity) > 0;
 
                         return (
                           <div
@@ -815,7 +949,19 @@ export function ScannerPickingPage() {
                                 {task.reallocation_reason || `Reallocated from ${task.reallocated_from_location_code}`}
                               </span>
                             )}
-                            <span className={`concept-row-status concept-row-status--${statusClassName(statusLabel)}`}>{statusLabel}</span>
+                            <span className={`concept-row-status concept-row-status--${statusClassName(statusLabel)}`}>
+                              {handledByAnother ? `Handled by ${task.claimed_by_username}` : statusLabel}
+                            </span>
+                            {openForClaim && (
+                              <button
+                                className="scanner-line-claim-button"
+                                disabled={claimLine.isPending}
+                                onClick={() => void handleClaimLine(task.id)}
+                                type="button"
+                              >
+                                Pick this line
+                              </button>
+                            )}
                           </div>
                         );
                       })}

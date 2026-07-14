@@ -17,6 +17,7 @@ from accounts.models import UserBranchMembership
 from operations.models import (
     AuditLog,
     CartPickedItem,
+    CartWorkParticipant,
     CartWorkSession,
     DeliveryRoute,
     InterBranchTransfer,
@@ -28,6 +29,7 @@ from operations.models import (
     PickingShortage,
     PickingShortageAllocation,
     PickingTask,
+    PickingTaskClaim,
     PickingTaskReallocation,
     ReplenishmentRequest,
     RouteRun,
@@ -3648,6 +3650,8 @@ class ScannerPickingJobWorkflowTests(APITestCase):
     def setUp(self):
         self.demo_user = User.objects.create_user(username="DEMO", password="demo12345")
         self.gdy_worker = User.objects.create_user(username="GDY_WORKER", password="demo12345")
+        self.gdy_leader = User.objects.create_user(username="GDY_LEADER", password="demo12345")
+        self.gda_worker = User.objects.create_user(username="GDA_WORKER", password="demo12345")
         self.branch = Branch.objects.create(code="JOB", name="Job Branch", city="Gdynia", country="Poland")
         self.location = Location.objects.create(
             branch=self.branch,
@@ -3863,6 +3867,90 @@ class ScannerPickingJobWorkflowTests(APITestCase):
         self.assertEqual(before_run["akt"], 1)
         self.assertEqual(after_run["akt"], 0)
 
+    def test_authenticated_worker_lists_proformas_for_allowed_branch(self):
+        UserBranchMembership.objects.create(user=self.gdy_worker, branch=self.branch, role=UserBranchMembership.Role.WORKER)
+        other_branch = Branch.objects.create(code="OTH", name="Other Branch", city="Gdansk", country="Poland")
+        other_route = DeliveryRoute.objects.create(branch=other_branch, code="OTH-R1", name="Other Route")
+        self.create_run(other_route, 1)
+        self.client.force_authenticate(self.gdy_worker)
+
+        allowed = self.client.get("/api/scanner/proformas/", {"branch": self.branch.id})
+        forbidden = self.client.get("/api/scanner/proformas/", {"branch": other_branch.id})
+
+        self.assertEqual(allowed.status_code, status.HTTP_200_OK)
+        self.assertTrue(all(row["branch_code"] == "JOB" for row in allowed.data["results"]))
+        self.assertEqual(forbidden.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_authenticated_create_jobs_uses_request_user_and_ignores_spoofed_worker_code(self):
+        UserBranchMembership.objects.create(user=self.gdy_worker, branch=self.branch, role=UserBranchMembership.Role.WORKER)
+        self.client.force_authenticate(self.gdy_worker)
+
+        response = self.client.post(
+            "/api/scanner/proformas/create-jobs/",
+            {
+                "route_run_ids": [self.run_1.id],
+                "mode": "merged",
+                "worker_code": "DEMO",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        audit_log = AuditLog.objects.get(event_type="picking_job_created")
+        self.assertEqual(audit_log.actor, self.gdy_worker)
+        self.assertIn("Worker GDY_WORKER", audit_log.message)
+        self.assertNotIn("DEMO", audit_log.message)
+
+    def test_authenticated_worker_cannot_create_jobs_for_another_branch(self):
+        UserBranchMembership.objects.create(user=self.gdy_worker, branch=self.branch, role=UserBranchMembership.Role.WORKER)
+        other_branch = Branch.objects.create(code="OTH", name="Other Branch", city="Gdansk", country="Poland")
+        other_location = Location.objects.create(
+            branch=other_branch,
+            code="O-01-01",
+            name="O-01-01",
+            location_type=Location.LocationType.PICKING,
+        )
+        other_product = Product.objects.create(sku="OTH-A", name="Other Product", barcode="559000000001", unit_of_measure="pcs")
+        InventoryItem.objects.create(
+            branch=other_branch,
+            location=other_location,
+            product=other_product,
+            quantity_on_hand=Decimal("5"),
+            quantity_reserved=Decimal("0"),
+        )
+        other_route = DeliveryRoute.objects.create(branch=other_branch, code="OTH-R1", name="Other Route")
+        other_run = self.create_run(other_route, 1)
+        other_order = Order.objects.create(
+            branch=other_branch,
+            route_run=other_run,
+            external_reference="OTH-ORDER-1",
+            customer_name="Other Customer",
+            customer_alias="OTH-CUST",
+            status=Order.Status.IMPORTED,
+        )
+        other_line = OrderLine.objects.create(
+            order=other_order,
+            product=other_product,
+            line_number=1,
+            quantity_ordered=Decimal("1"),
+            quantity_picked=Decimal("0"),
+        )
+        PickingTask.objects.create(
+            branch=other_branch,
+            order_line=other_line,
+            source_location=other_location,
+            quantity_to_pick=Decimal("1"),
+        )
+        self.client.force_authenticate(self.gdy_worker)
+
+        response = self.client.post(
+            "/api/scanner/proformas/create-jobs/",
+            {"route_run_ids": [other_run.id], "mode": "merged"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
     def test_invalid_closed_route_cannot_create_picking_job(self):
         self.run_1.status = RouteRun.Status.CLOSED
         self.run_1.save(update_fields=["status", "updated_at"])
@@ -3910,6 +3998,96 @@ class ScannerPickingJobWorkflowTests(APITestCase):
         self.assertEqual(response.data["cart_work_session"]["picking_job"]["id"], job.id)
         self.assertEqual(response.data["cart_work_session"]["cart_code"], "WOZEK-01")
         self.assertEqual(CartWorkSession.objects.filter(picking_job=job).count(), 1)
+
+    def test_authenticated_start_creates_active_participant_and_claim(self):
+        UserBranchMembership.objects.create(user=self.gdy_worker, branch=self.branch, role=UserBranchMembership.Role.WORKER)
+        self.client.force_authenticate(self.gdy_worker)
+        self.create_jobs(route_run_ids=[self.run_1.id, self.run_2.id])
+        job = PickingJob.objects.get()
+
+        response = self.start_job(job, cart_code="WOZEK-01")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(CartWorkSession.objects.count(), 1)
+        participant = CartWorkParticipant.objects.get(user=self.gdy_worker)
+        self.assertEqual(participant.cart_work_session.cart.code, "WOZEK-01")
+        self.assertEqual(participant.status, CartWorkParticipant.Status.ACTIVE)
+        self.assertIsNotNone(participant.current_picking_task)
+        self.assertEqual(PickingTaskClaim.objects.filter(cart_work_participant=participant, status=PickingTaskClaim.Status.CLAIMED).count(), 1)
+        self.assertEqual(response.data["participant"]["username"], "GDY_WORKER")
+
+    def test_same_branch_leader_can_join_existing_cart_work_idempotently(self):
+        UserBranchMembership.objects.create(user=self.gdy_worker, branch=self.branch, role=UserBranchMembership.Role.WORKER)
+        UserBranchMembership.objects.create(user=self.gdy_leader, branch=self.branch, role=UserBranchMembership.Role.LEADER)
+        self.client.force_authenticate(self.gdy_worker)
+        self.create_jobs(route_run_ids=[self.run_1.id, self.run_2.id])
+        job = PickingJob.objects.get()
+        self.start_job(job, cart_code="WOZEK-01")
+
+        self.client.force_authenticate(self.gdy_leader)
+        first_join = self.client.post("/api/scanner/cart-work/join/", {"cart_barcode": "WOZEK-01"}, format="json")
+        second_join = self.client.post("/api/scanner/cart-work/join/", {"cart_barcode": "WOZEK-01"}, format="json")
+
+        self.assertEqual(first_join.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_join.status_code, status.HTTP_200_OK)
+        self.assertEqual(CartWorkSession.objects.filter(picking_job=job).count(), 1)
+        self.assertEqual(CartWorkParticipant.objects.filter(cart_work_session__picking_job=job, status=CartWorkParticipant.Status.ACTIVE).count(), 2)
+        self.assertEqual(CartWorkParticipant.objects.filter(user=self.gdy_leader, status=CartWorkParticipant.Status.ACTIVE).count(), 1)
+        self.assertEqual(AuditLog.objects.filter(event_type="cart_work_joined", actor=self.gdy_leader).count(), 1)
+
+    def test_joining_worker_receives_different_claimed_task(self):
+        UserBranchMembership.objects.create(user=self.gdy_worker, branch=self.branch, role=UserBranchMembership.Role.WORKER)
+        UserBranchMembership.objects.create(user=self.gdy_leader, branch=self.branch, role=UserBranchMembership.Role.LEADER)
+        self.client.force_authenticate(self.gdy_worker)
+        self.create_jobs(route_run_ids=[self.run_1.id, self.run_2.id])
+        job = PickingJob.objects.get()
+        self.start_job(job, cart_code="WOZEK-01")
+
+        self.client.force_authenticate(self.gdy_leader)
+        response = self.client.post("/api/scanner/cart-work/join/", {"cart_barcode": "WOZEK-01"}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        claims = list(PickingTaskClaim.objects.filter(status=PickingTaskClaim.Status.CLAIMED).order_by("id"))
+        self.assertEqual(len(claims), 2)
+        self.assertNotEqual(claims[0].picking_task_id, claims[1].picking_task_id)
+
+    def test_joining_other_branch_cart_work_is_rejected(self):
+        UserBranchMembership.objects.create(user=self.gdy_worker, branch=self.branch, role=UserBranchMembership.Role.WORKER)
+        other_branch = Branch.objects.create(code="GDA", name="Gdansk Branch", city="Gdansk", country="Poland")
+        UserBranchMembership.objects.create(user=self.gda_worker, branch=other_branch, role=UserBranchMembership.Role.WORKER)
+        self.client.force_authenticate(self.gdy_worker)
+        self.create_jobs(route_run_ids=[self.run_1.id, self.run_2.id])
+        job = PickingJob.objects.get()
+        self.start_job(job, cart_code="WOZEK-01")
+
+        self.client.force_authenticate(self.gda_worker)
+        response = self.client.post("/api/scanner/cart-work/join/", {"cart_barcode": "WOZEK-01"}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_user_cannot_join_second_active_cart_work(self):
+        UserBranchMembership.objects.create(user=self.gdy_worker, branch=self.branch, role=UserBranchMembership.Role.WORKER)
+        UserBranchMembership.objects.create(user=self.gdy_leader, branch=self.branch, role=UserBranchMembership.Role.LEADER)
+        self.client.force_authenticate(self.gdy_worker)
+        self.create_jobs(route_run_ids=[self.run_1.id], mode="separate")
+        first_job = PickingJob.objects.get()
+        self.start_job(first_job, cart_code="WOZEK-01")
+        self.client.force_authenticate(self.gdy_leader)
+        self.client.post("/api/scanner/cart-work/join/", {"cart_barcode": "WOZEK-01"}, format="json")
+
+        self.client.force_authenticate(self.gdy_worker)
+        self.create_jobs(route_run_ids=[self.run_2.id], mode="separate")
+        second_job = PickingJob.objects.exclude(id=first_job.id).get()
+        start_second = self.start_job(second_job, cart_code="WOZEK-02")
+
+        self.assertEqual(start_second.status_code, status.HTTP_409_CONFLICT)
+        self.assertIn("already have active work", start_second.data["detail"])
+
+    def test_missing_cart_work_session_returns_404(self):
+        response = self.client.get("/api/scanner/cart-work/current/", {"cart_work_session_id": 999999})
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertIn("not found", response.data["detail"].lower())
 
     def test_cart_work_returns_current_location_instruction(self):
         self.create_jobs(route_run_ids=[self.run_1.id])

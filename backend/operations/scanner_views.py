@@ -12,10 +12,11 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from accounts.authorization import require_branch_access
+from accounts.authorization import branch_ids_filter, require_branch_access
 from operations.models import (
     AuditLog,
     CartPickedItem,
+    CartWorkParticipant,
     CartWorkSession,
     InterBranchTransfer,
     Order,
@@ -26,6 +27,7 @@ from operations.models import (
     PickingShortage,
     PickingShortageAllocation,
     PickingTask,
+    PickingTaskClaim,
     PickingTaskReallocation,
     ReplenishmentRequest,
     RouteRun,
@@ -223,6 +225,11 @@ def _job_summary(picking_job: PickingJob):
     active_work = picking_job.cart_work_sessions.select_related("cart").filter(
         status__in=[CartWorkSession.Status.ACTIVE, CartWorkSession.Status.CONTROL]
     ).first()
+    active_participants = (
+        []
+        if active_work is None
+        else list(_active_participants(active_work).values_list("user__username", flat=True))
+    )
 
     return {
         "id": picking_job.id,
@@ -236,13 +243,61 @@ def _job_summary(picking_job: PickingJob):
         "prepared_quantity": str(prepared_quantity),
         "progress_percent": progress,
         "assigned_cart_code": active_work.cart.code if active_work else None,
+        "cart_work_session": active_work.id if active_work else None,
+        "active_workers": active_participants,
+        "active_workers_count": len(active_participants),
         "started_at": picking_job.started_at.isoformat() if picking_job.started_at else None,
         "completed_at": picking_job.completed_at.isoformat() if picking_job.completed_at else None,
         "created_at": picking_job.created_at.isoformat(),
     }
 
 
-def _cart_work_session_data(cart_work_session: CartWorkSession):
+def _cart_work_branch(cart_work_session: CartWorkSession):
+    route_run = cart_work_session.picking_job.route_runs.select_related("route", "route__branch").first()
+    return route_run.route.branch if route_run is not None else None
+
+
+def _active_participants(cart_work_session: CartWorkSession):
+    return cart_work_session.participants.select_related(
+        "user",
+        "current_picking_task__order_line__product",
+        "current_picking_task__source_location",
+    ).filter(status=CartWorkParticipant.Status.ACTIVE)
+
+
+def _participant_data(participant: CartWorkParticipant, *, current_user=None):
+    task = participant.current_picking_task
+    product = task.order_line.product if task else None
+    location = task.source_location if task else None
+    return {
+        "id": participant.id,
+        "user": participant.user_id,
+        "username": participant.user.username,
+        "display_name": participant.user.get_full_name() or participant.user.username,
+        "branch": participant.branch_id,
+        "branch_code": participant.branch.code,
+        "status": participant.status,
+        "is_current_user": bool(current_user and current_user.is_authenticated and participant.user_id == current_user.id),
+        "current_picking_task": task.id if task else None,
+        "current_product_sku": product.sku if product else None,
+        "current_product_name": product.name if product else None,
+        "current_location_code": location.code if location else None,
+        "confirmed_location": participant.confirmed_location_id,
+        "confirmed_location_code": participant.confirmed_location.code if participant.confirmed_location else None,
+        "joined_at": participant.joined_at.isoformat(),
+        "last_seen_at": participant.last_seen_at.isoformat(),
+        "left_at": participant.left_at.isoformat() if participant.left_at else None,
+    }
+
+
+def _active_participant_data(cart_work_session: CartWorkSession, request=None):
+    return [
+        _participant_data(participant, current_user=getattr(request, "user", None))
+        for participant in _active_participants(cart_work_session)
+    ]
+
+
+def _cart_work_session_data(cart_work_session: CartWorkSession, request=None):
     picking_job = cart_work_session.picking_job
     return {
         "id": cart_work_session.id,
@@ -255,7 +310,177 @@ def _cart_work_session_data(cart_work_session: CartWorkSession):
         "status": cart_work_session.status,
         "started_at": cart_work_session.started_at.isoformat(),
         "finished_at": cart_work_session.finished_at.isoformat() if cart_work_session.finished_at else None,
+        "participants": _active_participant_data(cart_work_session, request),
     }
+
+
+def _release_participant_claim(participant: CartWorkParticipant):
+    now = timezone.now()
+    PickingTaskClaim.objects.filter(
+        cart_work_participant=participant,
+        status=PickingTaskClaim.Status.CLAIMED,
+    ).update(status=PickingTaskClaim.Status.RELEASED, released_at=now, last_activity_at=now)
+    participant.current_picking_task = None
+    participant.current_task_claimed_at = None
+    participant.confirmed_location = None
+    participant.last_seen_at = now
+    participant.save(
+        update_fields=[
+            "current_picking_task",
+            "current_task_claimed_at",
+            "confirmed_location",
+            "last_seen_at",
+            "updated_at",
+        ]
+    )
+
+
+def _claimable_tasks_queryset(picking_job: PickingJob):
+    claimed_task_ids = PickingTaskClaim.objects.filter(
+        status=PickingTaskClaim.Status.CLAIMED,
+        cart_work_participant__status=CartWorkParticipant.Status.ACTIVE,
+    ).values_list("picking_task_id", flat=True)
+    return (
+        _current_pick_task_queryset(picking_job)
+        .select_for_update(of=("self",))
+        .exclude(id__in=claimed_task_ids)
+    )
+
+
+def _claim_task_for_participant(
+    cart_work_session: CartWorkSession,
+    participant: CartWorkParticipant,
+    *,
+    task: PickingTask | None = None,
+    direction="beginning",
+):
+    existing_claim = (
+        PickingTaskClaim.objects.select_for_update()
+        .select_related("picking_task")
+        .filter(cart_work_participant=participant, status=PickingTaskClaim.Status.CLAIMED)
+        .first()
+    )
+    if existing_claim is not None and _task_remaining(existing_claim.picking_task) > 0:
+        return existing_claim.picking_task, existing_claim, False
+
+    if existing_claim is not None:
+        existing_claim.status = PickingTaskClaim.Status.COMPLETED
+        existing_claim.released_at = timezone.now()
+        existing_claim.last_activity_at = timezone.now()
+        existing_claim.save(update_fields=["status", "released_at", "last_activity_at", "updated_at"])
+
+    if task is None:
+        candidates = _claimable_tasks_queryset(cart_work_session.picking_job)
+        if direction == "end":
+            candidates = candidates.order_by("-source_location__code", "-created_at", "-id")
+        task = candidates.first()
+    else:
+        task = (
+            _claimable_tasks_queryset(cart_work_session.picking_job)
+            .filter(pk=task.pk)
+            .first()
+        )
+
+    if task is None:
+        participant.current_picking_task = None
+        participant.current_task_claimed_at = None
+        participant.confirmed_location = None
+        participant.last_seen_at = timezone.now()
+        participant.save(
+            update_fields=[
+                "current_picking_task",
+                "current_task_claimed_at",
+                "confirmed_location",
+                "last_seen_at",
+                "updated_at",
+            ]
+        )
+        return None, None, False
+
+    _release_participant_claim(participant)
+    claim = PickingTaskClaim.objects.create(picking_task=task, cart_work_participant=participant)
+    participant.current_picking_task = task
+    participant.current_task_claimed_at = claim.claimed_at
+    participant.confirmed_location = None
+    participant.last_seen_at = timezone.now()
+    participant.save(
+        update_fields=[
+            "current_picking_task",
+            "current_task_claimed_at",
+            "confirmed_location",
+            "last_seen_at",
+            "updated_at",
+        ]
+    )
+    return task, claim, True
+
+
+def _participant_for_request(cart_work_session: CartWorkSession, request, *, create_missing=False):
+    if not request.user or not request.user.is_authenticated:
+        return None, None
+
+    branch = _cart_work_branch(cart_work_session)
+    if branch is None:
+        return None, Response({"detail": "Cart work branch could not be resolved."}, status=status.HTTP_400_BAD_REQUEST)
+    require_branch_access(request.user, branch)
+
+    participant = (
+        CartWorkParticipant.objects.select_for_update(of=("self",))
+        .select_related("user", "branch", "confirmed_location", "current_picking_task")
+        .filter(
+            cart_work_session=cart_work_session,
+            user=request.user,
+            status=CartWorkParticipant.Status.ACTIVE,
+        )
+        .first()
+    )
+    if participant is None and create_missing:
+        existing_active = (
+            CartWorkParticipant.objects.select_for_update(of=("self",))
+            .select_related("cart_work_session__cart")
+            .filter(user=request.user, status=CartWorkParticipant.Status.ACTIVE)
+            .exclude(cart_work_session=cart_work_session)
+            .first()
+        )
+        if existing_active is not None:
+            return None, Response(
+                {"detail": f"You already have active work on {existing_active.cart_work_session.cart.code}."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        participant = CartWorkParticipant.objects.create(
+            cart_work_session=cart_work_session,
+            user=request.user,
+            branch=branch,
+        )
+        participant.was_created = True
+    elif participant is not None:
+        participant.was_created = False
+    if participant is not None:
+        participant.last_seen_at = timezone.now()
+        participant.save(update_fields=["last_seen_at", "updated_at"])
+    return participant, None
+
+
+def _cart_work_response(cart_work_session: CartWorkSession, request, repair_messages=None):
+    participant, error = _participant_for_request(cart_work_session, request, create_missing=False)
+    if error is not None:
+        return error
+    if participant is not None:
+        _claim_task_for_participant(cart_work_session, participant)
+
+    tasks = _job_tasks(cart_work_session.picking_job).order_by("source_location__code", "created_at", "id")
+    state, confirmed_location_code, instruction = _picking_state(cart_work_session, participant)
+    return Response(
+        {
+            "cart_work_session": _cart_work_session_data(cart_work_session, request),
+            "state": state,
+            "confirmed_location_code": confirmed_location_code,
+            "current_instruction": instruction,
+            "participant": _participant_data(participant, current_user=getattr(request, "user", None)) if participant else None,
+            "repair_messages": repair_messages or [],
+            "tasks": [_task_manifest_data(task, participant) for task in tasks],
+        }
+    )
 
 
 def _current_pick_task_queryset(picking_job: PickingJob):
@@ -497,16 +722,46 @@ def _pick_instruction_data(task: PickingTask | None):
     }
 
 
-def _current_pick_instruction(cart_work_session: CartWorkSession):
+def _task_manifest_data(task: PickingTask, participant: CartWorkParticipant | None = None):
+    data = PickingTaskSerializer(task).data
+    active_claim = (
+        PickingTaskClaim.objects.select_related("cart_work_participant__user")
+        .filter(picking_task=task, status=PickingTaskClaim.Status.CLAIMED)
+        .first()
+    )
+    data["claim_status"] = active_claim.status if active_claim else None
+    data["claimed_by"] = active_claim.cart_work_participant_id if active_claim else None
+    data["claimed_by_username"] = active_claim.cart_work_participant.user.username if active_claim else None
+    data["is_claimed_by_current_user"] = bool(
+        active_claim and participant and active_claim.cart_work_participant_id == participant.id
+    )
+    return data
+
+
+def _current_pick_instruction(cart_work_session: CartWorkSession, participant: CartWorkParticipant | None = None):
+    if participant is not None:
+        task = (
+            PickingTask.objects.select_related(
+                "branch",
+                "order_line__order__route_run",
+                "order_line__product",
+                "source_location",
+            )
+            .filter(pk=participant.current_picking_task_id, job_task__picking_job=cart_work_session.picking_job)
+            .exclude(status__in=[PickingTask.Status.COMPLETED, PickingTask.Status.CANCELLED])
+            .filter(quantity_picked__lt=F("quantity_to_pick") - F("shortage_quantity"))
+            .first()
+        )
+        return _pick_instruction_data(task)
     return _pick_instruction_data(_current_pick_task_queryset(cart_work_session.picking_job).first())
 
 
-def _picking_state(cart_work_session: CartWorkSession):
-    instruction = _current_pick_instruction(cart_work_session)
+def _picking_state(cart_work_session: CartWorkSession, participant: CartWorkParticipant | None = None):
+    instruction = _current_pick_instruction(cart_work_session, participant)
     confirmed_code = None
     state = "completed"
     if instruction is not None:
-        confirmed_location = cart_work_session.confirmed_location
+        confirmed_location = participant.confirmed_location if participant is not None else cart_work_session.confirmed_location
         confirmed_code = confirmed_location.code if confirmed_location else None
         state = (
             "waiting_for_product"
@@ -1033,7 +1288,7 @@ def _pick_for_cart_work(request):
     if error is not None:
         return error
 
-    worker_code = str(request.data.get("worker_code", "")).strip() or "DEMO"
+    worker_code = _scanner_actor_code(request, request.data.get("worker_code", ""))
 
     with transaction.atomic():
         cart_work_session = (
@@ -1048,16 +1303,43 @@ def _pick_for_cart_work(request):
             return Response({"detail": "Cart work session is not active."}, status=status.HTTP_400_BAD_REQUEST)
 
         picking_job = cart_work_session.picking_job
-        task = _current_pick_task_queryset(picking_job).select_for_update(of=("self",)).first()
+        participant, error = _participant_for_request(cart_work_session, request, create_missing=True)
+        if error is not None:
+            return error
+        if participant is not None:
+            task, claim, _ = _claim_task_for_participant(cart_work_session, participant)
+            if task is None:
+                return Response({"detail": "Picking job has no remaining work."}, status=status.HTTP_400_BAD_REQUEST)
+            task = (
+                PickingTask.objects.select_for_update(of=("self",))
+                .select_related("branch", "order_line__order__route_run", "order_line__product", "source_location")
+                .get(pk=task.id)
+            )
+            claim = (
+                PickingTaskClaim.objects.select_for_update()
+                .filter(
+                    picking_task=task,
+                    cart_work_participant=participant,
+                    status=PickingTaskClaim.Status.CLAIMED,
+                )
+                .first()
+            )
+            if claim is None:
+                return Response({"detail": "Pick this line before scanning product."}, status=status.HTTP_409_CONFLICT)
+            confirmed_location = participant.confirmed_location
+        else:
+            task = _current_pick_task_queryset(picking_job).select_for_update(of=("self",)).first()
+            claim = None
+            confirmed_location = cart_work_session.confirmed_location
         if task is None:
             return Response({"detail": "Picking job has no remaining work."}, status=status.HTTP_400_BAD_REQUEST)
 
-        if cart_work_session.confirmed_location_id is None:
+        if confirmed_location is None:
             return Response(
                 {"detail": "Scan the expected location before scanning the product."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        if cart_work_session.confirmed_location_id != task.source_location_id:
+        if confirmed_location.id != task.source_location_id:
             return Response(
                 {"detail": f"Wrong location. Go to {task.source_location.code}."},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -1078,7 +1360,7 @@ def _pick_for_cart_work(request):
 
         inventory_item = (
             InventoryItem.objects.select_for_update()
-            .filter(branch=task.branch, location=cart_work_session.confirmed_location, product=product)
+            .filter(branch=task.branch, location=confirmed_location, product=product)
             .first()
         )
         if inventory_item is None:
@@ -1122,6 +1404,11 @@ def _pick_for_cart_work(request):
             task.status = PickingTask.Status.PICKED
             task.save(update_fields=["status", "updated_at"])
             task.refresh_from_db()
+            if claim is not None:
+                claim.status = PickingTaskClaim.Status.COMPLETED
+                claim.released_at = timezone.now()
+                claim.last_activity_at = timezone.now()
+                claim.save(update_fields=["status", "released_at", "last_activity_at", "updated_at"])
 
         order_line.quantity_picked = F("quantity_picked") + quantity
         order_line.save(update_fields=["quantity_picked", "updated_at"])
@@ -1171,12 +1458,20 @@ def _pick_for_cart_work(request):
             picking_job.save(update_fields=["status", "updated_at"])
 
         next_task = _current_pick_task_queryset(picking_job).first()
-        if next_task is None or next_task.source_location_id != cart_work_session.confirmed_location_id:
+        if participant is not None:
+            _claim_task_for_participant(cart_work_session, participant)
+            participant.refresh_from_db()
+            next_participant_task = participant.current_picking_task
+            if next_participant_task is None or next_participant_task.source_location_id != confirmed_location.id:
+                participant.confirmed_location = None
+                participant.save(update_fields=["confirmed_location", "updated_at"])
+        elif next_task is None or next_task.source_location_id != cart_work_session.confirmed_location_id:
             cart_work_session.confirmed_location = None
             cart_work_session.save(update_fields=["confirmed_location", "updated_at"])
             cart_work_session.refresh_from_db()
 
         AuditLog.objects.create(
+            actor=_scanner_actor(request, worker_code),
             action_type=AuditLog.ActionType.UPDATE,
             event_type="pick",
             branch=task.branch,
@@ -1200,17 +1495,25 @@ def _pick_for_cart_work(request):
         repair_messages = _repair_stale_current_tasks(cart_work_session, request)
 
     cart_work_session.refresh_from_db()
-    state, confirmed_location_code, instruction = _picking_state(cart_work_session)
+    participant = None
+    if request.user and request.user.is_authenticated:
+        participant = (
+            CartWorkParticipant.objects.select_related("user", "branch", "confirmed_location", "current_picking_task")
+            .filter(cart_work_session=cart_work_session, user=request.user, status=CartWorkParticipant.Status.ACTIVE)
+            .first()
+        )
+    state, confirmed_location_code, instruction = _picking_state(cart_work_session, participant)
     return Response(
         {
             "message": "Pick scan accepted.",
             "repair_messages": repair_messages,
             "task": PickingTaskSerializer(task).data,
             "picking_job": _job_summary(picking_job),
-            "cart_work_session": _cart_work_session_data(cart_work_session),
+            "cart_work_session": _cart_work_session_data(cart_work_session, request),
             "state": state,
             "confirmed_location_code": confirmed_location_code,
             "current_instruction": instruction,
+            "participant": _participant_data(participant, current_user=getattr(request, "user", None)) if participant else None,
             "cart_item": _cart_item_data(cart_item),
         },
         status=status.HTTP_200_OK,
@@ -1557,7 +1860,7 @@ class ScannerPickingShortageChallengeView(APIView):
         quantity, error = _parse_positive_piece_quantity(request.data.get("quantity", 1))
         if error is not None:
             return error
-        worker_code = str(request.data.get("worker_code", "")).strip() or "DEMO"
+        worker_code = _scanner_actor_code(request, request.data.get("worker_code", ""))
 
         with transaction.atomic():
             cart_work_session = (
@@ -1569,10 +1872,24 @@ class ScannerPickingShortageChallengeView(APIView):
             if cart_work_session is None:
                 return Response({"detail": "Cart work session not found."}, status=status.HTTP_404_NOT_FOUND)
             _repair_stale_current_tasks(cart_work_session, request)
-            task = _current_pick_task_queryset(cart_work_session.picking_job).select_for_update(of=("self",)).first()
+            participant, error = _participant_for_request(cart_work_session, request, create_missing=True)
+            if error is not None:
+                return error
+            if participant is not None:
+                task, claim, _ = _claim_task_for_participant(cart_work_session, participant)
+                if task is not None:
+                    task = (
+                        PickingTask.objects.select_for_update(of=("self",))
+                        .select_related("branch", "order_line__order", "order_line__product", "source_location")
+                        .get(pk=task.id)
+                    )
+                confirmed_location_id = participant.confirmed_location_id
+            else:
+                task = _current_pick_task_queryset(cart_work_session.picking_job).select_for_update(of=("self",)).first()
+                confirmed_location_id = cart_work_session.confirmed_location_id
             if task is None:
                 return Response({"detail": "Picking job has no remaining work."}, status=status.HTTP_400_BAD_REQUEST)
-            if cart_work_session.confirmed_location_id != task.source_location_id:
+            if confirmed_location_id != task.source_location_id:
                 return Response({"detail": "Scan the expected location before reporting missing stock."}, status=status.HTTP_400_BAD_REQUEST)
 
             remaining = task.quantity_to_pick - task.quantity_picked - task.shortage_quantity
@@ -1597,6 +1914,7 @@ class ScannerPickingShortageChallengeView(APIView):
                 "code": code,
                 "cart_work_session_id": cart_work_session.id,
                 "picking_task_id": task.id,
+                "participant_id": participant.id if participant else None,
                 "product_id": task.order_line.product_id,
                 "quantity": str(quantity),
                 "worker_code": worker_code,
@@ -1646,12 +1964,28 @@ class ScannerPickingReportShortageView(APIView):
                 .select_related("cart", "picking_job", "scanner_session", "confirmed_location")
                 .get(pk=payload["cart_work_session_id"])
             )
+            participant = None
+            confirmed_location_id = cart_work_session.confirmed_location_id
+            if request.user and request.user.is_authenticated:
+                participant, error = _participant_for_request(cart_work_session, request, create_missing=False)
+                if error is not None:
+                    return error
+                if participant is None or payload.get("participant_id") != participant.id:
+                    return Response({"detail": "This shortage confirmation does not belong to your active pick."}, status=status.HTTP_409_CONFLICT)
+                claim = PickingTaskClaim.objects.select_for_update().filter(
+                    cart_work_participant=participant,
+                    picking_task_id=payload["picking_task_id"],
+                    status=PickingTaskClaim.Status.CLAIMED,
+                ).first()
+                if claim is None:
+                    return Response({"detail": "Pick this line before reporting missing stock."}, status=status.HTTP_409_CONFLICT)
+                confirmed_location_id = participant.confirmed_location_id
             task = (
                 PickingTask.objects.select_for_update()
                 .select_related("branch", "order_line__order", "order_line__product", "source_location")
                 .get(pk=payload["picking_task_id"], job_task__picking_job=cart_work_session.picking_job)
             )
-            if cart_work_session.confirmed_location_id != task.source_location_id:
+            if confirmed_location_id != task.source_location_id:
                 return Response({"detail": "Current confirmed location changed. Generate a new challenge."}, status=status.HTTP_400_BAD_REQUEST)
             if task.order_line.product_id != payload["product_id"]:
                 return Response({"detail": "Product changed. Generate a new challenge."}, status=status.HTTP_400_BAD_REQUEST)
@@ -1754,7 +2088,24 @@ class ScannerPickingReportShortageView(APIView):
                 cart_work_session.picking_job.status = PickingJob.Status.PICKED
                 cart_work_session.picking_job.save(update_fields=["status", "updated_at"])
             next_task = _current_pick_task_queryset(cart_work_session.picking_job).first()
-            if next_task is None or next_task.source_location_id != cart_work_session.confirmed_location_id:
+            if participant is not None:
+                if task.quantity_picked + task.shortage_quantity >= task.quantity_to_pick:
+                    PickingTaskClaim.objects.filter(
+                        cart_work_participant=participant,
+                        picking_task=task,
+                        status=PickingTaskClaim.Status.CLAIMED,
+                    ).update(
+                        status=PickingTaskClaim.Status.COMPLETED,
+                        released_at=timezone.now(),
+                        last_activity_at=timezone.now(),
+                    )
+                _claim_task_for_participant(cart_work_session, participant)
+                participant.refresh_from_db()
+                next_participant_task = participant.current_picking_task
+                if next_participant_task is None or next_participant_task.source_location_id != confirmed_location_id:
+                    participant.confirmed_location = None
+                    participant.save(update_fields=["confirmed_location", "updated_at"])
+            elif next_task is None or next_task.source_location_id != cart_work_session.confirmed_location_id:
                 cart_work_session.confirmed_location = None
                 cart_work_session.save(update_fields=["confirmed_location", "updated_at"])
 
@@ -1825,19 +2176,30 @@ class ScannerPickingConfirmLocationView(APIView):
             if cart_work_session.status not in [CartWorkSession.Status.ACTIVE, CartWorkSession.Status.CONTROL]:
                 return Response({"detail": "Cart work session is not active."}, status=status.HTTP_400_BAD_REQUEST)
 
+            participant, error = _participant_for_request(cart_work_session, request, create_missing=True)
+            if error is not None:
+                return error
             repair_messages = _repair_stale_current_tasks(cart_work_session, request)
-            task = _current_pick_task_queryset(cart_work_session.picking_job).first()
+            if participant is not None:
+                task, _, _ = _claim_task_for_participant(cart_work_session, participant)
+            else:
+                task = _current_pick_task_queryset(cart_work_session.picking_job).first()
             if task is None:
-                cart_work_session.confirmed_location = None
-                cart_work_session.save(update_fields=["confirmed_location", "updated_at"])
-                state, confirmed_location_code, instruction = _picking_state(cart_work_session)
+                if participant is not None:
+                    participant.confirmed_location = None
+                    participant.save(update_fields=["confirmed_location", "updated_at"])
+                else:
+                    cart_work_session.confirmed_location = None
+                    cart_work_session.save(update_fields=["confirmed_location", "updated_at"])
+                state, confirmed_location_code, instruction = _picking_state(cart_work_session, participant)
                 return Response(
                     {
                         "message": "Picking completed.",
                         "state": state,
                         "confirmed_location_code": confirmed_location_code,
-                        "cart_work_session": _cart_work_session_data(cart_work_session),
+                        "cart_work_session": _cart_work_session_data(cart_work_session, request),
                         "current_instruction": instruction,
+                        "participant": _participant_data(participant, current_user=getattr(request, "user", None)) if participant else None,
                         "repair_messages": repair_messages,
                     },
                     status=status.HTTP_200_OK,
@@ -1862,10 +2224,14 @@ class ScannerPickingConfirmLocationView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            cart_work_session.confirmed_location = scanned_location
-            cart_work_session.save(update_fields=["confirmed_location", "updated_at"])
-            cart_work_session.refresh_from_db()
-            state, confirmed_location_code, instruction = _picking_state(cart_work_session)
+            if participant is not None:
+                participant.confirmed_location = scanned_location
+                participant.save(update_fields=["confirmed_location", "last_seen_at", "updated_at"])
+            else:
+                cart_work_session.confirmed_location = scanned_location
+                cart_work_session.save(update_fields=["confirmed_location", "updated_at"])
+                cart_work_session.refresh_from_db()
+            state, confirmed_location_code, instruction = _picking_state(cart_work_session, participant)
 
         return Response(
             {
@@ -1873,8 +2239,9 @@ class ScannerPickingConfirmLocationView(APIView):
                 "repair_messages": repair_messages,
                 "state": state,
                 "confirmed_location_code": confirmed_location_code,
-                "cart_work_session": _cart_work_session_data(cart_work_session),
+                "cart_work_session": _cart_work_session_data(cart_work_session, request),
                 "current_instruction": instruction,
+                "participant": _participant_data(participant, current_user=getattr(request, "user", None)) if participant else None,
             },
             status=status.HTTP_200_OK,
         )
@@ -1942,6 +2309,15 @@ class ScannerSessionEndView(APIView):
                 cart_work_session.status = CartWorkSession.Status.CANCELLED
                 cart_work_session.finished_at = timezone.now()
                 cart_work_session.save(update_fields=["status", "finished_at", "updated_at"])
+                now = timezone.now()
+                PickingTaskClaim.objects.filter(
+                    cart_work_participant__cart_work_session=cart_work_session,
+                    status=PickingTaskClaim.Status.CLAIMED,
+                ).update(status=PickingTaskClaim.Status.RELEASED, released_at=now, last_activity_at=now)
+                CartWorkParticipant.objects.filter(
+                    cart_work_session=cart_work_session,
+                    status=CartWorkParticipant.Status.ACTIVE,
+                ).update(status=CartWorkParticipant.Status.LEFT, left_at=now, last_seen_at=now)
             session.cart.status = ScannerCart.Status.AVAILABLE
             session.cart.save(update_fields=["status", "updated_at"])
             AuditLog.objects.create(
@@ -1986,6 +2362,9 @@ class ScannerProformasView(APIView):
         route_runs = RouteRun.objects.select_related("route", "route__branch").exclude(status__in=TERMINAL_ROUTE_STATUSES)
         if branch:
             route_runs = route_runs.filter(route__branch_id=branch)
+        if request.user and request.user.is_authenticated:
+            branch_ids = branch_ids_filter(request.user, branch)
+            route_runs = route_runs.filter(route__branch_id__in=branch_ids)
         route_runs = route_runs.order_by("service_date", "departure_time", "route__code", "run_number")
         return Response({"results": [_route_proforma_data(route_run) for route_run in route_runs]})
 
@@ -1994,7 +2373,7 @@ class ScannerProformasCreateJobsView(APIView):
     def post(self, request):
         route_run_ids = request.data.get("route_run_ids") or []
         mode = str(request.data.get("mode", "")).strip()
-        worker_code = str(request.data.get("worker_code", "")).strip() or "DEMO"
+        worker_code = _scanner_actor_code(request, request.data.get("worker_code", ""))
 
         if not route_run_ids:
             return Response({"detail": "route_run_ids is required."}, status=status.HTTP_400_BAD_REQUEST)
@@ -2012,6 +2391,12 @@ class ScannerProformasCreateJobsView(APIView):
                 return Response({"detail": "One or more route runs were not found."}, status=status.HTTP_404_NOT_FOUND)
             if any(route_run.status in TERMINAL_ROUTE_STATUSES for route_run in route_runs):
                 return Response({"detail": "Closed or cancelled routes cannot create picking jobs."}, status=status.HTTP_400_BAD_REQUEST)
+            branch_ids = {route_run.route.branch_id for route_run in route_runs}
+            if len(branch_ids) != 1:
+                return Response({"detail": "The selected routes belong to different branches."}, status=status.HTTP_400_BAD_REQUEST)
+            branch = route_runs[0].route.branch
+            if request.user and request.user.is_authenticated:
+                require_branch_access(request.user, branch)
 
             created_jobs = []
             route_groups = [route_runs] if mode == PickingJob.Mode.MERGED else [[route_run] for route_run in route_runs]
@@ -2041,12 +2426,17 @@ class ScannerProformasCreateJobsView(APIView):
                 created_jobs.append(picking_job)
 
                 AuditLog.objects.create(
+                    actor=request.user if request.user.is_authenticated else None,
                     action_type=AuditLog.ActionType.CREATE,
+                    event_type="picking_job_created",
+                    branch=branch,
+                    reference=f"JOB-{picking_job.id}",
+                    result=mode,
                     entity_name="PickingJob",
                     entity_id=str(picking_job.id),
                     message=(
-                        f"PickingJob {picking_job.id} created in {mode} mode by {worker_code}. "
-                        f"Routes: {', '.join(str(route_run.id) for route_run in group)}."
+                        f"Worker {worker_code} created {mode} picking job #{picking_job.id} "
+                        f"from {', '.join(route_run.route.code for route_run in group)}."
                     ),
                 )
 
@@ -2063,13 +2453,16 @@ class ScannerTasksView(APIView):
             .exclude(status__in=[PickingJob.Status.COMPLETED, PickingJob.Status.CANCELLED])
             .order_by("status", "created_at")
         )
+        if request.user and request.user.is_authenticated:
+            allowed_branch_ids = branch_ids_filter(request.user)
+            jobs = jobs.filter(route_runs__route__branch_id__in=allowed_branch_ids).distinct()
         return Response({"results": [_job_summary(job) for job in jobs]})
 
 
 class ScannerTaskStartView(APIView):
     def post(self, request, job_id):
         cart_code = str(request.data.get("cart_code", "")).strip()
-        worker_code = str(request.data.get("worker_code", "")).strip() or "DEMO"
+        worker_code = _scanner_actor_code(request, request.data.get("worker_code", ""))
         if not cart_code:
             return Response({"detail": "cart_code is required."}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -2079,6 +2472,19 @@ class ScannerTaskStartView(APIView):
                 return Response({"detail": "Picking job not found."}, status=status.HTTP_404_NOT_FOUND)
             if picking_job.status != PickingJob.Status.AVAILABLE:
                 return Response({"detail": "Picking job is not available."}, status=status.HTTP_409_CONFLICT)
+            if request.user and request.user.is_authenticated:
+                for route_run in picking_job.route_runs.select_related("route", "route__branch"):
+                    require_branch_access(request.user, route_run.route.branch)
+                active_participant = (
+                    CartWorkParticipant.objects.select_related("cart_work_session__cart")
+                    .filter(user=request.user, status=CartWorkParticipant.Status.ACTIVE)
+                    .first()
+                )
+                if active_participant is not None:
+                    return Response(
+                        {"detail": f"You already have active work on {active_participant.cart_work_session.cart.code}."},
+                        status=status.HTTP_409_CONFLICT,
+                    )
 
             cart, _ = ScannerCart.objects.select_for_update().get_or_create(
                 code=cart_code,
@@ -2107,9 +2513,21 @@ class ScannerTaskStartView(APIView):
                 picking_job=picking_job,
                 scanner_session=session,
             )
+            participant = None
+            if request.user and request.user.is_authenticated:
+                branch = _cart_work_branch(cart_work_session)
+                participant = CartWorkParticipant.objects.create(
+                    cart_work_session=cart_work_session,
+                    user=request.user,
+                    branch=branch,
+                )
+                _claim_task_for_participant(cart_work_session, participant)
 
             AuditLog.objects.create(
+                actor=request.user if request.user.is_authenticated else None,
                 action_type=AuditLog.ActionType.UPDATE,
+                event_type="picking_job_started",
+                result="started",
                 entity_name="PickingJob",
                 entity_id=str(picking_job.id),
                 message=f"PickingJob {picking_job.id} assigned to cart {cart.code} by {worker_code}.",
@@ -2119,8 +2537,9 @@ class ScannerTaskStartView(APIView):
             {
                 "message": "Picking job started.",
                 "job": _job_summary(picking_job),
-                "cart_work_session": _cart_work_session_data(cart_work_session),
+                "cart_work_session": _cart_work_session_data(cart_work_session, request),
                 "session": _session_data(session),
+                "participant": _participant_data(participant, current_user=request.user) if participant else None,
             },
             status=status.HTTP_200_OK,
         )
@@ -2151,18 +2570,151 @@ class ScannerCartWorkCurrentView(APIView):
             )
             repair_messages = _repair_stale_current_tasks(cart_work_session, request)
 
-        tasks = _job_tasks(cart_work_session.picking_job).order_by("source_location__code", "created_at", "id")
-        state, confirmed_location_code, instruction = _picking_state(cart_work_session)
-        return Response(
-            {
-                "cart_work_session": _cart_work_session_data(cart_work_session),
-                "state": state,
-                "confirmed_location_code": confirmed_location_code,
-                "current_instruction": instruction,
-                "repair_messages": repair_messages,
-                "tasks": [PickingTaskSerializer(task).data for task in tasks],
-            }
-        )
+        return _cart_work_response(cart_work_session, request, repair_messages)
+
+
+class ScannerCartWorkJoinView(APIView):
+    def post(self, request):
+        if not request.user or not request.user.is_authenticated:
+            return Response({"detail": "Authentication is required to join cart work."}, status=status.HTTP_401_UNAUTHORIZED)
+
+        cart_code = str(request.data.get("cart_barcode") or request.data.get("cart_code") or "").strip()
+        if not cart_code:
+            return Response({"detail": "cart_barcode is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            cart_work_session = (
+                CartWorkSession.objects.select_for_update(of=("self",))
+                .select_related("cart", "picking_job", "scanner_session")
+                .filter(cart__code__iexact=cart_code)
+                .order_by("-started_at", "-id")
+                .first()
+            )
+            if cart_work_session is None:
+                return Response(
+                    {"detail": f"No active picking work was found for cart {cart_code}."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+            if cart_work_session.status in [CartWorkSession.Status.COMPLETED, CartWorkSession.Status.CANCELLED]:
+                return Response({"detail": "This cart work session is already completed."}, status=status.HTTP_400_BAD_REQUEST)
+            if cart_work_session.status not in [CartWorkSession.Status.ACTIVE, CartWorkSession.Status.CONTROL]:
+                return Response({"detail": "Cart work session is not active."}, status=status.HTTP_400_BAD_REQUEST)
+
+            participant, error = _participant_for_request(cart_work_session, request, create_missing=True)
+            if error is not None:
+                return error
+            was_created = getattr(participant, "was_created", False)
+            _claim_task_for_participant(cart_work_session, participant)
+            if was_created:
+                AuditLog.objects.create(
+                    actor=request.user,
+                    action_type=AuditLog.ActionType.UPDATE,
+                    event_type="cart_work_joined",
+                    branch=participant.branch,
+                    cart=cart_work_session.cart,
+                    reference=f"JOB-{cart_work_session.picking_job_id}",
+                    entity_name="CartWorkSession",
+                    entity_id=str(cart_work_session.id),
+                    message=f"{request.user.username} joined cart work {cart_work_session.cart.code}.",
+                )
+
+        response = _cart_work_response(cart_work_session, request)
+        response.data["message"] = "Cart work joined."
+        response.data["session"] = _session_data(cart_work_session.scanner_session)
+        return response
+
+
+class ScannerCartWorkClaimView(APIView):
+    def post(self, request):
+        cart_work_session, error = _get_active_cart_work_or_response(request.data.get("cart_work_session_id"))
+        if error is not None:
+            return error
+        task_id = request.data.get("picking_task_id")
+        direction = str(request.data.get("direction") or "beginning").strip()
+
+        with transaction.atomic():
+            cart_work_session = (
+                CartWorkSession.objects.select_for_update(of=("self",))
+                .select_related("cart", "picking_job", "scanner_session")
+                .get(pk=cart_work_session.id)
+            )
+            participant, error = _participant_for_request(cart_work_session, request, create_missing=True)
+            if error is not None:
+                return error
+            task = None
+            if task_id:
+                task = (
+                    PickingTask.objects.select_for_update(of=("self",))
+                    .select_related("branch", "order_line__order", "order_line__product", "source_location")
+                    .filter(pk=task_id, job_task__picking_job=cart_work_session.picking_job)
+                    .first()
+                )
+                if task is None:
+                    return Response({"detail": "Picking task not found in this cart work."}, status=status.HTTP_404_NOT_FOUND)
+            selected_task, claim, created = _claim_task_for_participant(
+                cart_work_session,
+                participant,
+                task=task,
+                direction=direction,
+            )
+            if selected_task is not None and created:
+                AuditLog.objects.create(
+                    actor=request.user if request.user.is_authenticated else None,
+                    action_type=AuditLog.ActionType.UPDATE,
+                    event_type="picking_task_claimed",
+                    branch=selected_task.branch,
+                    product=selected_task.order_line.product,
+                    source_location=selected_task.source_location,
+                    source_label=selected_task.source_location.code,
+                    cart=cart_work_session.cart,
+                    order=selected_task.order_line.order,
+                    route_run=selected_task.order_line.order.route_run,
+                    reference=selected_task.order_line.order.external_reference,
+                    entity_name="PickingTaskClaim",
+                    entity_id=str(claim.id),
+                    message=(
+                        f"{_scanner_actor_code(request)} claimed {selected_task.order_line.product.sku} "
+                        f"at {selected_task.source_location.code}."
+                    ),
+                )
+
+        return _cart_work_response(cart_work_session, request)
+
+
+class ScannerCartWorkLeaveView(APIView):
+    def post(self, request):
+        cart_work_session, error = _get_active_cart_work_or_response(request.data.get("cart_work_session_id"))
+        if error is not None:
+            return error
+        with transaction.atomic():
+            cart_work_session = (
+                CartWorkSession.objects.select_for_update(of=("self",))
+                .select_related("cart", "picking_job", "scanner_session")
+                .get(pk=cart_work_session.id)
+            )
+            participant, error = _participant_for_request(cart_work_session, request, create_missing=False)
+            if error is not None:
+                return error
+            if participant is None:
+                return Response({"detail": "You are not an active participant in this cart work."}, status=status.HTTP_400_BAD_REQUEST)
+            _release_participant_claim(participant)
+            participant.status = CartWorkParticipant.Status.LEFT
+            participant.left_at = timezone.now()
+            participant.last_seen_at = timezone.now()
+            participant.save(update_fields=["status", "left_at", "last_seen_at", "updated_at"])
+            AuditLog.objects.create(
+                actor=request.user if request.user.is_authenticated else None,
+                action_type=AuditLog.ActionType.UPDATE,
+                event_type="cart_work_left",
+                branch=participant.branch,
+                cart=cart_work_session.cart,
+                reference=f"JOB-{cart_work_session.picking_job_id}",
+                entity_name="CartWorkSession",
+                entity_id=str(cart_work_session.id),
+                message=f"{_scanner_actor_code(request)} left cart work {cart_work_session.cart.code}.",
+            )
+
+        return Response({"message": "Cart work left."})
 
 
 class ScannerControlCartItemsView(APIView):
@@ -2322,6 +2874,15 @@ class ScannerControlFinishView(APIView):
                 cart_work_session.status = CartWorkSession.Status.COMPLETED
                 cart_work_session.finished_at = timezone.now()
                 cart_work_session.save(update_fields=["status", "finished_at", "updated_at"])
+                now = timezone.now()
+                PickingTaskClaim.objects.filter(
+                    cart_work_participant__cart_work_session=cart_work_session,
+                    status=PickingTaskClaim.Status.CLAIMED,
+                ).update(status=PickingTaskClaim.Status.COMPLETED, released_at=now, last_activity_at=now)
+                CartWorkParticipant.objects.filter(
+                    cart_work_session=cart_work_session,
+                    status=CartWorkParticipant.Status.ACTIVE,
+                ).update(status=CartWorkParticipant.Status.LEFT, left_at=now, last_seen_at=now)
 
                 picking_job = cart_work_session.picking_job
                 if not is_picking_job_work_fully_prepared(picking_job):

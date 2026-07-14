@@ -28,6 +28,10 @@ export function storeScannerSession(session: ScannerSession | null) {
   window.dispatchEvent(new Event("scanner-session-change"));
 }
 
+export function clearStoredScannerCartWork() {
+  storeScannerSession(null);
+}
+
 export function useStoredScannerSession() {
   const [session, setSession] = useState<ScannerSession | null>(() => getStoredScannerSession());
 

@@ -708,6 +708,94 @@ class CartWorkSession(TimestampedModel):
         return f"{self.cart.code} / job {self.picking_job_id} / {self.status}"
 
 
+class CartWorkParticipant(TimestampedModel):
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        LEFT = "left", "Left"
+
+    cart_work_session = models.ForeignKey(CartWorkSession, on_delete=models.CASCADE, related_name="participants")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="cart_work_participations")
+    branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="cart_work_participants")
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.ACTIVE)
+    current_picking_task = models.ForeignKey(
+        PickingTask,
+        on_delete=models.PROTECT,
+        related_name="current_cart_work_participants",
+        blank=True,
+        null=True,
+    )
+    confirmed_location = models.ForeignKey(
+        Location,
+        on_delete=models.PROTECT,
+        related_name="participant_confirmed_cart_work",
+        blank=True,
+        null=True,
+    )
+    joined_at = models.DateTimeField(default=timezone.now)
+    last_seen_at = models.DateTimeField(default=timezone.now)
+    left_at = models.DateTimeField(blank=True, null=True)
+    current_task_claimed_at = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        ordering = ["joined_at", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["cart_work_session", "user"],
+                condition=models.Q(status="active"),
+                name="unique_active_participant_per_cart_work_user",
+            ),
+            models.UniqueConstraint(
+                fields=["user"],
+                condition=models.Q(status="active"),
+                name="unique_active_cart_work_participant_per_user",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["cart_work_session", "status"]),
+            models.Index(fields=["user", "status"]),
+            models.Index(fields=["branch", "status"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.user} / {self.cart_work_session.cart.code} / {self.status}"
+
+
+class PickingTaskClaim(TimestampedModel):
+    class Status(models.TextChoices):
+        CLAIMED = "claimed", "Claimed"
+        RELEASED = "released", "Released"
+        COMPLETED = "completed", "Completed"
+
+    picking_task = models.ForeignKey(PickingTask, on_delete=models.CASCADE, related_name="task_claims")
+    cart_work_participant = models.ForeignKey(CartWorkParticipant, on_delete=models.CASCADE, related_name="task_claims")
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.CLAIMED)
+    claimed_at = models.DateTimeField(default=timezone.now)
+    last_activity_at = models.DateTimeField(default=timezone.now)
+    released_at = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        ordering = ["-claimed_at", "-id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["picking_task"],
+                condition=models.Q(status="claimed"),
+                name="unique_active_claim_per_picking_task",
+            ),
+            models.UniqueConstraint(
+                fields=["cart_work_participant"],
+                condition=models.Q(status="claimed"),
+                name="unique_active_claim_per_participant",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["picking_task", "status"]),
+            models.Index(fields=["cart_work_participant", "status"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"Task {self.picking_task_id} / {self.cart_work_participant.user} / {self.status}"
+
+
 class CartPickedItem(TimestampedModel):
     session = models.ForeignKey(ScannerSession, on_delete=models.CASCADE, related_name="picked_items")
     cart_work_session = models.ForeignKey(

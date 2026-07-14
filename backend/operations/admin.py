@@ -3,6 +3,7 @@ from django.contrib import admin
 from operations.models import (
     AuditLog,
     CartPickedItem,
+    CartWorkParticipant,
     CartWorkSession,
     DeliveryRoute,
     InterBranchTransfer,
@@ -16,6 +17,7 @@ from operations.models import (
     PickingShortageAllocation,
     PickingTaskReallocation,
     PickingTask,
+    PickingTaskClaim,
     ReplenishmentRequest,
     ReturnBatch,
     ReturnLine,
@@ -216,6 +218,20 @@ class CartWorkSessionAdmin(admin.ModelAdmin):
     list_display = ["id", "cart", "picking_job", "status", "started_at", "finished_at"]
     list_filter = ["status", "cart"]
     search_fields = ["cart__code", "picking_job__id"]
+
+
+@admin.register(CartWorkParticipant)
+class CartWorkParticipantAdmin(admin.ModelAdmin):
+    list_display = ["cart_work_session", "user", "branch", "status", "current_picking_task", "joined_at", "left_at"]
+    list_filter = ["status", "branch"]
+    search_fields = ["cart_work_session__cart__code", "user__username", "current_picking_task__order_line__product__sku"]
+
+
+@admin.register(PickingTaskClaim)
+class PickingTaskClaimAdmin(admin.ModelAdmin):
+    list_display = ["picking_task", "cart_work_participant", "status", "claimed_at", "released_at"]
+    list_filter = ["status"]
+    search_fields = ["picking_task__order_line__product__sku", "cart_work_participant__user__username"]
 
 
 @admin.register(CartPickedItem)

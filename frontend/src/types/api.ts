@@ -157,6 +157,10 @@ export type PickingTask = {
   is_system_reallocated_pick?: boolean;
   reallocation_reason?: string | null;
   reallocated_from_location_code?: string | null;
+  claim_status?: string | null;
+  claimed_by?: number | null;
+  claimed_by_username?: string | null;
+  is_claimed_by_current_user?: boolean;
 };
 
 export type ReturnBatch = {
@@ -1001,9 +1005,32 @@ export type PickingJob = {
   prepared_quantity: string;
   progress_percent: number;
   assigned_cart_code: string | null;
+  cart_work_session: number | null;
+  active_workers: string[];
+  active_workers_count: number;
   started_at: string | null;
   completed_at: string | null;
   created_at: string;
+};
+
+export type CartWorkParticipant = {
+  id: number;
+  user: number;
+  username: string;
+  display_name: string;
+  branch: number;
+  branch_code: string;
+  status: string;
+  is_current_user: boolean;
+  current_picking_task: number | null;
+  current_product_sku: string | null;
+  current_product_name: string | null;
+  current_location_code: string | null;
+  confirmed_location: number | null;
+  confirmed_location_code: string | null;
+  joined_at: string;
+  last_seen_at: string;
+  left_at: string | null;
 };
 
 export type CartWorkSession = {
@@ -1014,6 +1041,7 @@ export type CartWorkSession = {
   confirmed_location_code: string | null;
   picking_job: PickingJob;
   scanner_session: ScannerSession | null;
+  participants: CartWorkParticipant[];
   status: string;
   started_at: string;
   finished_at: string | null;
@@ -1182,6 +1210,7 @@ export type ScannerTaskStartResponse = {
   job: PickingJob;
   cart_work_session: CartWorkSession;
   session: ScannerSession;
+  participant?: CartWorkParticipant | null;
 };
 
 export type ScannerCartWorkResponse = {
@@ -1190,6 +1219,7 @@ export type ScannerCartWorkResponse = {
   confirmed_location_code?: string | null;
   cart_work_session: CartWorkSession;
   current_instruction?: PickInstruction | null;
+  participant?: CartWorkParticipant | null;
   repair_messages?: string[];
   session?: ScannerSession;
   tasks?: PickingTask[];

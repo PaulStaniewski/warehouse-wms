@@ -1,16 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import axios from "axios";
+import { Link } from "react-router-dom";
 
-import { useBranches, useScannerCreateJobs, useScannerProformas } from "../api/queries";
+import { useActiveBranch } from "../api/ActiveBranchContext";
+import { useAuth } from "../api/AuthContext";
+import { useScannerCreateJobs, useScannerProformas } from "../api/queries";
 import { DataState } from "../components/DataState";
 import { PageHeader } from "../components/PageHeader";
-import type { Branch } from "../types/api";
-
-
-function getDefaultBranch(branches: Branch[]) {
-  return branches.find((branch) => branch.code === "GDY") ?? branches[0];
-}
 
 function getErrorMessage(error: unknown, fallback: string) {
   return axios.isAxiosError(error) ? error.response?.data?.detail || fallback : fallback;
@@ -22,32 +19,42 @@ function formatTime(value: string) {
 
 export function ScannerProformasPage() {
   const queryClient = useQueryClient();
-  const branches = useBranches();
-  const branchRows = useMemo(() => branches.data?.results ?? [], [branches.data?.results]);
-  const [selectedBranchId, setSelectedBranchId] = useState<number | undefined>();
+  const auth = useAuth();
+  const { activeBranch, activeMembership, isLoading: branchLoading } = useActiveBranch();
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
-  const [workerCode, setWorkerCode] = useState("DEMO");
+  const [pendingMode, setPendingMode] = useState<"merged" | "separate" | null>(null);
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
-  const proformas = useScannerProformas(selectedBranchId);
+  const proformas = useScannerProformas(activeBranch?.id);
   const createJobs = useScannerCreateJobs();
   const rows = proformas.data?.results ?? [];
+  const visibleSelectableIds = useMemo(() => new Set(rows.filter((row) => row.is_selectable).map((row) => row.id)), [rows]);
+  const selectedRows = rows.filter((row) => selectedIds.includes(row.id) && row.is_selectable);
+  const selectedLines = selectedRows.reduce((sum, row) => sum + row.lines, 0);
+  const selectedUnits = selectedRows.reduce((sum, row) => sum + row.akt, 0);
 
   useEffect(() => {
-    if (selectedBranchId || branchRows.length === 0) {
-      return;
-    }
-    setSelectedBranchId(getDefaultBranch(branchRows).id);
-  }, [branchRows, selectedBranchId]);
+    setSelectedIds((current) => current.filter((id) => visibleSelectableIds.has(id)));
+  }, [visibleSelectableIds]);
 
   function toggleRouteRun(id: number) {
+    if (!visibleSelectableIds.has(id)) {
+      return;
+    }
     setSelectedIds((current) => (current.includes(id) ? current.filter((value) => value !== id) : [...current, id]));
   }
 
   async function handleCreate(mode: "merged" | "separate") {
+    if (selectedRows.length === 0) {
+      return;
+    }
+    setPendingMode(mode);
     setMessage(null);
     try {
-      const result = await createJobs.mutateAsync({ mode, routeRunIds: selectedIds, workerCode });
-      setMessage({ type: "success", text: `${result.jobs.length} picking job(s) created.` });
+      const result = await createJobs.mutateAsync({ mode, routeRunIds: selectedRows.map((row) => row.id) });
+      setMessage({
+        type: "success",
+        text: mode === "merged" ? "Picking job created. Open Tasks to start work." : `${result.jobs.length} separate picking jobs created. Open Tasks to start work.`,
+      });
       setSelectedIds([]);
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["scanner-proformas"] }),
@@ -56,58 +63,75 @@ export function ScannerProformasPage() {
       ]);
     } catch (error) {
       setMessage({ type: "error", text: getErrorMessage(error, "Could not create picking jobs.") });
+    } finally {
+      setPendingMode(null);
     }
   }
 
   return (
     <>
-      <PageHeader
-        title="Proformas"
-        description="Select routes and create picking jobs."
-        action={
-          <div className="branch-selector">
-            <label htmlFor="scanner-proforma-branch">Branch</label>
-            <select
-              disabled={branches.isLoading || branchRows.length === 0}
-              id="scanner-proforma-branch"
-              onChange={(event) => {
-                setSelectedBranchId(Number(event.target.value));
-                setSelectedIds([]);
-              }}
-              value={selectedBranchId ?? ""}
-            >
-              {branchRows.map((branch) => (
-                <option key={branch.id} value={branch.id}>
-                  {branch.code} / {branch.name}
-                </option>
-              ))}
-            </select>
-          </div>
-        }
-      />
+      <PageHeader title="Proformas" description="Select routes and create a picking job." />
 
       {message && <div className={`scanner-message scanner-message--${message.type}`}>{message.text}</div>}
 
-      <section className="scanner-action-strip">
-        <label htmlFor="proforma-worker">
-          <span>Worker</span>
-          <input id="proforma-worker" onChange={(event) => setWorkerCode(event.target.value)} value={workerCode} />
-        </label>
-        <button disabled={selectedIds.length === 0 || createJobs.isPending} onClick={() => handleCreate("merged")} type="button">
-          Merge
-        </button>
-        <button disabled={selectedIds.length === 0 || createJobs.isPending} onClick={() => handleCreate("separate")} type="button">
-          Separate
-        </button>
+      <section className="scanner-proforma-hero">
+        <div>
+          <h2>Route selection</h2>
+          <p>Select one or more routes below.</p>
+        </div>
+        <div className="scanner-context-strip">
+          <div>
+            <span>Working branch</span>
+            <strong>{activeBranch ? `${activeBranch.code} / ${activeBranch.name}` : "-"}</strong>
+          </div>
+          <div>
+            <span>Logged in operator</span>
+            <strong>{auth.username ?? "-"}</strong>
+          </div>
+          <div>
+            <span>Role</span>
+            <strong>{activeMembership?.role_label ?? "-"}</strong>
+          </div>
+        </div>
       </section>
 
+      <section className="scanner-selection-board">
+        <div>
+          <span>Selected</span>
+          <strong>{selectedRows.length} routes selected</strong>
+          <small>{selectedLines} lines / {selectedUnits} units</small>
+        </div>
+        <div>
+          <button disabled={selectedRows.length === 0 || createJobs.isPending} onClick={() => handleCreate("merged")} type="button">
+            Merge selected
+          </button>
+          <small>Create one picking job containing all selected routes.</small>
+        </div>
+        <div>
+          <button disabled={selectedRows.length === 0 || createJobs.isPending} onClick={() => handleCreate("separate")} type="button">
+            Create separate jobs
+          </button>
+          <small>Create one picking job for each selected route.</small>
+        </div>
+      </section>
+
+      {pendingMode && (
+        <section className="scanner-confirm-summary">
+          <strong>{pendingMode === "merged" ? "Creating merged picking job" : "Creating separate picking jobs"}</strong>
+          <span>Routes: {selectedRows.map((row) => row.route_code).join(", ")}</span>
+          <span>Lines: {selectedLines}</span>
+          <span>Operator: {auth.username ?? "-"}</span>
+          <span>Branch: {activeBranch?.code ?? "-"}</span>
+        </section>
+      )}
+
       <DataState
-        isLoading={branches.isLoading || proformas.isLoading || !selectedBranchId}
-        isError={branches.isError || proformas.isError}
-        error={branches.error || proformas.error}
+        isLoading={branchLoading || proformas.isLoading || !activeBranch}
+        isError={proformas.isError}
+        error={proformas.error}
       >
         {rows.length === 0 ? (
-          <div className="state-box">No proformas found for the selected branch.</div>
+          <div className="state-box">No proformas found for the working branch.</div>
         ) : (
           <section className="scanner-table-panel">
             <table>
@@ -115,6 +139,7 @@ export function ScannerProformasPage() {
                 <tr>
                   <th></th>
                   <th>Route</th>
+                  <th>Status</th>
                   <th>AKT</th>
                   <th>Lines</th>
                   <th>Started</th>
@@ -124,34 +149,47 @@ export function ScannerProformasPage() {
                 </tr>
               </thead>
               <tbody>
-                {rows.map((run) => (
-                  <tr className={!run.is_selectable ? "scanner-muted-row" : ""} key={run.id}>
-                    <td>
-                      <input
-                        checked={selectedIds.includes(run.id)}
-                        disabled={!run.is_selectable}
-                        onChange={() => toggleRouteRun(run.id)}
-                        type="checkbox"
-                      />
-                    </td>
-                    <td>
-                      <strong>{run.route_code}</strong>
-                      <br />
-                      <span>{run.branch_code} / run {run.run_number}</span>
-                    </td>
-                    <td>{run.akt}</td>
-                    <td>{run.lines}</td>
-                    <td>{run.started}</td>
-                    <td>{run.picked}</td>
-                    <td>{run.prepared}</td>
-                    <td>{formatTime(run.departure_time)}</td>
-                  </tr>
-                ))}
+                {rows.map((run) => {
+                  const selected = selectedIds.includes(run.id);
+                  return (
+                    <tr
+                      className={`${!run.is_selectable ? "scanner-muted-row" : ""} ${selected ? "scanner-selected-row" : ""}`}
+                      key={run.id}
+                      onClick={() => toggleRouteRun(run.id)}
+                    >
+                      <td>
+                        <input
+                          checked={selected}
+                          disabled={!run.is_selectable}
+                          onChange={() => toggleRouteRun(run.id)}
+                          onClick={(event) => event.stopPropagation()}
+                          type="checkbox"
+                        />
+                      </td>
+                      <td>
+                        <strong>{run.route_code}</strong>
+                        <br />
+                        <span>{run.branch_code} / run {run.run_number}</span>
+                      </td>
+                      <td>{run.status.replaceAll("_", " ")}</td>
+                      <td>{run.akt}</td>
+                      <td>{run.lines}</td>
+                      <td>{run.started}</td>
+                      <td>{run.picked}</td>
+                      <td>{run.prepared}</td>
+                      <td>{formatTime(run.departure_time)}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </section>
         )}
       </DataState>
+
+      <div className="scanner-secondary-links">
+        <Link to="/scanner/tasks">Open Tasks</Link>
+      </div>
     </>
   );
 }

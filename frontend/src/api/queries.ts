@@ -1,4 +1,5 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
+import axios from "axios";
 
 import { apiClient, getHealth, getList } from "./client";
 import type {
@@ -350,10 +351,11 @@ export function useScannerSessionStart() {
 
 export function useScannerProformas(branchId?: number) {
   return useQuery({
+    enabled: Boolean(branchId),
     queryKey: ["scanner-proformas", branchId ?? "all"],
     queryFn: async () => {
       const response = await apiClient.get<ScannerProformasResponse>(
-        branchId ? `/scanner/proformas/?branch=${branchId}` : "/scanner/proformas/",
+        `/scanner/proformas/?branch=${branchId}`,
       );
       return response.data;
     },
@@ -365,16 +367,13 @@ export function useScannerCreateJobs() {
     mutationFn: async ({
       mode,
       routeRunIds,
-      workerCode,
     }: {
       mode: "merged" | "separate";
       routeRunIds: number[];
-      workerCode: string;
     }) => {
       const response = await apiClient.post<ScannerCreateJobsResponse>("/scanner/proformas/create-jobs/", {
         mode,
         route_run_ids: routeRunIds,
-        worker_code: workerCode,
       });
       return response.data;
     },
@@ -393,25 +392,94 @@ export function useScannerJobs() {
 
 export function useScannerTaskStart() {
   return useMutation({
-    mutationFn: async ({ cartCode, jobId, workerCode }: { cartCode: string; jobId: number; workerCode: string }) => {
+    mutationFn: async ({ cartCode, jobId }: { cartCode: string; jobId: number }) => {
       const response = await apiClient.post<ScannerTaskStartResponse>(`/scanner/tasks/${jobId}/start/`, {
         cart_code: cartCode,
-        worker_code: workerCode,
       });
       return response.data;
     },
   });
 }
 
-export function useScannerCartWork(sessionId?: number, cartWorkSessionId?: number | null) {
+export function useScannerCartWorkJoin() {
+  return useMutation({
+    mutationFn: async ({ cartBarcode }: { cartBarcode: string }) => {
+      const response = await apiClient.post<ScannerCartWorkResponse>("/scanner/cart-work/join/", {
+        cart_barcode: cartBarcode,
+      });
+      return response.data;
+    },
+  });
+}
+
+export function useScannerCartWorkClaim() {
+  return useMutation({
+    mutationFn: async ({
+      cartWorkSessionId,
+      direction,
+      pickingTaskId,
+    }: {
+      cartWorkSessionId: number;
+      direction?: "beginning" | "end";
+      pickingTaskId?: number;
+    }) => {
+      const response = await apiClient.post<ScannerCartWorkResponse>("/scanner/cart-work/claim/", {
+        cart_work_session_id: cartWorkSessionId,
+        direction,
+        picking_task_id: pickingTaskId,
+      });
+      return response.data;
+    },
+  });
+}
+
+export function useScannerCartWorkLeave() {
+  return useMutation({
+    mutationFn: async ({ cartWorkSessionId }: { cartWorkSessionId: number }) => {
+      const response = await apiClient.post<{ message: string }>("/scanner/cart-work/leave/", {
+        cart_work_session_id: cartWorkSessionId,
+      });
+      return response.data;
+    },
+  });
+}
+
+export function useScannerCartWork(
+  sessionId?: number,
+  cartWorkSessionId?: number | null,
+  options: { onStaleSession?: () => void } = {},
+) {
   return useQuery({
     enabled: Boolean(sessionId || cartWorkSessionId),
-    refetchInterval: 4000,
+    refetchInterval: (query) => {
+      const error = query.state.error;
+      if (axios.isAxiosError(error) && error.response?.status === 404) {
+        return false;
+      }
+      const status = query.state.data?.cart_work_session?.status;
+      if (status === "completed" || status === "cancelled") {
+        return false;
+      }
+      return 4000;
+    },
     queryKey: ["scanner-cart-work", sessionId ?? "no-session", cartWorkSessionId ?? "no-work"],
     queryFn: async () => {
       const query = cartWorkSessionId ? `cart_work_session_id=${cartWorkSessionId}` : `session_id=${sessionId}`;
-      const response = await apiClient.get<ScannerCartWorkResponse>(`/scanner/cart-work/current/?${query}`);
-      return response.data;
+      try {
+        const response = await apiClient.get<ScannerCartWorkResponse>(`/scanner/cart-work/current/?${query}`);
+        return response.data;
+      } catch (error) {
+        if (axios.isAxiosError(error) && error.response?.status === 404) {
+          options.onStaleSession?.();
+        }
+        throw error;
+      }
+    },
+    retry: (failureCount, error) => {
+      if (axios.isAxiosError(error) && error.response?.status === 404) {
+        return false;
+      }
+      return failureCount < 2;
     },
   });
 }
