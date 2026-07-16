@@ -26,6 +26,7 @@ from operations.models import (
     PalletReceivingScan,
     PalletReceivingSession,
     PickingJob,
+    PickingJobTask,
     PickingShortage,
     PickingShortageAllocation,
     PickingTask,
@@ -3821,6 +3822,36 @@ class ScannerPickingJobWorkflowTests(APITestCase):
             format="json",
         )
 
+    def prepare_three_location_claim_job(self):
+        self.location.code = "A-01-01"
+        self.location.name = "A-01-01"
+        self.location.save(update_fields=["code", "name", "updated_at"])
+        self.other_location.code = "A-01-02"
+        self.other_location.name = "A-01-02"
+        self.other_location.save(update_fields=["code", "name", "updated_at"])
+        self.third_location.code = "A-02-01"
+        self.third_location.name = "A-02-01"
+        self.third_location.save(update_fields=["code", "name", "updated_at"])
+        self.task_2.source_location = self.other_location
+        self.task_2.save(update_fields=["source_location", "updated_at"])
+        InventoryItem.objects.create(
+            branch=self.branch,
+            location=self.other_location,
+            product=self.product_b,
+            quantity_on_hand=Decimal("5"),
+            quantity_reserved=Decimal("0"),
+        )
+        self.third_product_a_inventory.quantity_on_hand = Decimal("5")
+        self.third_product_a_inventory.save(update_fields=["quantity_on_hand", "updated_at"])
+        order_3 = self.create_order("JOB-ORDER-3", self.run_2, self.product_a)
+        task_3 = self.create_task(order_3.lines.first())
+        task_3.source_location = self.third_location
+        task_3.save(update_fields=["source_location", "updated_at"])
+        self.create_jobs(route_run_ids=[self.run_1.id, self.run_2.id])
+        job = PickingJob.objects.get()
+        start = self.start_job(job, cart_code="WOZEK-01")
+        return job, start, self.task_1, self.task_2, task_3
+
     def report_shortage(self, challenge, code=None, operation_id="shortage-op-1"):
         return self.client.post(
             "/api/scanner/picking/report-shortage/",
@@ -3999,6 +4030,90 @@ class ScannerPickingJobWorkflowTests(APITestCase):
         self.assertEqual(response.data["cart_work_session"]["cart_code"], "WOZEK-01")
         self.assertEqual(CartWorkSession.objects.filter(picking_job=job).count(), 1)
 
+    def test_current_cart_work_get_is_read_only_for_active_participant(self):
+        UserBranchMembership.objects.create(user=self.gdy_worker, branch=self.branch, role=UserBranchMembership.Role.WORKER)
+        self.client.force_authenticate(self.gdy_worker)
+        self.create_jobs(route_run_ids=[self.run_1.id, self.run_2.id])
+        job = PickingJob.objects.get()
+        start = self.start_job(job, cart_code="WOZEK-01")
+        cart_work_session_id = start.data["cart_work_session"]["id"]
+        participant = CartWorkParticipant.objects.get(user=self.gdy_worker)
+        claim_id = PickingTaskClaim.objects.get(cart_work_participant=participant, status=PickingTaskClaim.Status.CLAIMED).id
+        last_seen_at = participant.last_seen_at
+
+        first = self.client.get("/api/scanner/cart-work/current/", {"cart_work_session_id": cart_work_session_id})
+        second = self.client.get("/api/scanner/cart-work/current/", {"cart_work_session_id": cart_work_session_id})
+
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(first.data["participant"]["username"], "GDY_WORKER")
+        self.assertEqual(first.data["current_instruction"]["picking_task_id"], participant.current_picking_task_id)
+        self.assertEqual(len(first.data["cart_work_session"]["participants"]), 1)
+        self.assertEqual(len(first.data["tasks"]), 2)
+        participant.refresh_from_db()
+        self.assertEqual(participant.last_seen_at, last_seen_at)
+        self.assertEqual(PickingTaskClaim.objects.filter(id=claim_id, status=PickingTaskClaim.Status.CLAIMED).count(), 1)
+        self.assertEqual(PickingTaskClaim.objects.filter(cart_work_participant=participant).count(), 1)
+
+    def test_current_cart_work_get_does_not_create_missing_participant_or_claim(self):
+        UserBranchMembership.objects.create(user=self.gdy_leader, branch=self.branch, role=UserBranchMembership.Role.LEADER)
+        self.create_jobs(route_run_ids=[self.run_1.id, self.run_2.id])
+        job = PickingJob.objects.get()
+        start = self.start_job(job, cart_code="WOZEK-01")
+
+        self.client.force_authenticate(self.gdy_leader)
+        response = self.client.get(
+            "/api/scanner/cart-work/current/",
+            {"cart_work_session_id": start.data["cart_work_session"]["id"]},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(CartWorkParticipant.objects.filter(user=self.gdy_leader).exists())
+        self.assertEqual(PickingTaskClaim.objects.count(), 0)
+
+    def test_two_workers_can_poll_same_cart_work_without_changing_claims(self):
+        UserBranchMembership.objects.create(user=self.gdy_worker, branch=self.branch, role=UserBranchMembership.Role.WORKER)
+        UserBranchMembership.objects.create(user=self.gdy_leader, branch=self.branch, role=UserBranchMembership.Role.LEADER)
+        self.client.force_authenticate(self.gdy_worker)
+        self.create_jobs(route_run_ids=[self.run_1.id, self.run_2.id])
+        job = PickingJob.objects.get()
+        start = self.start_job(job, cart_code="WOZEK-01")
+        cart_work_session_id = start.data["cart_work_session"]["id"]
+        self.client.force_authenticate(self.gdy_leader)
+        join = self.client.post("/api/scanner/cart-work/join/", {"cart_barcode": "WOZEK-01"}, format="json")
+        self.assertEqual(join.status_code, status.HTTP_200_OK)
+        claim_snapshot = list(
+            PickingTaskClaim.objects.filter(status=PickingTaskClaim.Status.CLAIMED)
+            .order_by("cart_work_participant__user__username")
+            .values_list("cart_work_participant__user__username", "picking_task_id")
+        )
+
+        self.client.force_authenticate(self.gdy_worker)
+        worker_response = self.client.get("/api/scanner/cart-work/current/", {"cart_work_session_id": cart_work_session_id})
+        self.client.force_authenticate(self.gdy_leader)
+        leader_response = self.client.get("/api/scanner/cart-work/current/", {"cart_work_session_id": cart_work_session_id})
+
+        self.assertEqual(worker_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(leader_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(worker_response.data["participant"]["username"], "GDY_WORKER")
+        self.assertEqual(leader_response.data["participant"]["username"], "GDY_LEADER")
+        self.assertNotEqual(
+            worker_response.data["current_instruction"]["picking_task_id"],
+            leader_response.data["current_instruction"]["picking_task_id"],
+        )
+        self.assertEqual(worker_response.data["cart_work_session"]["picking_job"]["progress_percent"], 0)
+        self.assertEqual(leader_response.data["cart_work_session"]["picking_job"]["progress_percent"], 0)
+        self.assertEqual(len(worker_response.data["cart_work_session"]["participants"]), 2)
+        self.assertEqual(len(leader_response.data["cart_work_session"]["participants"]), 2)
+        self.assertEqual(
+            claim_snapshot,
+            list(
+                PickingTaskClaim.objects.filter(status=PickingTaskClaim.Status.CLAIMED)
+                .order_by("cart_work_participant__user__username")
+                .values_list("cart_work_participant__user__username", "picking_task_id")
+            ),
+        )
+
     def test_authenticated_start_creates_active_participant_and_claim(self):
         UserBranchMembership.objects.create(user=self.gdy_worker, branch=self.branch, role=UserBranchMembership.Role.WORKER)
         self.client.force_authenticate(self.gdy_worker)
@@ -4050,6 +4165,214 @@ class ScannerPickingJobWorkflowTests(APITestCase):
         claims = list(PickingTaskClaim.objects.filter(status=PickingTaskClaim.Status.CLAIMED).order_by("id"))
         self.assertEqual(len(claims), 2)
         self.assertNotEqual(claims[0].picking_task_id, claims[1].picking_task_id)
+
+    def test_specific_pick_this_line_claims_exact_task_and_survives_polling(self):
+        UserBranchMembership.objects.create(user=self.gdy_worker, branch=self.branch, role=UserBranchMembership.Role.WORKER)
+        self.client.force_authenticate(self.gdy_worker)
+        _, start, task_1, task_2, task_3 = self.prepare_three_location_claim_job()
+        cart_work_session_id = start.data["cart_work_session"]["id"]
+
+        claim_second = self.client.post(
+            "/api/scanner/cart-work/claim/",
+            {"cart_work_session_id": cart_work_session_id, "mode": "specific", "picking_task_id": task_2.id},
+            format="json",
+        )
+        claim_third = self.client.post(
+            "/api/scanner/cart-work/claim/",
+            {"cart_work_session_id": cart_work_session_id, "mode": "specific", "picking_task_id": task_3.id},
+            format="json",
+        )
+        poll = self.client.get("/api/scanner/cart-work/current/", {"cart_work_session_id": cart_work_session_id})
+
+        self.assertEqual(claim_second.status_code, status.HTTP_200_OK)
+        self.assertEqual(claim_second.data["current_instruction"]["picking_task_id"], task_2.id)
+        self.assertEqual(claim_second.data["current_instruction"]["product"]["sku"], "JOB-B")
+        self.assertEqual(claim_second.data["current_instruction"]["location"]["code"], "A-01-02")
+        self.assertEqual(claim_third.status_code, status.HTTP_200_OK)
+        self.assertEqual(claim_third.data["current_instruction"]["picking_task_id"], task_3.id)
+        self.assertEqual(claim_third.data["current_instruction"]["product"]["sku"], "JOB-A")
+        self.assertEqual(claim_third.data["current_instruction"]["location"]["code"], "A-02-01")
+        self.assertEqual(poll.status_code, status.HTTP_200_OK)
+        self.assertEqual(poll.data["current_instruction"]["picking_task_id"], task_3.id)
+        self.assertFalse(PickingTaskClaim.objects.filter(picking_task=task_1, status=PickingTaskClaim.Status.CLAIMED).exists())
+        self.assertFalse(PickingTaskClaim.objects.filter(picking_task=task_2, status=PickingTaskClaim.Status.CLAIMED).exists())
+        self.assertTrue(PickingTaskClaim.objects.filter(picking_task=task_3, status=PickingTaskClaim.Status.CLAIMED).exists())
+
+    def test_beginning_and_end_use_canonical_manifest_order(self):
+        UserBranchMembership.objects.create(user=self.gdy_worker, branch=self.branch, role=UserBranchMembership.Role.WORKER)
+        self.client.force_authenticate(self.gdy_worker)
+        _, start, task_1, _, task_3 = self.prepare_three_location_claim_job()
+        cart_work_session_id = start.data["cart_work_session"]["id"]
+
+        end_response = self.client.post(
+            "/api/scanner/cart-work/claim/",
+            {"cart_work_session_id": cart_work_session_id, "mode": "end"},
+            format="json",
+        )
+        beginning_response = self.client.post(
+            "/api/scanner/cart-work/claim/",
+            {"cart_work_session_id": cart_work_session_id, "mode": "beginning"},
+            format="json",
+        )
+
+        self.assertEqual(end_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(end_response.data["current_instruction"]["picking_task_id"], task_3.id)
+        self.assertEqual(end_response.data["current_instruction"]["location"]["code"], "A-02-01")
+        self.assertEqual(beginning_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(beginning_response.data["current_instruction"]["picking_task_id"], task_1.id)
+        self.assertEqual(beginning_response.data["current_instruction"]["location"]["code"], "A-01-01")
+
+    def test_end_direction_persists_after_completing_line(self):
+        UserBranchMembership.objects.create(user=self.gdy_worker, branch=self.branch, role=UserBranchMembership.Role.WORKER)
+        self.client.force_authenticate(self.gdy_worker)
+        job, start, _, _, task_3 = self.prepare_three_location_claim_job()
+        fourth_location = Location.objects.create(
+            branch=self.branch,
+            code="A-02-02",
+            name="A-02-02",
+            location_type=Location.LocationType.PICKING,
+        )
+        InventoryItem.objects.create(
+            branch=self.branch,
+            location=fourth_location,
+            product=self.product_b,
+            quantity_on_hand=Decimal("5"),
+            quantity_reserved=Decimal("0"),
+        )
+        fourth_order = self.create_order("JOB-ORDER-4", self.run_2, self.product_b)
+        fourth_task = self.create_task(fourth_order.lines.first())
+        fourth_task.source_location = fourth_location
+        fourth_task.save(update_fields=["source_location", "updated_at"])
+        PickingJobTask.objects.create(picking_job=job, picking_task=fourth_task)
+        cart_work_session_id = start.data["cart_work_session"]["id"]
+
+        end_claim = self.client.post(
+            "/api/scanner/cart-work/claim/",
+            {"cart_work_session_id": cart_work_session_id, "mode": "end"},
+            format="json",
+        )
+        self.assertEqual(end_claim.status_code, status.HTTP_200_OK)
+        self.assertEqual(end_claim.data["current_instruction"]["picking_task_id"], fourth_task.id)
+        self.assertEqual(end_claim.data["participant"]["picking_direction"], "end")
+        self.confirm_location(cart_work_session_id, "A-02-02")
+        pick = self.client.post(
+            "/api/scanner/picking/pick/",
+            {"cart_work_session_id": cart_work_session_id, "product_code": "JOB-B", "quantity": "1"},
+            format="json",
+        )
+
+        self.assertEqual(pick.status_code, status.HTTP_200_OK)
+        self.assertEqual(pick.data["current_instruction"]["picking_task_id"], task_3.id)
+        self.assertEqual(pick.data["current_instruction"]["location"]["code"], "A-02-01")
+        self.assertEqual(pick.data["participant"]["picking_direction"], "end")
+        self.assertEqual(CartWorkParticipant.objects.get(user=self.gdy_worker).picking_direction, "end")
+
+    def test_manual_selection_waits_after_completion_instead_of_resetting_to_beginning(self):
+        UserBranchMembership.objects.create(user=self.gdy_worker, branch=self.branch, role=UserBranchMembership.Role.WORKER)
+        self.client.force_authenticate(self.gdy_worker)
+        _, start, task_1, task_2, _ = self.prepare_three_location_claim_job()
+        cart_work_session_id = start.data["cart_work_session"]["id"]
+
+        manual_claim = self.client.post(
+            "/api/scanner/cart-work/claim/",
+            {"cart_work_session_id": cart_work_session_id, "mode": "specific", "picking_task_id": task_2.id},
+            format="json",
+        )
+        self.confirm_location(cart_work_session_id, "A-01-02")
+        pick = self.client.post(
+            "/api/scanner/picking/pick/",
+            {"cart_work_session_id": cart_work_session_id, "product_code": "JOB-B", "quantity": "1"},
+            format="json",
+        )
+
+        self.assertEqual(manual_claim.status_code, status.HTTP_200_OK)
+        self.assertEqual(manual_claim.data["participant"]["picking_direction"], "manual")
+        self.assertEqual(pick.status_code, status.HTTP_200_OK)
+        self.assertEqual(pick.data["state"], "waiting_for_available_line")
+        self.assertIsNone(pick.data["current_instruction"])
+        self.assertEqual(pick.data["participant"]["picking_direction"], "manual")
+        self.assertTrue(PickingTask.objects.filter(pk=task_1.id, quantity_picked=Decimal("0.000")).exists())
+
+    def test_participant_waiting_does_not_complete_shared_cart_when_other_claim_remains(self):
+        UserBranchMembership.objects.create(user=self.gdy_worker, branch=self.branch, role=UserBranchMembership.Role.WORKER)
+        UserBranchMembership.objects.create(user=self.gdy_leader, branch=self.branch, role=UserBranchMembership.Role.LEADER)
+        self.client.force_authenticate(self.gdy_worker)
+        _, start, task_1, task_2, _ = self.prepare_three_location_claim_job()
+        cart_work_session_id = start.data["cart_work_session"]["id"]
+        self.client.force_authenticate(self.gdy_leader)
+        leader_claim = self.client.post(
+            "/api/scanner/cart-work/claim/",
+            {"cart_work_session_id": cart_work_session_id, "mode": "specific", "picking_task_id": task_2.id},
+            format="json",
+        )
+        self.assertEqual(leader_claim.status_code, status.HTTP_200_OK)
+
+        self.client.force_authenticate(self.gdy_worker)
+        worker_claim = self.client.post(
+            "/api/scanner/cart-work/claim/",
+            {"cart_work_session_id": cart_work_session_id, "mode": "specific", "picking_task_id": task_1.id},
+            format="json",
+        )
+        self.assertEqual(worker_claim.status_code, status.HTTP_200_OK)
+        self.confirm_location(cart_work_session_id, "A-01-01")
+        worker_pick = self.client.post(
+            "/api/scanner/picking/pick/",
+            {"cart_work_session_id": cart_work_session_id, "product_code": "JOB-A", "quantity": "1"},
+            format="json",
+        )
+
+        self.assertEqual(worker_pick.status_code, status.HTTP_200_OK)
+        self.assertEqual(worker_pick.data["state"], "waiting_for_available_line")
+        self.assertEqual(worker_pick.data["participant"]["participant_work_state"], "waiting_for_available_line")
+        self.assertEqual(worker_pick.data["cart_work_session"]["status"], CartWorkSession.Status.ACTIVE)
+        self.assertTrue(PickingTaskClaim.objects.filter(picking_task=task_2, status=PickingTaskClaim.Status.CLAIMED).exists())
+        self.assertTrue(PickingTask.objects.filter(pk=task_2.id, quantity_picked=Decimal("0.000")).exists())
+
+    def test_specific_claim_rejects_line_handled_by_another_worker(self):
+        UserBranchMembership.objects.create(user=self.gdy_worker, branch=self.branch, role=UserBranchMembership.Role.WORKER)
+        UserBranchMembership.objects.create(user=self.gdy_leader, branch=self.branch, role=UserBranchMembership.Role.LEADER)
+        self.client.force_authenticate(self.gdy_worker)
+        _, start, task_1, _, _ = self.prepare_three_location_claim_job()
+        cart_work_session_id = start.data["cart_work_session"]["id"]
+
+        self.client.force_authenticate(self.gdy_leader)
+        response = self.client.post(
+            "/api/scanner/cart-work/claim/",
+            {"cart_work_session_id": cart_work_session_id, "mode": "specific", "picking_task_id": task_1.id},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertIn("already handled", response.data["detail"])
+
+    def test_natural_manifest_order_places_a02_before_a10(self):
+        UserBranchMembership.objects.create(user=self.gdy_worker, branch=self.branch, role=UserBranchMembership.Role.WORKER)
+        self.client.force_authenticate(self.gdy_worker)
+        a10_location = Location.objects.create(
+            branch=self.branch,
+            code="A-10-01",
+            name="A-10-01",
+            location_type=Location.LocationType.PICKING,
+        )
+        InventoryItem.objects.create(
+            branch=self.branch,
+            location=a10_location,
+            product=self.product_b,
+            quantity_on_hand=Decimal("5"),
+            quantity_reserved=Decimal("0"),
+        )
+        _, start, _, _, _ = self.prepare_three_location_claim_job()
+        a10_order = self.create_order("JOB-ORDER-10", self.run_2, self.product_b)
+        a10_task = self.create_task(a10_order.lines.first())
+        a10_task.source_location = a10_location
+        a10_task.save(update_fields=["source_location", "updated_at"])
+        PickingJobTask.objects.create(picking_job=PickingJob.objects.get(), picking_task=a10_task)
+
+        response = self.client.get("/api/scanner/cart-work/current/", {"cart_work_session_id": start.data["cart_work_session"]["id"]})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        location_codes = [task["source_location_code"] for task in response.data["tasks"]]
+        self.assertLess(location_codes.index("A-02-01"), location_codes.index("A-10-01"))
 
     def test_joining_other_branch_cart_work_is_rejected(self):
         UserBranchMembership.objects.create(user=self.gdy_worker, branch=self.branch, role=UserBranchMembership.Role.WORKER)

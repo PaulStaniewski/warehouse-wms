@@ -237,7 +237,7 @@ export type ScannerPickingScanResponse = {
   message: string;
   task: PickingTask;
   route_run?: RouteRun;
-  state?: "waiting_for_location" | "waiting_for_product" | "completed";
+  state?: "waiting_for_location" | "waiting_for_product" | "waiting_for_available_line" | "completed";
   confirmed_location_code?: string | null;
   current_instruction?: PickInstruction | null;
   cart_item?: ScannerCartItem;
@@ -1021,6 +1021,10 @@ export type CartWorkParticipant = {
   branch: number;
   branch_code: string;
   status: string;
+  picking_direction: string;
+  picking_direction_label: string;
+  participant_work_state: string;
+  participant_work_state_label: string;
   is_current_user: boolean;
   current_picking_task: number | null;
   current_product_sku: string | null;
@@ -1118,7 +1122,7 @@ export type ScannerPickingShortageResponse = {
   task: PickingTask;
   picking_job: PickingJob;
   cart_work_session: CartWorkSession;
-  state: "waiting_for_location" | "waiting_for_product" | "completed";
+  state: "waiting_for_location" | "waiting_for_product" | "waiting_for_available_line" | "completed";
   confirmed_location_code?: string | null;
   current_instruction?: PickInstruction | null;
 };
@@ -1215,7 +1219,7 @@ export type ScannerTaskStartResponse = {
 
 export type ScannerCartWorkResponse = {
   message?: string;
-  state?: "waiting_for_location" | "waiting_for_product" | "completed";
+  state?: "waiting_for_location" | "waiting_for_product" | "waiting_for_available_line" | "completed";
   confirmed_location_code?: string | null;
   cart_work_session: CartWorkSession;
   current_instruction?: PickInstruction | null;

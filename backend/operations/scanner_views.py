@@ -1,5 +1,6 @@
 from decimal import Decimal
 import random
+import re
 import uuid
 
 from django.core import signing
@@ -277,6 +278,10 @@ def _participant_data(participant: CartWorkParticipant, *, current_user=None):
         "branch": participant.branch_id,
         "branch_code": participant.branch.code,
         "status": participant.status,
+        "picking_direction": participant.picking_direction,
+        "picking_direction_label": participant.get_picking_direction_display(),
+        "participant_work_state": participant.work_state,
+        "participant_work_state_label": participant.get_work_state_display(),
         "is_current_user": bool(current_user and current_user.is_authenticated and participant.user_id == current_user.id),
         "current_picking_task": task.id if task else None,
         "current_product_sku": product.sku if product else None,
@@ -335,6 +340,16 @@ def _release_participant_claim(participant: CartWorkParticipant):
     )
 
 
+def _natural_location_sort_key(code: str):
+    parts = re.split(r"(\d+)", str(code or ""))
+    return tuple((0, int(part)) if part.isdigit() else (1, part.lower()) for part in parts)
+
+
+def _task_manifest_sort_key(task: PickingTask):
+    location_code = task.source_location.code if task.source_location else ""
+    return (_natural_location_sort_key(location_code), task.created_at, task.id)
+
+
 def _claimable_tasks_queryset(picking_job: PickingJob):
     claimed_task_ids = PickingTaskClaim.objects.filter(
         status=PickingTaskClaim.Status.CLAIMED,
@@ -347,12 +362,22 @@ def _claimable_tasks_queryset(picking_job: PickingJob):
     )
 
 
+def _ordered_claimable_tasks(picking_job: PickingJob, *, reverse=False):
+    tasks = list(_claimable_tasks_queryset(picking_job))
+    return sorted(tasks, key=_task_manifest_sort_key, reverse=reverse)
+
+
+def _has_unresolved_cart_work(picking_job: PickingJob):
+    return _job_tasks(picking_job).filter(quantity_picked__lt=F("quantity_to_pick") - F("shortage_quantity")).exists()
+
+
 def _claim_task_for_participant(
     cart_work_session: CartWorkSession,
     participant: CartWorkParticipant,
     *,
     task: PickingTask | None = None,
-    direction="beginning",
+    mode="beginning",
+    keep_existing=True,
 ):
     existing_claim = (
         PickingTaskClaim.objects.select_for_update()
@@ -360,34 +385,67 @@ def _claim_task_for_participant(
         .filter(cart_work_participant=participant, status=PickingTaskClaim.Status.CLAIMED)
         .first()
     )
-    if existing_claim is not None and _task_remaining(existing_claim.picking_task) > 0:
+    if keep_existing and task is None and existing_claim is not None and _task_remaining(existing_claim.picking_task) > 0:
         return existing_claim.picking_task, existing_claim, False
 
-    if existing_claim is not None:
-        existing_claim.status = PickingTaskClaim.Status.COMPLETED
+    if mode in [CartWorkParticipant.PickingDirection.BEGINNING, CartWorkParticipant.PickingDirection.END]:
+        participant.picking_direction = mode
+    elif task is not None:
+        participant.picking_direction = CartWorkParticipant.PickingDirection.MANUAL
+
+    if existing_claim is not None and (task is None or existing_claim.picking_task_id != task.id):
+        existing_claim.status = (
+            PickingTaskClaim.Status.COMPLETED
+            if _task_remaining(existing_claim.picking_task) <= 0
+            else PickingTaskClaim.Status.RELEASED
+        )
         existing_claim.released_at = timezone.now()
         existing_claim.last_activity_at = timezone.now()
         existing_claim.save(update_fields=["status", "released_at", "last_activity_at", "updated_at"])
 
     if task is None:
-        candidates = _claimable_tasks_queryset(cart_work_session.picking_job)
-        if direction == "end":
-            candidates = candidates.order_by("-source_location__code", "-created_at", "-id")
-        task = candidates.first()
+        if mode == CartWorkParticipant.PickingDirection.MANUAL:
+            task = None
+        else:
+            candidates = _ordered_claimable_tasks(cart_work_session.picking_job, reverse=mode == "end")
+            task = candidates[0] if candidates else None
     else:
-        task = (
-            _claimable_tasks_queryset(cart_work_session.picking_job)
-            .filter(pk=task.pk)
+        if _task_remaining(task) <= 0 or task.status in [PickingTask.Status.COMPLETED, PickingTask.Status.CANCELLED]:
+            return None, None, False
+        other_claim = (
+            PickingTaskClaim.objects.select_for_update()
+            .select_related("cart_work_participant__user")
+            .filter(
+                picking_task=task,
+                status=PickingTaskClaim.Status.CLAIMED,
+                cart_work_participant__status=CartWorkParticipant.Status.ACTIVE,
+            )
+            .exclude(cart_work_participant=participant)
             .first()
         )
+        if other_claim is not None:
+            task.claim_conflict_username = other_claim.cart_work_participant.user.username
+            return None, None, False
+        if existing_claim is not None and existing_claim.picking_task_id == task.id:
+            participant.work_state = CartWorkParticipant.WorkState.ACTIVE
+            participant.last_seen_at = timezone.now()
+            participant.save(update_fields=["picking_direction", "work_state", "last_seen_at", "updated_at"])
+            return task, existing_claim, False
 
     if task is None:
         participant.current_picking_task = None
         participant.current_task_claimed_at = None
         participant.confirmed_location = None
+        participant.work_state = (
+            CartWorkParticipant.WorkState.WAITING_FOR_AVAILABLE_LINE
+            if _has_unresolved_cart_work(cart_work_session.picking_job)
+            else CartWorkParticipant.WorkState.COMPLETED_PARTICIPATION
+        )
         participant.last_seen_at = timezone.now()
         participant.save(
             update_fields=[
+                "picking_direction",
+                "work_state",
                 "current_picking_task",
                 "current_task_claimed_at",
                 "confirmed_location",
@@ -402,9 +460,12 @@ def _claim_task_for_participant(
     participant.current_picking_task = task
     participant.current_task_claimed_at = claim.claimed_at
     participant.confirmed_location = None
+    participant.work_state = CartWorkParticipant.WorkState.ACTIVE
     participant.last_seen_at = timezone.now()
     participant.save(
         update_fields=[
+            "picking_direction",
+            "work_state",
             "current_picking_task",
             "current_task_claimed_at",
             "confirmed_location",
@@ -415,7 +476,7 @@ def _claim_task_for_participant(
     return task, claim, True
 
 
-def _participant_for_request(cart_work_session: CartWorkSession, request, *, create_missing=False):
+def _participant_for_request(cart_work_session: CartWorkSession, request, *, create_missing=False, lock=False, touch=False):
     if not request.user or not request.user.is_authenticated:
         return None, None
 
@@ -424,17 +485,23 @@ def _participant_for_request(cart_work_session: CartWorkSession, request, *, cre
         return None, Response({"detail": "Cart work branch could not be resolved."}, status=status.HTTP_400_BAD_REQUEST)
     require_branch_access(request.user, branch)
 
-    participant = (
-        CartWorkParticipant.objects.select_for_update(of=("self",))
-        .select_related("user", "branch", "confirmed_location", "current_picking_task")
-        .filter(
-            cart_work_session=cart_work_session,
-            user=request.user,
-            status=CartWorkParticipant.Status.ACTIVE,
-        )
-        .first()
+    participant_queryset = CartWorkParticipant.objects.select_related(
+        "user", "branch", "confirmed_location", "current_picking_task"
+    ).filter(
+        cart_work_session=cart_work_session,
+        user=request.user,
+        status=CartWorkParticipant.Status.ACTIVE,
     )
+    if lock:
+        participant_queryset = participant_queryset.select_for_update(of=("self",))
+    participant = participant_queryset.first()
+
     if participant is None and create_missing:
+        if not lock:
+            return None, Response(
+                {"detail": "Participant creation requires a locked transaction."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
         existing_active = (
             CartWorkParticipant.objects.select_for_update(of=("self",))
             .select_related("cart_work_session__cart")
@@ -455,7 +522,7 @@ def _participant_for_request(cart_work_session: CartWorkSession, request, *, cre
         participant.was_created = True
     elif participant is not None:
         participant.was_created = False
-    if participant is not None:
+    if participant is not None and touch:
         participant.last_seen_at = timezone.now()
         participant.save(update_fields=["last_seen_at", "updated_at"])
     return participant, None
@@ -465,10 +532,10 @@ def _cart_work_response(cart_work_session: CartWorkSession, request, repair_mess
     participant, error = _participant_for_request(cart_work_session, request, create_missing=False)
     if error is not None:
         return error
-    if participant is not None:
-        _claim_task_for_participant(cart_work_session, participant)
+    if request.user and request.user.is_authenticated and participant is None:
+        return Response({"detail": "You are not an active participant in this cart work."}, status=status.HTTP_403_FORBIDDEN)
 
-    tasks = _job_tasks(cart_work_session.picking_job).order_by("source_location__code", "created_at", "id")
+    tasks = sorted(_job_tasks(cart_work_session.picking_job), key=_task_manifest_sort_key)
     state, confirmed_location_code, instruction = _picking_state(cart_work_session, participant)
     return Response(
         {
@@ -768,6 +835,10 @@ def _picking_state(cart_work_session: CartWorkSession, participant: CartWorkPart
             if confirmed_location is not None and confirmed_location.id == instruction["location"]["id"]
             else "waiting_for_location"
         )
+    elif participant is not None and participant.work_state == CartWorkParticipant.WorkState.WAITING_FOR_AVAILABLE_LINE:
+        state = "waiting_for_available_line"
+    elif _has_unresolved_cart_work(cart_work_session.picking_job):
+        state = "waiting_for_available_line"
     return state, confirmed_code, instruction
 
 
@@ -1303,7 +1374,7 @@ def _pick_for_cart_work(request):
             return Response({"detail": "Cart work session is not active."}, status=status.HTTP_400_BAD_REQUEST)
 
         picking_job = cart_work_session.picking_job
-        participant, error = _participant_for_request(cart_work_session, request, create_missing=True)
+        participant, error = _participant_for_request(cart_work_session, request, create_missing=True, lock=True, touch=True)
         if error is not None:
             return error
         if participant is not None:
@@ -1459,7 +1530,7 @@ def _pick_for_cart_work(request):
 
         next_task = _current_pick_task_queryset(picking_job).first()
         if participant is not None:
-            _claim_task_for_participant(cart_work_session, participant)
+            _claim_task_for_participant(cart_work_session, participant, mode=participant.picking_direction)
             participant.refresh_from_db()
             next_participant_task = participant.current_picking_task
             if next_participant_task is None or next_participant_task.source_location_id != confirmed_location.id:
@@ -1872,7 +1943,7 @@ class ScannerPickingShortageChallengeView(APIView):
             if cart_work_session is None:
                 return Response({"detail": "Cart work session not found."}, status=status.HTTP_404_NOT_FOUND)
             _repair_stale_current_tasks(cart_work_session, request)
-            participant, error = _participant_for_request(cart_work_session, request, create_missing=True)
+            participant, error = _participant_for_request(cart_work_session, request, create_missing=True, lock=True, touch=True)
             if error is not None:
                 return error
             if participant is not None:
@@ -1967,7 +2038,7 @@ class ScannerPickingReportShortageView(APIView):
             participant = None
             confirmed_location_id = cart_work_session.confirmed_location_id
             if request.user and request.user.is_authenticated:
-                participant, error = _participant_for_request(cart_work_session, request, create_missing=False)
+                participant, error = _participant_for_request(cart_work_session, request, create_missing=False, lock=True, touch=True)
                 if error is not None:
                     return error
                 if participant is None or payload.get("participant_id") != participant.id:
@@ -2099,7 +2170,7 @@ class ScannerPickingReportShortageView(APIView):
                         released_at=timezone.now(),
                         last_activity_at=timezone.now(),
                     )
-                _claim_task_for_participant(cart_work_session, participant)
+                _claim_task_for_participant(cart_work_session, participant, mode=participant.picking_direction)
                 participant.refresh_from_db()
                 next_participant_task = participant.current_picking_task
                 if next_participant_task is None or next_participant_task.source_location_id != confirmed_location_id:
@@ -2176,7 +2247,7 @@ class ScannerPickingConfirmLocationView(APIView):
             if cart_work_session.status not in [CartWorkSession.Status.ACTIVE, CartWorkSession.Status.CONTROL]:
                 return Response({"detail": "Cart work session is not active."}, status=status.HTTP_400_BAD_REQUEST)
 
-            participant, error = _participant_for_request(cart_work_session, request, create_missing=True)
+            participant, error = _participant_for_request(cart_work_session, request, create_missing=True, lock=True, touch=True)
             if error is not None:
                 return error
             repair_messages = _repair_stale_current_tasks(cart_work_session, request)
@@ -2513,6 +2584,7 @@ class ScannerTaskStartView(APIView):
                 picking_job=picking_job,
                 scanner_session=session,
             )
+            _repair_stale_current_tasks(cart_work_session, request)
             participant = None
             if request.user and request.user.is_authenticated:
                 branch = _cart_work_branch(cart_work_session)
@@ -2562,15 +2634,7 @@ class ScannerCartWorkCurrentView(APIView):
         if cart_work_session is None:
             return Response({"detail": "Cart work session not found."}, status=status.HTTP_404_NOT_FOUND)
 
-        with transaction.atomic():
-            cart_work_session = (
-                CartWorkSession.objects.select_for_update(of=("self",))
-                .select_related("cart", "picking_job", "scanner_session")
-                .get(pk=cart_work_session.id)
-            )
-            repair_messages = _repair_stale_current_tasks(cart_work_session, request)
-
-        return _cart_work_response(cart_work_session, request, repair_messages)
+        return _cart_work_response(cart_work_session, request)
 
 
 class ScannerCartWorkJoinView(APIView):
@@ -2600,10 +2664,11 @@ class ScannerCartWorkJoinView(APIView):
             if cart_work_session.status not in [CartWorkSession.Status.ACTIVE, CartWorkSession.Status.CONTROL]:
                 return Response({"detail": "Cart work session is not active."}, status=status.HTTP_400_BAD_REQUEST)
 
-            participant, error = _participant_for_request(cart_work_session, request, create_missing=True)
+            participant, error = _participant_for_request(cart_work_session, request, create_missing=True, lock=True, touch=True)
             if error is not None:
                 return error
             was_created = getattr(participant, "was_created", False)
+            repair_messages = _repair_stale_current_tasks(cart_work_session, request)
             _claim_task_for_participant(cart_work_session, participant)
             if was_created:
                 AuditLog.objects.create(
@@ -2618,7 +2683,7 @@ class ScannerCartWorkJoinView(APIView):
                     message=f"{request.user.username} joined cart work {cart_work_session.cart.code}.",
                 )
 
-        response = _cart_work_response(cart_work_session, request)
+        response = _cart_work_response(cart_work_session, request, repair_messages)
         response.data["message"] = "Cart work joined."
         response.data["session"] = _session_data(cart_work_session.scanner_session)
         return response
@@ -2630,7 +2695,13 @@ class ScannerCartWorkClaimView(APIView):
         if error is not None:
             return error
         task_id = request.data.get("picking_task_id")
-        direction = str(request.data.get("direction") or "beginning").strip()
+        mode = str(request.data.get("mode") or request.data.get("direction") or "beginning").strip()
+        if mode not in ["beginning", "end", "specific"]:
+            return Response({"detail": "mode must be beginning, end, or specific."}, status=status.HTTP_400_BAD_REQUEST)
+        if mode == "specific" and not task_id:
+            return Response({"detail": "picking_task_id is required for specific mode."}, status=status.HTTP_400_BAD_REQUEST)
+        if task_id and mode in ["beginning", "end"]:
+            task_id = None
 
         with transaction.atomic():
             cart_work_session = (
@@ -2638,9 +2709,10 @@ class ScannerCartWorkClaimView(APIView):
                 .select_related("cart", "picking_job", "scanner_session")
                 .get(pk=cart_work_session.id)
             )
-            participant, error = _participant_for_request(cart_work_session, request, create_missing=True)
+            participant, error = _participant_for_request(cart_work_session, request, create_missing=True, lock=True, touch=True)
             if error is not None:
                 return error
+            repair_messages = _repair_stale_current_tasks(cart_work_session, request)
             task = None
             if task_id:
                 task = (
@@ -2655,8 +2727,21 @@ class ScannerCartWorkClaimView(APIView):
                 cart_work_session,
                 participant,
                 task=task,
-                direction=direction,
+                mode=mode,
+                keep_existing=False,
             )
+            if selected_task is None:
+                if task is not None and hasattr(task, "claim_conflict_username"):
+                    return Response(
+                        {"detail": f"This picking line is already handled by {task.claim_conflict_username}."},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                if task is not None:
+                    return Response(
+                        {"detail": "This picking line is no longer available."},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                return Response({"detail": "No eligible picking line is available."}, status=status.HTTP_409_CONFLICT)
             if selected_task is not None and created:
                 AuditLog.objects.create(
                     actor=request.user if request.user.is_authenticated else None,
@@ -2672,13 +2757,14 @@ class ScannerCartWorkClaimView(APIView):
                     reference=selected_task.order_line.order.external_reference,
                     entity_name="PickingTaskClaim",
                     entity_id=str(claim.id),
+                    result=mode,
                     message=(
-                        f"{_scanner_actor_code(request)} claimed {selected_task.order_line.product.sku} "
+                        f"{_scanner_actor_code(request)} selected {selected_task.order_line.product.sku} "
                         f"at {selected_task.source_location.code}."
                     ),
                 )
 
-        return _cart_work_response(cart_work_session, request)
+        return _cart_work_response(cart_work_session, request, repair_messages)
 
 
 class ScannerCartWorkLeaveView(APIView):
@@ -2692,7 +2778,7 @@ class ScannerCartWorkLeaveView(APIView):
                 .select_related("cart", "picking_job", "scanner_session")
                 .get(pk=cart_work_session.id)
             )
-            participant, error = _participant_for_request(cart_work_session, request, create_missing=False)
+            participant, error = _participant_for_request(cart_work_session, request, create_missing=False, lock=True, touch=True)
             if error is not None:
                 return error
             if participant is None:

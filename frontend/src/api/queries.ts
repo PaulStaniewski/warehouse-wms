@@ -417,15 +417,18 @@ export function useScannerCartWorkClaim() {
     mutationFn: async ({
       cartWorkSessionId,
       direction,
+      mode,
       pickingTaskId,
     }: {
       cartWorkSessionId: number;
       direction?: "beginning" | "end";
+      mode?: "beginning" | "end" | "specific";
       pickingTaskId?: number;
     }) => {
       const response = await apiClient.post<ScannerCartWorkResponse>("/scanner/cart-work/claim/", {
         cart_work_session_id: cartWorkSessionId,
         direction,
+        mode,
         picking_task_id: pickingTaskId,
       });
       return response.data;

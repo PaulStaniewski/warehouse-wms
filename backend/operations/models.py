@@ -713,10 +713,26 @@ class CartWorkParticipant(TimestampedModel):
         ACTIVE = "active", "Active"
         LEFT = "left", "Left"
 
+    class PickingDirection(models.TextChoices):
+        BEGINNING = "beginning", "Beginning"
+        END = "end", "End"
+        MANUAL = "manual", "Manual selection"
+
+    class WorkState(models.TextChoices):
+        ACTIVE = "active", "Active"
+        WAITING_FOR_AVAILABLE_LINE = "waiting_for_available_line", "Waiting for available line"
+        COMPLETED_PARTICIPATION = "completed_participation", "Completed participation"
+
     cart_work_session = models.ForeignKey(CartWorkSession, on_delete=models.CASCADE, related_name="participants")
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="cart_work_participations")
     branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="cart_work_participants")
     status = models.CharField(max_length=32, choices=Status.choices, default=Status.ACTIVE)
+    picking_direction = models.CharField(
+        max_length=32,
+        choices=PickingDirection.choices,
+        default=PickingDirection.BEGINNING,
+    )
+    work_state = models.CharField(max_length=64, choices=WorkState.choices, default=WorkState.ACTIVE)
     current_picking_task = models.ForeignKey(
         PickingTask,
         on_delete=models.PROTECT,
@@ -754,6 +770,8 @@ class CartWorkParticipant(TimestampedModel):
             models.Index(fields=["cart_work_session", "status"]),
             models.Index(fields=["user", "status"]),
             models.Index(fields=["branch", "status"]),
+            models.Index(fields=["picking_direction"]),
+            models.Index(fields=["work_state"]),
         ]
 
     def __str__(self) -> str:

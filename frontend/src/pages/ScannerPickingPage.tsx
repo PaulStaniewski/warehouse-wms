@@ -107,6 +107,10 @@ function getStepLabel(pickingState: string, active: boolean) {
     return "Pick recorded";
   }
 
+  if (pickingState === "waiting_for_available_line") {
+    return "Waiting for other workers";
+  }
+
   return "Waiting for location";
 }
 
@@ -194,6 +198,7 @@ export function ScannerPickingPage() {
   const hasStoredCartWork = Boolean(activeSession?.cart_work_session);
   const tasks = hasStoredCartWork ? cartWork.data?.tasks ?? [] : [];
   const work = activeSession?.cart_work_session ? cartWork.data?.cart_work_session : undefined;
+  const participant = hasStoredCartWork ? cartWork.data?.participant ?? null : null;
   const instruction = hasStoredCartWork ? cartWork.data?.current_instruction ?? null : null;
   const pickingState = hasStoredCartWork ? cartWork.data?.state ?? "waiting_for_location" : "waiting_for_location";
   const active = Boolean(work && instruction && pickingState !== "completed");
@@ -410,6 +415,7 @@ export function ScannerPickingPage() {
       const result = await claimLine.mutateAsync({
         cartWorkSessionId: work.id,
         direction,
+        mode: pickingTaskId ? "specific" : direction,
         pickingTaskId,
       });
       setMessage({
@@ -661,6 +667,7 @@ export function ScannerPickingPage() {
           <span>Picked: <strong>{formatQuantity(totalPicked)}</strong></span>
           <span>Prepared: <strong>{formatQuantity(totalPrepared)}</strong></span>
           <span>Remaining: <strong>{formatQuantity(totalRemaining)}</strong></span>
+          {participant && <span>Picking mode: <strong>{participant.picking_direction_label}</strong></span>}
           {work && (
             <button disabled={leaveCartWork.isPending} onClick={() => void handleLeaveCartWork()} type="button">
               Leave cart work
@@ -679,6 +686,13 @@ export function ScannerPickingPage() {
                 </span>
               ))}
             </div>
+          </section>
+        )}
+
+        {work && !instruction && pickingState === "waiting_for_available_line" && (
+          <section className="concept-complete-card">
+            <strong>Waiting for other workers</strong>
+            <span>No unclaimed picking lines are currently available. Shared cart work is still in progress.</span>
           </section>
         )}
 
@@ -852,7 +866,7 @@ export function ScannerPickingPage() {
           </form>
         </section>
 
-        {!instruction && work && pickingState === "completed" && (
+        {!instruction && work && pickingState === "completed" && ["picked", "completed"].includes(work.picking_job.status) && (
           <section className="concept-complete-card">
             <strong>Picking completed</strong>
             <span>All required work for this cart is complete.</span>
