@@ -1,4 +1,4 @@
-import { type FormEvent, useState } from "react";
+import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import axios from "axios";
 import { Link, useNavigate } from "react-router-dom";
@@ -9,6 +9,7 @@ import { useScannerCartWork, useScannerCartWorkJoin, useScannerJobs, useScannerT
 import { clearStoredScannerCartWork, storeScannerSession, useStoredScannerSession } from "../api/scannerSession";
 import { DataState } from "../components/DataState";
 import { PageHeader } from "../components/PageHeader";
+import { ScannerScanInput, ScannerStatusMessage } from "../components/scanner/ScannerUi";
 import type { PickingJob } from "../types/api";
 
 
@@ -55,15 +56,14 @@ export function ScannerTasksPage() {
     (job) => job.status === "in_progress" && !myActiveJobs.some((activeJob) => activeJob.id === job.id),
   );
 
-  async function handleStart(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  async function handleStart(scannedCartCode: string) {
     if (!selectedJob) {
       return;
     }
 
     setMessage(null);
     try {
-      const result = await startJob.mutateAsync({ cartCode, jobId: selectedJob.id });
+      const result = await startJob.mutateAsync({ cartCode: scannedCartCode, jobId: selectedJob.id });
       storeScannerSession({
         ...result.session,
         cart_work_session: result.cart_work_session.id,
@@ -153,7 +153,7 @@ export function ScannerTasksPage() {
     <>
       <PageHeader title="Tasks" description="Start available picking jobs or resume your active cart work." />
 
-      {message && <div className={`scanner-message scanner-message--${message.type}`}>{message.text}</div>}
+      {message && <ScannerStatusMessage type={message.type}>{message.text}</ScannerStatusMessage>}
 
       <section className="scanner-context-strip">
         <div>
@@ -239,26 +239,24 @@ export function ScannerTasksPage() {
       </DataState>
 
       {selectedJob && selectedJob.status === "available" && (
-        <form className="scanner-workflow-panel" onSubmit={handleStart}>
+        <section className="scanner-workflow-panel">
           <header>
             <span>1</span>
             <h2>Start Picking Job #{selectedJob.id}</h2>
           </header>
-          <label htmlFor="task-cart-code">
-            <span>Scan cart</span>
-            <input
-              autoComplete="off"
-              autoFocus
-              id="task-cart-code"
-              onChange={(event) => setCartCode(event.target.value)}
-              placeholder="WOZEK-01"
-              value={cartCode}
-            />
-          </label>
-          <button disabled={!cartCode.trim() || startJob.isPending} type="submit">
-            Start
-          </button>
-        </form>
+          <ScannerScanInput
+            autoFocus
+            buttonLabel="Start"
+            id="task-cart-code"
+            isPending={startJob.isPending}
+            label="Scan cart"
+            onChange={setCartCode}
+            onSubmit={handleStart}
+            pendingLabel="Starting..."
+            placeholder="WOZEK-01"
+            value={cartCode}
+          />
+        </section>
       )}
     </>
   );

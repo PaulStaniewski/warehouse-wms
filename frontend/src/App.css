@@ -2926,6 +2926,84 @@ a {
   text-transform: uppercase;
 }
 
+.scanner-proforma-list {
+  display: grid;
+  gap: 12px;
+}
+
+.scanner-proforma-card {
+  display: grid;
+  gap: 14px;
+  border: 2px solid #dce3e8;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 14px;
+}
+
+.scanner-proforma-card--selected {
+  border-color: #1d4f5d;
+  background: #f7fbfc;
+}
+
+.scanner-proforma-card--disabled {
+  background: #f5f7f8;
+  color: #8a9aa3;
+}
+
+.scanner-proforma-card label {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.scanner-proforma-card input {
+  width: 24px;
+  height: 24px;
+  margin-top: 4px;
+}
+
+.scanner-proforma-card strong,
+.scanner-proforma-card small {
+  display: block;
+}
+
+.scanner-proforma-card label strong {
+  color: #172026;
+  font-size: 1.25rem;
+}
+
+.scanner-proforma-card small {
+  color: #647782;
+  font-weight: 800;
+}
+
+.scanner-proforma-card__metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  gap: 8px;
+}
+
+.scanner-proforma-card__metrics div {
+  border: 1px solid #e8edf0;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 10px;
+}
+
+.scanner-proforma-card__metrics span {
+  display: block;
+  color: #72838d;
+  font-size: 0.7rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.scanner-proforma-card__metrics strong {
+  margin-top: 4px;
+  color: #172026;
+}
+
 .scanner-muted-row {
   color: #8a9aa3;
 }

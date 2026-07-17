@@ -140,6 +140,7 @@ export function ScannerQuickTransferPage() {
             label="Source location"
             onChange={setSourceInput}
             onSubmit={submitSource}
+            pendingLabel="Checking..."
             placeholder="Example A-01-01"
             value={sourceInput}
           />
@@ -163,6 +164,7 @@ export function ScannerQuickTransferPage() {
             label="Product SKU or barcode"
             onChange={setProductInput}
             onSubmit={submitProduct}
+            pendingLabel="Checking..."
             placeholder="Example FILTR-001"
             value={productInput}
           />
@@ -193,6 +195,7 @@ export function ScannerQuickTransferPage() {
             label="Target location"
             onChange={setTargetInput}
             onSubmit={submitTarget}
+            pendingLabel="Checking..."
             placeholder="Example A-02-01"
             value={targetInput}
           />

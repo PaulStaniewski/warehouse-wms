@@ -5,6 +5,7 @@ import { Link, useParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 
 import { useScannerCycleCountRecount, useScannerCycleCountRecountSubmit } from "../api/queries";
+import { ScannerStatusMessage } from "../components/scanner/ScannerUi";
 
 function formatError(error: unknown) {
   if (!axios.isAxiosError(error)) return "Recount could not be submitted.";
@@ -25,7 +26,7 @@ export function ScannerCycleCountRecountDetailPage() {
   const [locationCode, setLocationCode] = useState("");
   const [productCode, setProductCode] = useState("");
   const [quantity, setQuantity] = useState("");
-  const [message, setMessage] = useState("");
+  const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
   useEffect(() => {
     locationRef.current?.focus();
@@ -41,7 +42,7 @@ export function ScannerCycleCountRecountDetailPage() {
         productCode,
         quantity,
       });
-      setMessage("Recount submitted.");
+      setMessage({ type: "success", text: "Recount submitted." });
       setLocationCode("");
       setProductCode("");
       setQuantity("");
@@ -53,7 +54,8 @@ export function ScannerCycleCountRecountDetailPage() {
         queryClient.invalidateQueries({ queryKey: ["audit-logs", "current"] }),
       ]);
     } catch (error) {
-      setMessage(formatError(error));
+      setMessage({ type: "error", text: formatError(error) });
+      window.setTimeout(() => locationRef.current?.focus(), 0);
     }
   }
 
@@ -112,7 +114,7 @@ export function ScannerCycleCountRecountDetailPage() {
                 <span>Physical quantity</span>
                 <input inputMode="decimal" min="0" onChange={(event) => setQuantity(event.target.value)} type="number" value={quantity} />
               </label>
-              {message && <div className="state-box">{message}</div>}
+              {message && <ScannerStatusMessage type={message.type}>{message.text}</ScannerStatusMessage>}
               <button disabled={submitRecount.isPending || !locationCode || !productCode || quantity === ""} type="submit">
                 {submitRecount.isPending ? "Submitting..." : "Submit recount"}
               </button>

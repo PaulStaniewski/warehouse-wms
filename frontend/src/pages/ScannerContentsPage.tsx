@@ -1,10 +1,11 @@
-import { type FormEvent, useCallback, useRef, useState } from "react";
+import { useCallback, useState } from "react";
 import axios from "axios";
 import { ArrowLeft, Camera } from "lucide-react";
 import { Link } from "react-router-dom";
 
 import { useScannerContents } from "../api/queries";
 import { CameraBarcodeScanner } from "../components/scanner/CameraBarcodeScanner";
+import { ScannerScanInput, ScannerStatusMessage } from "../components/scanner/ScannerUi";
 import type { ScannerContentsItem, ScannerContentsResponse } from "../types/api";
 import { sourceVerificationStatusLabel } from "../types/display";
 
@@ -80,7 +81,6 @@ export function ScannerContentsPage() {
   const [inputCode, setInputCode] = useState("");
   const [searchCode, setSearchCode] = useState("");
   const [cameraOpen, setCameraOpen] = useState(false);
-  const inputRef = useRef<HTMLInputElement | null>(null);
   const lookup = useScannerContents(searchCode);
 
   const submitCode = useCallback((code: string) => {
@@ -92,15 +92,9 @@ export function ScannerContentsPage() {
     setSearchCode(trimmedCode);
   }, []);
 
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    submitCode(inputCode);
-  }
-
   function handleScanAnother() {
     setInputCode("");
     setSearchCode("");
-    window.setTimeout(() => inputRef.current?.focus(), 0);
   }
 
   const handleCameraDetected = useCallback((code: string) => {
@@ -110,7 +104,6 @@ export function ScannerContentsPage() {
 
   function handleCameraClose() {
     setCameraOpen(false);
-    window.setTimeout(() => inputRef.current?.focus(), 0);
   }
 
   return (
@@ -125,36 +118,33 @@ export function ScannerContentsPage() {
       <CameraBarcodeScanner isOpen={cameraOpen} onClose={handleCameraClose} onDetected={handleCameraDetected} />
 
       {!searchCode && (
-        <form className="scanner-workflow-panel" onSubmit={handleSubmit}>
+        <section className="scanner-workflow-panel">
           <header>
             <span>1</span>
             <h2>Contents</h2>
           </header>
-          <label htmlFor="contents-code">
-            <span>Scan a warehouse code</span>
-            <input
-              autoComplete="off"
-              autoFocus
-              id="contents-code"
-              onChange={(event) => setInputCode(event.target.value)}
-              placeholder="Location, cart, or label code"
-              ref={inputRef}
-              value={inputCode}
-            />
-          </label>
-          <button disabled={!inputCode.trim() || lookup.isFetching} type="submit">
-            {lookup.isFetching ? "Searching..." : "Show contents"}
-          </button>
+          <ScannerScanInput
+            autoFocus={!cameraOpen}
+            buttonLabel="Show contents"
+            id="contents-code"
+            isPending={lookup.isFetching}
+            label="Scan a warehouse code"
+            onChange={setInputCode}
+            onSubmit={submitCode}
+            pendingLabel="Searching..."
+            placeholder="Location, cart, or label code"
+            value={inputCode}
+          />
           <button className="scanner-camera-button" onClick={() => setCameraOpen(true)} type="button">
             <Camera size={19} />
             Scan with camera
           </button>
-        </form>
+        </section>
       )}
 
       {lookup.isError && (
         <>
-          <div className="scanner-message scanner-message--error">{getErrorMessage(lookup.error)}</div>
+          <ScannerStatusMessage type="error">{getErrorMessage(lookup.error)}</ScannerStatusMessage>
           <button className="scanner-confirm-button" onClick={handleScanAnother} type="button">
             Scan another code
           </button>

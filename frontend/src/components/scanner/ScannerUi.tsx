@@ -9,6 +9,7 @@ type ScannerScanInputProps = {
   placeholder?: string;
   helperText?: string;
   buttonLabel?: string;
+  pendingLabel?: string;
   disabled?: boolean;
   isPending?: boolean;
   autoFocus?: boolean;
@@ -37,6 +38,7 @@ export function ScannerScanInput({
   label,
   onChange,
   onSubmit,
+  pendingLabel = "Working...",
   placeholder,
   value,
 }: ScannerScanInputProps) {
@@ -76,7 +78,7 @@ export function ScannerScanInput({
         {helperText && <small>{helperText}</small>}
       </label>
       <button disabled={!value.trim() || disabled || isPending} type="submit">
-        {isPending ? "Working..." : buttonLabel}
+        {isPending ? pendingLabel : buttonLabel}
       </button>
     </form>
   );

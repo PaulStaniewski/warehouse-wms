@@ -8,6 +8,7 @@ import { useAuth } from "../api/AuthContext";
 import { useScannerCreateJobs, useScannerProformas } from "../api/queries";
 import { DataState } from "../components/DataState";
 import { PageHeader } from "../components/PageHeader";
+import { ScannerStatusMessage } from "../components/scanner/ScannerUi";
 
 function getErrorMessage(error: unknown, fallback: string) {
   return axios.isAxiosError(error) ? error.response?.data?.detail || fallback : fallback;
@@ -72,7 +73,7 @@ export function ScannerProformasPage() {
     <>
       <PageHeader title="Proformas" description="Select routes and create a picking job." />
 
-      {message && <div className={`scanner-message scanner-message--${message.type}`}>{message.text}</div>}
+      {message && <ScannerStatusMessage type={message.type}>{message.text}</ScannerStatusMessage>}
 
       <section className="scanner-proforma-hero">
         <div>
@@ -133,56 +134,65 @@ export function ScannerProformasPage() {
         {rows.length === 0 ? (
           <div className="state-box">No proformas found for the working branch.</div>
         ) : (
-          <section className="scanner-table-panel">
-            <table>
-              <thead>
-                <tr>
-                  <th></th>
-                  <th>Route</th>
-                  <th>Status</th>
-                  <th>AKT</th>
-                  <th>Lines</th>
-                  <th>Started</th>
-                  <th>Picked</th>
-                  <th>Prepared</th>
-                  <th>Departure</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((run) => {
-                  const selected = selectedIds.includes(run.id);
-                  return (
-                    <tr
-                      className={`${!run.is_selectable ? "scanner-muted-row" : ""} ${selected ? "scanner-selected-row" : ""}`}
-                      key={run.id}
-                      onClick={() => toggleRouteRun(run.id)}
-                    >
-                      <td>
-                        <input
-                          checked={selected}
-                          disabled={!run.is_selectable}
-                          onChange={() => toggleRouteRun(run.id)}
-                          onClick={(event) => event.stopPropagation()}
-                          type="checkbox"
-                        />
-                      </td>
-                      <td>
-                        <strong>{run.route_code}</strong>
-                        <br />
-                        <span>{run.branch_code} / run {run.run_number}</span>
-                      </td>
-                      <td>{run.status.replaceAll("_", " ")}</td>
-                      <td>{run.akt}</td>
-                      <td>{run.lines}</td>
-                      <td>{run.started}</td>
-                      <td>{run.picked}</td>
-                      <td>{run.prepared}</td>
-                      <td>{formatTime(run.departure_time)}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+          <section className="scanner-proforma-list">
+            {rows.map((run) => {
+              const selected = selectedIds.includes(run.id);
+              return (
+                <article
+                  className={[
+                    "scanner-proforma-card",
+                    !run.is_selectable ? "scanner-proforma-card--disabled" : "",
+                    selected ? "scanner-proforma-card--selected" : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
+                  key={run.id}
+                >
+                  <label>
+                    <input
+                      checked={selected}
+                      disabled={!run.is_selectable}
+                      onChange={() => toggleRouteRun(run.id)}
+                      type="checkbox"
+                    />
+                    <span>
+                      <strong>{run.route_code}</strong>
+                      <small>{run.branch_code} / run {run.run_number}</small>
+                    </span>
+                  </label>
+                  <div className="scanner-proforma-card__metrics">
+                    <div>
+                      <span>Status</span>
+                      <strong>{run.status.replaceAll("_", " ")}</strong>
+                    </div>
+                    <div>
+                      <span>AKT</span>
+                      <strong>{run.akt}</strong>
+                    </div>
+                    <div>
+                      <span>Lines</span>
+                      <strong>{run.lines}</strong>
+                    </div>
+                    <div>
+                      <span>Started</span>
+                      <strong>{run.started}</strong>
+                    </div>
+                    <div>
+                      <span>Picked</span>
+                      <strong>{run.picked}</strong>
+                    </div>
+                    <div>
+                      <span>Prepared</span>
+                      <strong>{run.prepared}</strong>
+                    </div>
+                    <div>
+                      <span>Departure</span>
+                      <strong>{formatTime(run.departure_time)}</strong>
+                    </div>
+                  </div>
+                </article>
+              );
+            })}
           </section>
         )}
       </DataState>

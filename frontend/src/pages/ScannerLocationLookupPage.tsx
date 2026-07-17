@@ -46,6 +46,7 @@ export function ScannerLocationLookupPage() {
           label="Scan location code"
           onChange={setInputCode}
           onSubmit={handleSubmit}
+          pendingLabel="Searching..."
           placeholder="Scan or type location and press Enter"
           value={inputCode}
         />

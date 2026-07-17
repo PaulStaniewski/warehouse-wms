@@ -1,5 +1,5 @@
 import axios from "axios";
-import { type FormEvent, useMemo, useState } from "react";
+import { type FormEvent, useMemo, useRef, useState } from "react";
 import { ArrowLeft, CheckCircle2 } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
@@ -9,6 +9,7 @@ import {
   useScannerCycleCountSaveLine,
   useScannerCycleCountSubmitLocation,
 } from "../api/queries";
+import { ScannerStatusMessage } from "../components/scanner/ScannerUi";
 
 function errorMessage(error: unknown) {
   if (!axios.isAxiosError(error)) return "Action failed.";
@@ -25,6 +26,7 @@ export function ScannerCycleCountDetailPage() {
   const [productCode, setProductCode] = useState("");
   const [quantity, setQuantity] = useState("1");
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const productInputRef = useRef<HTMLInputElement | null>(null);
   const sessionId = Number(id);
   const selectedLocation = useMemo(
     () => count.data?.locations.find((location) => location.location === selectedLocationId) ?? null,
@@ -41,8 +43,10 @@ export function ScannerCycleCountDetailPage() {
       setMessage({ type: "success", text: "Count saved." });
       setProductCode("");
       setQuantity("1");
+      window.setTimeout(() => productInputRef.current?.focus(), 0);
     } catch (error) {
       setMessage({ type: "error", text: errorMessage(error) });
+      window.setTimeout(() => productInputRef.current?.focus(), 0);
     }
   }
 
@@ -73,7 +77,7 @@ export function ScannerCycleCountDetailPage() {
       <div className="scanner-links">
         <Link to="/scanner/cycle-counts"><ArrowLeft size={17} />Cycle counts</Link>
       </div>
-      {message && <div className={`scanner-message scanner-message--${message.type}`}>{message.text}</div>}
+      {message && <ScannerStatusMessage type={message.type}>{message.text}</ScannerStatusMessage>}
       <section className="scanner-home-header">
         <p>{count.data?.session.reference ?? "Cycle Count"}</p>
         <h1>Blind location count</h1>
@@ -105,7 +109,13 @@ export function ScannerCycleCountDetailPage() {
               <form className="scanner-scan-panel" onSubmit={saveCount}>
                 <label>
                   <span>Product SKU or barcode</span>
-                  <input autoFocus onChange={(event) => setProductCode(event.target.value)} placeholder="Scan product" value={productCode} />
+                  <input
+                    autoFocus
+                    onChange={(event) => setProductCode(event.target.value)}
+                    placeholder="Scan product"
+                    ref={productInputRef}
+                    value={productCode}
+                  />
                 </label>
                 <label>
                   <span>Physical quantity</span>

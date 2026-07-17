@@ -42,6 +42,7 @@ export function ScannerProductLookupPage() {
           label="Scan product SKU, barcode, or code"
           onChange={setInputCode}
           onSubmit={handleSubmit}
+          pendingLabel="Searching..."
           placeholder="Scan or type code and press Enter"
           value={inputCode}
         />
