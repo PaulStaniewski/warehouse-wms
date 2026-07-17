@@ -107,10 +107,31 @@ export function useProducts() {
   });
 }
 
+export function useProductSearch(search: string) {
+  return useQuery({
+    queryKey: ["products", "search", search],
+    queryFn: () => getList<Product>(`/products/${search ? `?search=${encodeURIComponent(search)}` : ""}`),
+  });
+}
+
 export function useInventoryItems(branch?: string) {
   return useQuery({
     queryKey: ["inventory-items", branch],
     queryFn: () => getList<InventoryItem>(`/inventory-items/${branch ? `?branch=${branch}` : ""}`),
+  });
+}
+
+export function useInventoryPosition(branch?: string, location?: number | string, product?: number | string) {
+  return useQuery({
+    enabled: Boolean(branch && location && product),
+    queryKey: ["inventory-position", branch, location, product],
+    queryFn: async () => {
+      const params = new URLSearchParams();
+      if (branch) params.set("branch", branch);
+      if (location) params.set("location", String(location));
+      if (product) params.set("product", String(product));
+      return getList<InventoryItem>(`/inventory-items/?${params.toString()}`);
+    },
   });
 }
 
@@ -140,7 +161,7 @@ export function useStockTransfers(filters: StockTransferListFilters = {}) {
       if (filters.dateFrom) params.set("date_from", filters.dateFrom);
       if (filters.dateTo) params.set("date_to", filters.dateTo);
       if (filters.page && filters.page > 1) params.set("page", String(filters.page));
-      return getList<StockMovement>(`/stock-adjustments/?${params.toString()}`);
+      return getList<StockMovement>(`/stock-movements/?${params.toString()}`);
     },
   });
 }
@@ -150,7 +171,7 @@ export function useStockTransfer(movementId?: string) {
     enabled: Boolean(movementId),
     queryKey: ["stock-transfer", movementId],
     queryFn: async () => {
-      const response = await apiClient.get<StockMovement>(`/stock-adjustments/${movementId}/`);
+      const response = await apiClient.get<StockMovement>(`/stock-movements/${movementId}/`);
       return response.data;
     },
   });
@@ -165,7 +186,18 @@ export type StockAdjustmentListFilters = {
   page?: number;
   performedBy?: string;
   product?: string;
+  reasonCode?: string;
   search?: string;
+};
+
+export type CreateStockAdjustmentPayload = {
+  branch: string;
+  direction: "increase" | "decrease";
+  location: number | string;
+  note: string;
+  product: number | string;
+  quantity: string;
+  reasonCode: string;
 };
 
 export function useStockAdjustments(filters: StockAdjustmentListFilters = {}) {
@@ -179,11 +211,12 @@ export function useStockAdjustments(filters: StockAdjustmentListFilters = {}) {
       if (filters.product) params.set("product", filters.product);
       if (filters.location) params.set("location", filters.location);
       if (filters.direction) params.set("adjustment_direction", filters.direction);
+      if (filters.reasonCode) params.set("adjustment_reason", filters.reasonCode);
       if (filters.performedBy) params.set("performed_by", filters.performedBy);
       if (filters.dateFrom) params.set("date_from", filters.dateFrom);
       if (filters.dateTo) params.set("date_to", filters.dateTo);
       if (filters.page && filters.page > 1) params.set("page", String(filters.page));
-      return getList<StockMovement>(`/stock-movements/?${params.toString()}`);
+      return getList<StockMovement>(`/stock-adjustments/?${params.toString()}`);
     },
   });
 }
@@ -193,7 +226,24 @@ export function useStockAdjustment(movementId?: string) {
     enabled: Boolean(movementId),
     queryKey: ["stock-adjustment", movementId],
     queryFn: async () => {
-      const response = await apiClient.get<StockMovement>(`/stock-movements/${movementId}/`);
+      const response = await apiClient.get<StockMovement>(`/stock-adjustments/${movementId}/`);
+      return response.data;
+    },
+  });
+}
+
+export function useCreateStockAdjustment() {
+  return useMutation({
+    mutationFn: async (payload: CreateStockAdjustmentPayload) => {
+      const response = await apiClient.post<StockMovement>("/stock-adjustments/", {
+        branch: payload.branch,
+        direction: payload.direction,
+        location: payload.location,
+        note: payload.note,
+        product: payload.product,
+        quantity: payload.quantity,
+        reason_code: payload.reasonCode,
+      });
       return response.data;
     },
   });
@@ -224,6 +274,19 @@ export function useLocations(branch?: string) {
   return useQuery({
     queryKey: ["locations", branch],
     queryFn: () => getList<Location>(`/locations/${branch ? `?branch=${branch}` : ""}`),
+  });
+}
+
+export function useLocationSearch(branch?: string, search = "") {
+  return useQuery({
+    enabled: Boolean(branch),
+    queryKey: ["locations", "search", branch, search],
+    queryFn: () => {
+      const params = new URLSearchParams();
+      if (branch) params.set("branch", branch);
+      if (search) params.set("search", search);
+      return getList<Location>(`/locations/?${params.toString()}`);
+    },
   });
 }
 

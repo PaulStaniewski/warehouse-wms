@@ -42,6 +42,7 @@ import { SourceDiscrepancyReviewDetailPage } from "./pages/SourceDiscrepancyRevi
 import { SourceDiscrepancyReviewsPage } from "./pages/SourceDiscrepancyReviewsPage";
 import { SourceStockVerificationDetailPage } from "./pages/SourceStockVerificationDetailPage";
 import { SourceStockVerificationsPage } from "./pages/SourceStockVerificationsPage";
+import { StockAdjustmentCreatePage } from "./pages/StockAdjustmentCreatePage";
 import { StockAdjustmentDetailPage } from "./pages/StockAdjustmentDetailPage";
 import { StockAdjustmentsPage } from "./pages/StockAdjustmentsPage";
 import { StockTransferDetailPage } from "./pages/StockTransferDetailPage";
@@ -206,6 +207,7 @@ function App() {
             <Route path="wms/stock-transfers" element={<StockTransfersPage />} />
             <Route path="wms/stock-transfers/:id" element={<StockTransferDetailPage />} />
             <Route path="wms/stock-adjustments" element={<StockAdjustmentsPage />} />
+            <Route path="wms/stock-adjustments/new" element={<StockAdjustmentCreatePage />} />
             <Route path="wms/stock-adjustments/:id" element={<StockAdjustmentDetailPage />} />
             <Route path="wms/routes-monitor" element={<RouteMonitorPage />} />
             <Route path="wms/routes/archive" element={<RouteArchivePage />} />

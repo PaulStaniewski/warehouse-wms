@@ -1124,6 +1124,17 @@ class StockMovement(TimestampedModel):
         PICKING_SHORTAGE_FOUND = "picking_shortage_found", "Picking shortage found"
         PICKING_SHORTAGE_CONFIRMED_MISSING = "picking_shortage_confirmed_missing", "Picking shortage confirmed missing"
 
+    class AdjustmentDirection(models.TextChoices):
+        INCREASE = "increase", "Increase"
+        DECREASE = "decrease", "Decrease"
+
+    class AdjustmentReason(models.TextChoices):
+        COUNT_CORRECTION = "count_correction", "Count correction"
+        DAMAGED_STOCK = "damaged_stock", "Damaged stock"
+        FOUND_STOCK = "found_stock", "Found stock"
+        DATA_ENTRY_CORRECTION = "data_entry_correction", "Data entry correction"
+        OTHER = "other", "Other"
+
     branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="stock_movements")
     product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name="stock_movements")
     inventory_item = models.ForeignKey(
@@ -1149,7 +1160,20 @@ class StockMovement(TimestampedModel):
     )
     movement_type = models.CharField(max_length=64, choices=MovementType.choices)
     quantity = models.DecimalField(max_digits=12, decimal_places=3)
+    quantity_before = models.DecimalField(max_digits=12, decimal_places=3, blank=True, null=True)
+    quantity_after = models.DecimalField(max_digits=12, decimal_places=3, blank=True, null=True)
     reference = models.CharField(max_length=128, blank=True)
+    adjustment_direction = models.CharField(
+        max_length=16,
+        choices=AdjustmentDirection.choices,
+        blank=True,
+    )
+    adjustment_reason = models.CharField(
+        max_length=64,
+        choices=AdjustmentReason.choices,
+        blank=True,
+    )
+    adjustment_note = models.TextField(blank=True)
     performed_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,

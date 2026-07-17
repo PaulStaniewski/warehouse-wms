@@ -234,7 +234,13 @@ export type StockMovement = {
   adjustment_direction: "increase" | "decrease" | "unknown" | null;
   adjustment_location: number | null;
   adjustment_location_code: string | null;
+  adjustment_reason: string;
+  adjustment_reason_label: string;
+  adjustment_note: string;
+  adjustment_quantity: string | null;
   quantity: string;
+  quantity_before: string | null;
+  quantity_after: string | null;
   reference: string;
   performed_by: number | null;
   performed_by_username: string | null;

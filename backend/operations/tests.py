@@ -1,6 +1,7 @@
 from datetime import datetime, time
 from decimal import Decimal
 from io import StringIO
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
@@ -313,6 +314,14 @@ class StockAdjustmentHistoryApiTests(APITestCase):
         self.other_branch = Branch.objects.create(code="AOT", name="Other Adjustment", city="Gdansk", country="Poland")
         self.user = User.objects.create_user(username="ADJ_WORKER", password="demo12345")
         UserBranchMembership.objects.create(user=self.user, branch=self.branch, role=UserBranchMembership.Role.WORKER)
+        self.leader = User.objects.create_user(username="ADJ_LEADER", password="demo12345")
+        UserBranchMembership.objects.create(user=self.leader, branch=self.branch, role=UserBranchMembership.Role.LEADER)
+        self.other_leader = User.objects.create_user(username="AOT_LEADER", password="demo12345")
+        UserBranchMembership.objects.create(
+            user=self.other_leader,
+            branch=self.other_branch,
+            role=UserBranchMembership.Role.LEADER,
+        )
         self.product = Product.objects.create(sku="ADJ-001", name="Adjustment product", barcode="779900000001")
         self.location = Location.objects.create(
             branch=self.branch,
@@ -377,10 +386,34 @@ class StockAdjustmentHistoryApiTests(APITestCase):
             reference="ADJ-OTHER-001",
         )
 
+    def adjustment_payload(self, **overrides):
+        payload = {
+            "branch": "ADJ",
+            "direction": "increase",
+            "location": self.location.id,
+            "note": "Manual count correction after shelf recount.",
+            "product": self.product.id,
+            "quantity": "2",
+            "reason_code": StockMovement.AdjustmentReason.COUNT_CORRECTION,
+        }
+        payload.update(overrides)
+        return payload
+
     def test_stock_adjustment_list_requires_authentication(self):
         response = self.client.get("/api/stock-adjustments/", {"branch": "ADJ"})
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_stock_adjustment_create_requires_leader_role(self):
+        unauthenticated = self.client.post("/api/stock-adjustments/", self.adjustment_payload(), format="json")
+        self.client.force_authenticate(self.user)
+        worker = self.client.post("/api/stock-adjustments/", self.adjustment_payload(), format="json")
+        self.client.force_authenticate(self.other_leader)
+        other_leader = self.client.post("/api/stock-adjustments/", self.adjustment_payload(), format="json")
+
+        self.assertEqual(unauthenticated.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(worker.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(other_leader.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_stock_adjustment_list_shows_only_adjustments_newest_first(self):
         self.client.force_authenticate(self.user)
@@ -436,6 +469,128 @@ class StockAdjustmentHistoryApiTests(APITestCase):
         self.assertEqual(other_response.status_code, status.HTTP_404_NOT_FOUND)
         self.assertEqual(allowed_response.status_code, status.HTTP_200_OK)
         self.assertEqual(allowed_response.data["reference"], "ADJ-INC-001")
+
+    def test_stock_adjustment_increase_updates_inventory_and_records_structured_history(self):
+        self.client.force_authenticate(self.leader)
+
+        response = self.client.post("/api/stock-adjustments/", self.adjustment_payload(), format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.inventory.refresh_from_db()
+        self.assertEqual(self.inventory.quantity_on_hand, Decimal("7.000"))
+        self.assertEqual(response.data["adjustment_direction"], "increase")
+        self.assertEqual(response.data["adjustment_reason"], StockMovement.AdjustmentReason.COUNT_CORRECTION)
+        self.assertEqual(response.data["adjustment_reason_label"], "Count correction")
+        self.assertEqual(response.data["adjustment_note"], "Manual count correction after shelf recount.")
+        self.assertEqual(response.data["quantity_before"], "5.000")
+        self.assertEqual(response.data["quantity_after"], "7.000")
+        self.assertEqual(response.data["performed_by_username"], "ADJ_LEADER")
+        self.assertTrue(response.data["reference"].startswith("ADJ-ADJ-"))
+        audit_log = AuditLog.objects.get(entity_name="StockMovement", entity_id=str(response.data["id"]))
+        self.assertEqual(audit_log.actor, self.leader)
+        self.assertEqual(audit_log.branch, self.branch)
+        self.assertEqual(audit_log.product, self.product)
+        self.assertEqual(audit_log.quantity, Decimal("2.000"))
+        self.assertEqual(audit_log.destination_location, self.location)
+        self.assertEqual(audit_log.result, "increase")
+
+    def test_stock_adjustment_decrease_updates_inventory_and_records_before_after(self):
+        self.client.force_authenticate(self.leader)
+
+        response = self.client.post(
+            "/api/stock-adjustments/",
+            self.adjustment_payload(direction="decrease", quantity="3", reason_code=StockMovement.AdjustmentReason.DAMAGED_STOCK),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.inventory.refresh_from_db()
+        self.assertEqual(self.inventory.quantity_on_hand, Decimal("2.000"))
+        self.assertEqual(response.data["adjustment_direction"], "decrease")
+        self.assertEqual(response.data["quantity_before"], "5.000")
+        self.assertEqual(response.data["quantity_after"], "2.000")
+        movement = StockMovement.objects.get(pk=response.data["id"])
+        self.assertEqual(movement.source_location, self.location)
+        self.assertIsNone(movement.destination_location)
+
+    def test_stock_adjustment_increase_creates_inventory_row_when_missing(self):
+        self.client.force_authenticate(self.leader)
+        new_product = Product.objects.create(sku="ADJ-NEW", name="New adjustment product", barcode="779900000002")
+
+        response = self.client.post(
+            "/api/stock-adjustments/",
+            self.adjustment_payload(product=new_product.id, quantity="4"),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        inventory = InventoryItem.objects.get(branch=self.branch, location=self.location, product=new_product)
+        self.assertEqual(inventory.quantity_on_hand, Decimal("4.000"))
+        self.assertEqual(response.data["quantity_before"], "0.000")
+        self.assertEqual(response.data["quantity_after"], "4.000")
+
+    def test_stock_adjustment_validation_rejects_invalid_payloads(self):
+        self.client.force_authenticate(self.leader)
+
+        cases = [
+            (self.adjustment_payload(quantity="0"), "quantity"),
+            (self.adjustment_payload(quantity="-1"), "quantity"),
+            (self.adjustment_payload(direction="move"), "direction"),
+            (self.adjustment_payload(reason_code="bad_reason"), "reason_code"),
+            (self.adjustment_payload(note=""), "note"),
+            (self.adjustment_payload(reason_code=StockMovement.AdjustmentReason.OTHER, note="short"), "note"),
+            (self.adjustment_payload(product=999999), "product"),
+            (self.adjustment_payload(location=999999), "location"),
+        ]
+        for payload, field in cases:
+            response = self.client.post("/api/stock-adjustments/", payload, format="json")
+            self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+            self.assertIn(field, response.data)
+
+    def test_stock_adjustment_rejects_excessive_decrease_and_cross_branch_location(self):
+        self.client.force_authenticate(self.leader)
+
+        excessive = self.client.post(
+            "/api/stock-adjustments/",
+            self.adjustment_payload(direction="decrease", quantity="99"),
+            format="json",
+        )
+        cross_branch = self.client.post(
+            "/api/stock-adjustments/",
+            self.adjustment_payload(location=self.other_location.id),
+            format="json",
+        )
+        branch_substitution = self.client.post(
+            "/api/stock-adjustments/",
+            self.adjustment_payload(branch="AOT"),
+            format="json",
+        )
+
+        self.assertEqual(excessive.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(cross_branch.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(branch_substitution.status_code, status.HTTP_400_BAD_REQUEST)
+        self.inventory.refresh_from_db()
+        self.assertEqual(self.inventory.quantity_on_hand, Decimal("5.000"))
+
+    def test_stock_adjustment_rollback_when_audit_creation_fails(self):
+        self.client.force_authenticate(self.leader)
+
+        with patch("operations.viewsets.AuditLog.objects.create", side_effect=RuntimeError("audit failed")):
+            with self.assertRaises(RuntimeError):
+                self.client.post("/api/stock-adjustments/", self.adjustment_payload(), format="json")
+
+        self.inventory.refresh_from_db()
+        self.assertEqual(self.inventory.quantity_on_hand, Decimal("5.000"))
+        self.assertFalse(StockMovement.objects.filter(reference__startswith="ADJ-ADJ-").exists())
+
+    def test_stock_adjustment_methods_remain_immutable(self):
+        self.client.force_authenticate(self.leader)
+
+        patch_response = self.client.patch(f"/api/stock-adjustments/{self.increase.id}/", {"quantity": "9"}, format="json")
+        delete_response = self.client.delete(f"/api/stock-adjustments/{self.increase.id}/")
+
+        self.assertEqual(patch_response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+        self.assertEqual(delete_response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
 
 
 class PickingTaskCompleteActionTests(APITestCase):

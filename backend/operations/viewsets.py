@@ -775,6 +775,7 @@ class ReplenishmentRequestViewSet(ReadOnlyModelViewSet):
 
 class StockMovementFilter(django_filters.FilterSet):
     adjustment_direction = django_filters.CharFilter(method="filter_adjustment_direction")
+    adjustment_reason = django_filters.CharFilter(field_name="adjustment_reason")
     branch = django_filters.CharFilter(method="filter_branch")
     date_from = django_filters.DateFilter(field_name="created_at", lookup_expr="date__gte")
     date_to = django_filters.DateFilter(field_name="created_at", lookup_expr="date__lte")
@@ -792,6 +793,7 @@ class StockMovementFilter(django_filters.FilterSet):
             "product",
             "movement_type",
             "adjustment_direction",
+            "adjustment_reason",
             "source_location",
             "destination_location",
             "location",
@@ -804,13 +806,19 @@ class StockMovementFilter(django_filters.FilterSet):
     def filter_adjustment_direction(self, queryset, name, value):
         normalized = str(value).strip().lower()
         if normalized == "increase":
-            return queryset.filter(destination_location__isnull=False, source_location__isnull=True)
+            return queryset.filter(
+                models.Q(adjustment_direction=StockMovement.AdjustmentDirection.INCREASE)
+                | models.Q(adjustment_direction="", destination_location__isnull=False, source_location__isnull=True)
+            )
         if normalized == "decrease":
-            return queryset.filter(source_location__isnull=False, destination_location__isnull=True)
+            return queryset.filter(
+                models.Q(adjustment_direction=StockMovement.AdjustmentDirection.DECREASE)
+                | models.Q(adjustment_direction="", source_location__isnull=False, destination_location__isnull=True)
+            )
         if normalized == "unknown":
             return queryset.filter(
-                models.Q(source_location__isnull=True, destination_location__isnull=True)
-                | models.Q(source_location__isnull=False, destination_location__isnull=False)
+                models.Q(adjustment_direction="", source_location__isnull=True, destination_location__isnull=True)
+                | models.Q(adjustment_direction="", source_location__isnull=False, destination_location__isnull=False)
             )
         return queryset
 
@@ -869,6 +877,8 @@ class StockMovementViewSet(ReadOnlyModelViewSet):
         "source_location__code",
         "destination_location__code",
         "performed_by__username",
+        "adjustment_reason",
+        "adjustment_note",
     ]
     ordering = ["-created_at"]
     ordering_fields = ["movement_type", "quantity", "created_at", "updated_at"]
@@ -880,6 +890,140 @@ class StockMovementViewSet(ReadOnlyModelViewSet):
 class StockAdjustmentViewSet(StockMovementViewSet):
     def get_queryset(self):
         return super().get_queryset().filter(movement_type=StockMovement.MovementType.ADJUSTMENT)
+
+    def _resolve_product(self, value):
+        if value in [None, ""]:
+            return None
+        normalized = str(value).strip()
+        if normalized.isdigit():
+            return Product.objects.filter(pk=normalized).first()
+        return Product.objects.filter(
+            models.Q(sku__iexact=normalized) | models.Q(barcode__iexact=normalized)
+        ).first()
+
+    def _resolve_location(self, value):
+        if value in [None, ""]:
+            return None
+        normalized = str(value).strip()
+        queryset = Location.objects.select_related("branch")
+        if normalized.isdigit():
+            return queryset.filter(pk=normalized).first()
+        return queryset.filter(code__iexact=normalized).order_by("branch__code").first()
+
+    def create(self, request):
+        product = self._resolve_product(request.data.get("product"))
+        location = self._resolve_location(request.data.get("location"))
+        direction = str(request.data.get("direction", "")).strip().lower()
+        reason = str(request.data.get("reason_code", request.data.get("adjustment_reason", ""))).strip()
+        note = str(request.data.get("note", "")).strip()
+        branch_value = str(request.data.get("branch", "")).strip()
+
+        if product is None:
+            return Response({"product": ["Product was not found."]}, status=status.HTTP_400_BAD_REQUEST)
+        if location is None:
+            return Response({"location": ["Location was not found."]}, status=status.HTTP_400_BAD_REQUEST)
+        if branch_value:
+            if branch_value.isdigit() and str(location.branch_id) != branch_value:
+                return Response({"branch": ["Location does not belong to the requested branch."]}, status=status.HTTP_400_BAD_REQUEST)
+            if not branch_value.isdigit() and location.branch.code.lower() != branch_value.lower():
+                return Response({"branch": ["Location does not belong to the requested branch."]}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            require_branch_access(request.user, location.branch, leader_required=True)
+        except Exception:
+            raise
+
+        if direction not in StockMovement.AdjustmentDirection.values:
+            return Response({"direction": ["Direction must be increase or decrease."]}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            quantity = Decimal(str(request.data.get("quantity", "")))
+        except Exception:
+            return Response({"quantity": ["Quantity must be a valid number."]}, status=status.HTTP_400_BAD_REQUEST)
+        if quantity <= 0:
+            return Response({"quantity": ["Quantity must be greater than zero."]}, status=status.HTTP_400_BAD_REQUEST)
+        if reason not in StockMovement.AdjustmentReason.values:
+            return Response({"reason_code": ["Select a valid stock adjustment reason."]}, status=status.HTTP_400_BAD_REQUEST)
+        if not note:
+            return Response({"note": ["Explanation note is required."]}, status=status.HTTP_400_BAD_REQUEST)
+        if len(note) < 5:
+            return Response({"note": ["Explanation note must be at least 5 characters."]}, status=status.HTTP_400_BAD_REQUEST)
+        if reason == StockMovement.AdjustmentReason.OTHER and len(note) < 10:
+            return Response({"note": ["Other adjustments require a more descriptive note."]}, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            inventory_item = (
+                InventoryItem.objects.select_for_update()
+                .filter(branch=location.branch, location=location, product=product)
+                .first()
+            )
+            if inventory_item is None:
+                if direction == StockMovement.AdjustmentDirection.DECREASE:
+                    return Response(
+                        {"quantity": ["Cannot decrease stock because no inventory exists at this location."]},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                inventory_item = InventoryItem.objects.create(
+                    branch=location.branch,
+                    location=location,
+                    product=product,
+                    quantity_on_hand=Decimal("0"),
+                    quantity_reserved=Decimal("0"),
+                )
+
+            quantity_before = inventory_item.quantity_on_hand
+            if direction == StockMovement.AdjustmentDirection.INCREASE:
+                quantity_after = quantity_before + quantity
+                inventory_item.quantity_on_hand = quantity_after
+            else:
+                quantity_after = quantity_before - quantity
+                if quantity_after < 0:
+                    return Response(
+                        {"quantity": ["Decrease would make stock negative."]},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                inventory_item.quantity_on_hand = quantity_after
+            inventory_item.save(update_fields=["quantity_on_hand", "updated_at"])
+
+            movement = StockMovement.objects.create(
+                branch=location.branch,
+                product=product,
+                inventory_item=inventory_item,
+                source_location=location if direction == StockMovement.AdjustmentDirection.DECREASE else None,
+                destination_location=location if direction == StockMovement.AdjustmentDirection.INCREASE else None,
+                movement_type=StockMovement.MovementType.ADJUSTMENT,
+                quantity=quantity,
+                quantity_before=quantity_before,
+                quantity_after=quantity_after,
+                adjustment_direction=direction,
+                adjustment_reason=reason,
+                adjustment_note=note,
+                performed_by=request.user,
+            )
+            movement.reference = f"ADJ-{location.branch.code}-{movement.id:06d}"
+            movement.save(update_fields=["reference", "updated_at"])
+            AuditLog.objects.create(
+                actor=request.user,
+                action_type=AuditLog.ActionType.UPDATE,
+                event_type="stock_adjustment_created",
+                branch=location.branch,
+                product=product,
+                quantity=quantity,
+                source_location=location if direction == StockMovement.AdjustmentDirection.DECREASE else None,
+                destination_location=location if direction == StockMovement.AdjustmentDirection.INCREASE else None,
+                source_label=location.code if direction == StockMovement.AdjustmentDirection.DECREASE else "",
+                destination_label=location.code if direction == StockMovement.AdjustmentDirection.INCREASE else "",
+                reference=movement.reference,
+                result=direction,
+                entity_name="StockMovement",
+                entity_id=str(movement.id),
+                message=(
+                    f"Worker {request.user.username} recorded stock adjustment {movement.reference}: "
+                    f"{direction} {quantity} {product.sku} at {location.code} "
+                    f"from {quantity_before} to {quantity_after}."
+                ),
+            )
+
+        movement = self.get_queryset().get(pk=movement.pk)
+        return Response(self.get_serializer(movement).data, status=status.HTTP_201_CREATED)
 
 
 class AuditLogViewSet(ReadOnlyModelViewSet):

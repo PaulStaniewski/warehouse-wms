@@ -2,6 +2,7 @@ import { Link } from "react-router-dom";
 import { useState } from "react";
 
 import { useActiveBranch } from "../api/ActiveBranchContext";
+import { canCreateStockAdjustment } from "../api/permissions";
 import { useStockAdjustments } from "../api/queries";
 import { DataState } from "../components/DataState";
 import { DataTable } from "../components/DataTable";
@@ -31,11 +32,12 @@ function directionClass(direction: StockMovement["adjustment_direction"]) {
 }
 
 export function StockAdjustmentsPage() {
-  const { activeBranchCode } = useActiveBranch();
+  const { activeBranchCode, activeMembership } = useActiveBranch();
   const [search, setSearch] = useState("");
   const [product, setProduct] = useState("");
   const [location, setLocation] = useState("");
   const [direction, setDirection] = useState("");
+  const [reasonCode, setReasonCode] = useState("");
   const [performedBy, setPerformedBy] = useState("");
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
@@ -49,6 +51,7 @@ export function StockAdjustmentsPage() {
     page,
     performedBy,
     product,
+    reasonCode,
     search,
   });
 
@@ -62,7 +65,14 @@ export function StockAdjustmentsPage() {
     <>
       <PageHeader
         title="Stock Adjustments"
-        description={`Read-only adjustment history for working branch ${activeBranchCode || "-"}. Manual creation is disabled until a stock-adjustment permission is defined.`}
+        description={`Manual stock correction history for working branch ${activeBranchCode || "-"}.`}
+        action={
+          canCreateStockAdjustment(activeMembership) ? (
+            <Link className="status-pill status-pill--ok" to="/wms/stock-adjustments/new">
+              New Stock Adjustment
+            </Link>
+          ) : undefined
+        }
       />
 
       <section className="filter-panel">
@@ -112,6 +122,23 @@ export function StockAdjustmentsPage() {
             <option value="increase">Increase</option>
             <option value="decrease">Decrease</option>
             <option value="unknown">Unknown</option>
+          </select>
+        </label>
+        <label>
+          <span>Reason</span>
+          <select
+            onChange={(event) => {
+              setReasonCode(event.target.value);
+              resetPage();
+            }}
+            value={reasonCode}
+          >
+            <option value="">All</option>
+            <option value="count_correction">Count correction</option>
+            <option value="damaged_stock">Damaged stock</option>
+            <option value="found_stock">Found stock</option>
+            <option value="data_entry_correction">Data entry correction</option>
+            <option value="other">Other</option>
           </select>
         </label>
         <label>
@@ -176,7 +203,10 @@ export function StockAdjustmentsPage() {
                 </span>
               ),
             },
-            { key: "quantity", header: "Quantity", render: (adjustment) => adjustment.quantity },
+            { key: "quantity", header: "Adjusted", render: (adjustment) => adjustment.adjustment_quantity ?? adjustment.quantity },
+            { key: "before", header: "Before", render: (adjustment) => adjustment.quantity_before ?? <span className="muted">Not recorded</span> },
+            { key: "after", header: "After", render: (adjustment) => adjustment.quantity_after ?? <span className="muted">Not recorded</span> },
+            { key: "reason", header: "Reason", render: (adjustment) => adjustment.adjustment_reason_label || <span className="muted">Not recorded</span> },
             { key: "worker", header: "Performed by", render: (adjustment) => adjustment.performed_by_username ?? <span className="muted">System</span> },
             { key: "origin", header: "Origin", render: (adjustment) => adjustment.origin },
             { key: "status", header: "Status", render: (adjustment) => <span className="status-pill status-pill--ok">{adjustment.status}</span> },

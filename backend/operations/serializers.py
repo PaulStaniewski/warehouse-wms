@@ -598,12 +598,16 @@ class StockMovementSerializer(serializers.ModelSerializer):
     adjustment_direction = serializers.SerializerMethodField()
     adjustment_location = serializers.SerializerMethodField()
     adjustment_location_code = serializers.SerializerMethodField()
+    adjustment_reason_label = serializers.CharField(source="get_adjustment_reason_display", read_only=True)
+    adjustment_quantity = serializers.SerializerMethodField()
     status = serializers.SerializerMethodField()
     origin = serializers.SerializerMethodField()
 
     def get_adjustment_direction(self, obj) -> str | None:
         if obj.movement_type != StockMovement.MovementType.ADJUSTMENT:
             return None
+        if obj.adjustment_direction:
+            return obj.adjustment_direction
         if obj.destination_location_id and not obj.source_location_id:
             return "increase"
         if obj.source_location_id and not obj.destination_location_id:
@@ -622,12 +626,19 @@ class StockMovementSerializer(serializers.ModelSerializer):
         location = obj.destination_location or obj.source_location
         return location.code if location else None
 
+    def get_adjustment_quantity(self, obj) -> str | None:
+        if obj.movement_type != StockMovement.MovementType.ADJUSTMENT:
+            return None
+        return str(abs(obj.quantity))
+
     def get_status(self, obj) -> str:
         return "completed"
 
     def get_origin(self, obj) -> str:
         if obj.movement_type == StockMovement.MovementType.TRANSFER and obj.source_location_id and obj.destination_location_id:
             return "Scanner Quick Transfer"
+        if obj.movement_type == StockMovement.MovementType.ADJUSTMENT and obj.adjustment_direction and obj.adjustment_reason:
+            return "Manual WMS stock adjustment"
         return obj.get_movement_type_display()
 
     class Meta:
@@ -649,7 +660,13 @@ class StockMovementSerializer(serializers.ModelSerializer):
             "adjustment_direction",
             "adjustment_location",
             "adjustment_location_code",
+            "adjustment_reason",
+            "adjustment_reason_label",
+            "adjustment_note",
+            "adjustment_quantity",
             "quantity",
+            "quantity_before",
+            "quantity_after",
             "reference",
             "performed_by",
             "performed_by_username",

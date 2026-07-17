@@ -56,7 +56,7 @@ export function StockAdjustmentDetailPage() {
             </article>
             <article className="detail-card">
               <span>Adjusted quantity</span>
-              <strong>{adjustment.data.quantity}</strong>
+              <strong>{adjustment.data.adjustment_quantity ?? adjustment.data.quantity}</strong>
             </article>
             <article className="detail-card">
               <span>Performed</span>
@@ -105,15 +105,20 @@ export function StockAdjustmentDetailPage() {
             </article>
             <article className="detail-card">
               <span>Quantity before</span>
-              <strong>Not recorded</strong>
+              <strong>{adjustment.data.quantity_before ?? "Not recorded"}</strong>
             </article>
             <article className="detail-card">
               <span>Quantity after</span>
-              <strong>Not recorded</strong>
+              <strong>{adjustment.data.quantity_after ?? "Not recorded"}</strong>
             </article>
             <article className="detail-card">
               <span>Reason</span>
-              <strong>Not recorded</strong>
+              <strong>{adjustment.data.adjustment_reason_label || "Not recorded"}</strong>
+              {adjustment.data.adjustment_reason && <p className="mono">{adjustment.data.adjustment_reason}</p>}
+            </article>
+            <article className="detail-card detail-card--wide">
+              <span>Explanation note</span>
+              <strong>{adjustment.data.adjustment_note || "Not recorded"}</strong>
             </article>
             <article className="detail-card">
               <span>Events</span>
