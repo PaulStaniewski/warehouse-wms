@@ -83,6 +83,13 @@ const wmsNavSections: NavSection[] = [
     ],
   },
   {
+    id: "inventory-operations",
+    label: "Inventory Operations",
+    items: [
+      { to: "/wms/stock-transfers", label: "Stock Transfers", icon: Boxes },
+    ],
+  },
+  {
     id: "exceptions-investigations",
     label: "Exceptions & Investigations",
     items: [
@@ -146,6 +153,7 @@ const wmsPageTitles: Array<[string, string]> = [
   ["/wms/events/archive", "Archive Events"],
   ["/wms/discrepancies", "Discrepancies"],
   ["/wms/branches", "Branches"],
+  ["/wms/stock-transfers", "Stock Transfers"],
   ["/wms/dashboard", "Dashboard"],
   ["/wms/products", "Products"],
   ["/wms/inventory", "Inventory"],

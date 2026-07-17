@@ -42,6 +42,8 @@ import { SourceDiscrepancyReviewDetailPage } from "./pages/SourceDiscrepancyRevi
 import { SourceDiscrepancyReviewsPage } from "./pages/SourceDiscrepancyReviewsPage";
 import { SourceStockVerificationDetailPage } from "./pages/SourceStockVerificationDetailPage";
 import { SourceStockVerificationsPage } from "./pages/SourceStockVerificationsPage";
+import { StockTransferDetailPage } from "./pages/StockTransferDetailPage";
+import { StockTransfersPage } from "./pages/StockTransfersPage";
 import { TransitInvestigationDetailPage } from "./pages/TransitInvestigationDetailPage";
 import { TransitInvestigationsPage } from "./pages/TransitInvestigationsPage";
 import {
@@ -199,6 +201,8 @@ function App() {
             <Route path="wms/branches/:id" element={<BranchDetailPage />} />
             <Route path="wms/locations" element={<LocationsPage />} />
             <Route path="wms/locations/:id" element={<LocationDetailPage />} />
+            <Route path="wms/stock-transfers" element={<StockTransfersPage />} />
+            <Route path="wms/stock-transfers/:id" element={<StockTransferDetailPage />} />
             <Route path="wms/routes-monitor" element={<RouteMonitorPage />} />
             <Route path="wms/routes/archive" element={<RouteArchivePage />} />
             <Route path="wms/discrepancy-actions" element={<DiscrepancyActionQueuePage />} />

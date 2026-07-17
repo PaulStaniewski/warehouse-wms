@@ -772,6 +772,52 @@ class ReplenishmentRequestViewSet(ReadOnlyModelViewSet):
         return Response({"message": "Replenishment request marked as ordered manually.", "request": self.get_serializer(replenishment).data})
 
 
+class StockMovementFilter(django_filters.FilterSet):
+    branch = django_filters.CharFilter(method="filter_branch")
+    date_from = django_filters.DateFilter(field_name="created_at", lookup_expr="date__gte")
+    date_to = django_filters.DateFilter(field_name="created_at", lookup_expr="date__lte")
+    destination_location = django_filters.CharFilter(field_name="destination_location__code", lookup_expr="iexact")
+    internal_transfer = django_filters.BooleanFilter(method="filter_internal_transfer")
+    product = django_filters.CharFilter(method="filter_product")
+    source_location = django_filters.CharFilter(field_name="source_location__code", lookup_expr="iexact")
+
+    class Meta:
+        model = StockMovement
+        fields = [
+            "branch",
+            "product",
+            "movement_type",
+            "source_location",
+            "destination_location",
+            "internal_transfer",
+            "date_from",
+            "date_to",
+        ]
+
+    def filter_branch(self, queryset, name, value):
+        if str(value).isdigit():
+            return queryset.filter(branch_id=value)
+        return queryset.filter(branch__code__iexact=value)
+
+    def filter_product(self, queryset, name, value):
+        if str(value).isdigit():
+            return queryset.filter(product_id=value)
+        return queryset.filter(
+            models.Q(product__sku__iexact=value)
+            | models.Q(product__barcode__iexact=value)
+            | models.Q(product__name__icontains=value)
+        )
+
+    def filter_internal_transfer(self, queryset, name, value):
+        if not value:
+            return queryset
+        return queryset.filter(
+            movement_type=StockMovement.MovementType.TRANSFER,
+            source_location__isnull=False,
+            destination_location__isnull=False,
+        )
+
+
 class StockMovementViewSet(ReadOnlyModelViewSet):
     queryset = StockMovement.objects.select_related(
         "branch",
@@ -782,8 +828,17 @@ class StockMovementViewSet(ReadOnlyModelViewSet):
         "performed_by",
     )
     serializer_class = StockMovementSerializer
-    filterset_fields = ["branch", "product", "movement_type"]
-    search_fields = ["product__sku", "product__name", "reference", "branch__code"]
+    filterset_class = StockMovementFilter
+    search_fields = [
+        "product__sku",
+        "product__name",
+        "reference",
+        "branch__code",
+        "source_location__code",
+        "destination_location__code",
+        "performed_by__username",
+    ]
+    ordering = ["-created_at"]
     ordering_fields = ["movement_type", "quantity", "created_at", "updated_at"]
 
     def get_queryset(self):

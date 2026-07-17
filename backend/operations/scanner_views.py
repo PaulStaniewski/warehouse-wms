@@ -3497,6 +3497,13 @@ class ScannerQuickTransferView(APIView):
                     {"detail": "Source and target location cannot be the same."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
+            if source_location.branch_id != target_location.branch_id:
+                return Response(
+                    {"detail": "Source and target locations must belong to the same branch."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if request.user and request.user.is_authenticated:
+                require_branch_access(request.user, source_location.branch)
 
             product = _find_product_by_code(product_code)
             if product is None:
@@ -3538,10 +3545,18 @@ class ScannerQuickTransferView(APIView):
                 movement_type=StockMovement.MovementType.TRANSFER,
                 quantity=quantity,
                 reference=f"SCANNER-TRANSFER-{source_location.code}-{target_location.code}",
-                performed_by=None,
+                performed_by=request.user if request.user.is_authenticated else None,
             )
             AuditLog.objects.create(
+                actor=request.user if request.user.is_authenticated else None,
                 action_type=AuditLog.ActionType.UPDATE,
+                event_type="scanner_quick_transfer",
+                branch=source_location.branch,
+                product=product,
+                quantity=quantity,
+                source_location=source_location,
+                destination_location=target_location,
+                reference=movement.reference,
                 entity_name="StockMovement",
                 entity_id=str(movement.id),
                 message=(

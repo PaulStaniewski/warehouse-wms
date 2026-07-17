@@ -198,6 +198,107 @@ class BranchMembershipAuthorizationTests(APITestCase):
         self.assertEqual(audit_log.actor, self.gdy_leader)
 
 
+class StockTransferHistoryApiTests(APITestCase):
+    def setUp(self):
+        self.branch = Branch.objects.create(code="STH", name="Stock History", city="Gdynia", country="Poland")
+        self.other_branch = Branch.objects.create(code="OTH", name="Other Branch", city="Gdansk", country="Poland")
+        self.user = User.objects.create_user(username="STH_WORKER", password="demo12345")
+        UserBranchMembership.objects.create(user=self.user, branch=self.branch, role=UserBranchMembership.Role.WORKER)
+        self.product = Product.objects.create(sku="STH-001", name="Stock transfer product", barcode="889900000001")
+        self.source = Location.objects.create(
+            branch=self.branch,
+            code="S-01-01",
+            name="Source",
+            location_type=Location.LocationType.STORAGE,
+        )
+        self.destination = Location.objects.create(
+            branch=self.branch,
+            code="S-02-01",
+            name="Destination",
+            location_type=Location.LocationType.PICKING,
+        )
+        self.other_location = Location.objects.create(
+            branch=self.other_branch,
+            code="O-01-01",
+            name="Other",
+            location_type=Location.LocationType.STORAGE,
+        )
+        self.inventory = InventoryItem.objects.create(
+            branch=self.branch,
+            location=self.source,
+            product=self.product,
+            quantity_on_hand=Decimal("5"),
+            quantity_reserved=Decimal("0"),
+        )
+        self.internal_transfer = StockMovement.objects.create(
+            branch=self.branch,
+            product=self.product,
+            inventory_item=self.inventory,
+            source_location=self.source,
+            destination_location=self.destination,
+            movement_type=StockMovement.MovementType.TRANSFER,
+            quantity=Decimal("2"),
+            reference="SCANNER-TRANSFER-S-01-01-S-02-01",
+            performed_by=self.user,
+        )
+        StockMovement.objects.create(
+            branch=self.branch,
+            product=self.product,
+            destination_location=self.destination,
+            movement_type=StockMovement.MovementType.TRANSFER,
+            quantity=Decimal("1"),
+            reference="PALLET-TRANSFER",
+        )
+        self.other_transfer = StockMovement.objects.create(
+            branch=self.other_branch,
+            product=self.product,
+            source_location=self.other_location,
+            destination_location=self.other_location,
+            movement_type=StockMovement.MovementType.TRANSFER,
+            quantity=Decimal("1"),
+            reference="SCANNER-TRANSFER-OTHER",
+        )
+
+    def test_internal_transfer_list_uses_structured_stock_movements(self):
+        self.client.force_authenticate(self.user)
+
+        response = self.client.get(
+            "/api/stock-movements/",
+            {"branch": "STH", "movement_type": "transfer", "internal_transfer": "true"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        row = response.data["results"][0]
+        self.assertEqual(row["id"], self.internal_transfer.id)
+        self.assertEqual(row["product_sku"], "STH-001")
+        self.assertEqual(row["product_name"], "Stock transfer product")
+        self.assertEqual(row["source_location_code"], "S-01-01")
+        self.assertEqual(row["destination_location_code"], "S-02-01")
+        self.assertEqual(row["status"], "completed")
+        self.assertEqual(row["origin"], "Scanner Quick Transfer")
+
+    def test_internal_transfer_list_is_branch_scoped(self):
+        self.client.force_authenticate(self.user)
+
+        response = self.client.get(
+            "/api/stock-movements/",
+            {"branch": "OTH", "movement_type": "transfer", "internal_transfer": "true"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_internal_transfer_detail_requires_branch_access(self):
+        self.client.force_authenticate(self.user)
+
+        forbidden = self.client.get(f"/api/stock-movements/{self.other_transfer.id}/")
+        allowed = self.client.get(f"/api/stock-movements/{self.internal_transfer.id}/")
+
+        self.assertEqual(forbidden.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(allowed.status_code, status.HTTP_200_OK)
+        self.assertEqual(allowed.data["reference"], "SCANNER-TRANSFER-S-01-01-S-02-01")
+
+
 class PickingTaskCompleteActionTests(APITestCase):
     def setUp(self):
         self.branch = Branch.objects.create(code="TST", name="Test Branch", city="Gdynia", country="Poland")
@@ -3560,6 +3661,15 @@ class ScannerReceivingWorkflowTests(APITestCase):
 class ScannerLookupAndQuickTransferTests(APITestCase):
     def setUp(self):
         self.branch = Branch.objects.create(code="LKP", name="Lookup Branch", city="Gdynia", country="Poland")
+        self.other_branch = Branch.objects.create(code="XBR", name="Cross Branch", city="Gdansk", country="Poland")
+        self.user = User.objects.create_user(username="LKP_WORKER", password="demo12345")
+        UserBranchMembership.objects.create(user=self.user, branch=self.branch, role=UserBranchMembership.Role.WORKER)
+        self.other_user = User.objects.create_user(username="XBR_WORKER", password="demo12345")
+        UserBranchMembership.objects.create(
+            user=self.other_user,
+            branch=self.other_branch,
+            role=UserBranchMembership.Role.WORKER,
+        )
         self.source_location = Location.objects.create(
             branch=self.branch,
             code="L-01-01",
@@ -3570,6 +3680,12 @@ class ScannerLookupAndQuickTransferTests(APITestCase):
             branch=self.branch,
             code="L-02-01",
             name="Target shelf",
+            location_type=Location.LocationType.PICKING,
+        )
+        self.other_target_location = Location.objects.create(
+            branch=self.other_branch,
+            code="X-02-01",
+            name="Cross target shelf",
             location_type=Location.LocationType.PICKING,
         )
         self.product = Product.objects.create(
@@ -3617,6 +3733,8 @@ class ScannerLookupAndQuickTransferTests(APITestCase):
         self.assertEqual(response.data["inventory_items"][0]["product_sku"], "LOOK-001")
 
     def test_quick_transfer_moves_quantity_and_creates_history(self):
+        self.client.force_authenticate(self.user)
+
         response = self.transfer(quantity="2")
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -3630,9 +3748,15 @@ class ScannerLookupAndQuickTransferTests(APITestCase):
                 source_location=self.source_location,
                 destination_location=self.target_location,
                 quantity=Decimal("2.000"),
+                performed_by=self.user,
             ).exists()
         )
-        self.assertTrue(AuditLog.objects.filter(message__icontains="Scanner quick transfer").exists())
+        audit_log = AuditLog.objects.get(message__icontains="Scanner quick transfer")
+        self.assertEqual(audit_log.actor, self.user)
+        self.assertEqual(audit_log.branch, self.branch)
+        self.assertEqual(audit_log.product, self.product)
+        self.assertEqual(audit_log.source_location, self.source_location)
+        self.assertEqual(audit_log.destination_location, self.target_location)
 
     def test_quick_transfer_rejects_same_source_and_target(self):
         response = self.transfer(target_location_code="L-01-01")
@@ -3645,6 +3769,21 @@ class ScannerLookupAndQuickTransferTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("Insufficient", response.data["detail"])
+
+    def test_quick_transfer_rejects_cross_branch_locations(self):
+        response = self.transfer(target_location_code="X-02-01")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("same branch", response.data["detail"])
+        self.assertFalse(StockMovement.objects.exists())
+
+    def test_quick_transfer_rejects_authenticated_user_without_branch_access(self):
+        self.client.force_authenticate(self.other_user)
+
+        response = self.transfer(quantity="1")
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(StockMovement.objects.exists())
 
 
 class ScannerPickingJobWorkflowTests(APITestCase):

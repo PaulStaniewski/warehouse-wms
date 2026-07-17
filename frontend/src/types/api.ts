@@ -217,6 +217,30 @@ export type AuditLog = {
   created_at: string;
 };
 
+export type StockMovement = {
+  id: number;
+  branch: number;
+  branch_code: string;
+  product: number;
+  product_sku: string;
+  product_name: string;
+  inventory_item: number | null;
+  source_location: number | null;
+  source_location_code: string | null;
+  destination_location: number | null;
+  destination_location_code: string | null;
+  movement_type: string;
+  movement_type_label: string;
+  quantity: string;
+  reference: string;
+  performed_by: number | null;
+  performed_by_username: string | null;
+  status: "completed";
+  origin: string;
+  created_at: string;
+  updated_at: string;
+};
+
 export type TransferDiscrepancyAction = {
   action_type: string;
   action_label: string;

@@ -590,9 +590,21 @@ class ReplenishmentRequestSerializer(serializers.ModelSerializer):
 class StockMovementSerializer(serializers.ModelSerializer):
     branch_code = serializers.CharField(source="branch.code", read_only=True)
     product_sku = serializers.CharField(source="product.sku", read_only=True)
+    product_name = serializers.CharField(source="product.name", read_only=True)
     source_location_code = serializers.CharField(source="source_location.code", read_only=True)
     destination_location_code = serializers.CharField(source="destination_location.code", read_only=True)
     performed_by_username = serializers.CharField(source="performed_by.username", read_only=True)
+    movement_type_label = serializers.CharField(source="get_movement_type_display", read_only=True)
+    status = serializers.SerializerMethodField()
+    origin = serializers.SerializerMethodField()
+
+    def get_status(self, obj) -> str:
+        return "completed"
+
+    def get_origin(self, obj) -> str:
+        if obj.movement_type == StockMovement.MovementType.TRANSFER and obj.source_location_id and obj.destination_location_id:
+            return "Scanner Quick Transfer"
+        return obj.get_movement_type_display()
 
     class Meta:
         model = StockMovement
@@ -602,16 +614,20 @@ class StockMovementSerializer(serializers.ModelSerializer):
             "branch_code",
             "product",
             "product_sku",
+            "product_name",
             "inventory_item",
             "source_location",
             "source_location_code",
             "destination_location",
             "destination_location_code",
             "movement_type",
+            "movement_type_label",
             "quantity",
             "reference",
             "performed_by",
             "performed_by_username",
+            "status",
+            "origin",
             "created_at",
             "updated_at",
         ]

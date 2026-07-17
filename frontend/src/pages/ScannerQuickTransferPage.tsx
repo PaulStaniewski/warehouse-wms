@@ -77,6 +77,7 @@ export function ScannerQuickTransferPage() {
         queryClient.invalidateQueries({ queryKey: ["scanner-product-lookup", productCode] }),
         queryClient.invalidateQueries({ queryKey: ["audit-logs", "current"] }),
         queryClient.invalidateQueries({ queryKey: ["inventory-items"] }),
+        queryClient.invalidateQueries({ queryKey: ["stock-transfers"] }),
       ]);
     } catch (error) {
       setMessage({ type: "error", text: getErrorMessage(error, "Quick transfer failed.") });

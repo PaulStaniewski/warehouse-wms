@@ -36,6 +36,7 @@ import type {
   ScannerPrintLabelResponse,
   ScannerSessionResponse,
   ScannerTaskStartResponse,
+  StockMovement,
   TransferDiscrepancy,
   TransferDiscrepancyAction,
   TransferDiscrepancyConfirmShortageResponse,
@@ -110,6 +111,48 @@ export function useInventoryItems(branch?: string) {
   return useQuery({
     queryKey: ["inventory-items", branch],
     queryFn: () => getList<InventoryItem>(`/inventory-items/${branch ? `?branch=${branch}` : ""}`),
+  });
+}
+
+export type StockTransferListFilters = {
+  branch?: string;
+  dateFrom?: string;
+  dateTo?: string;
+  destinationLocation?: string;
+  page?: number;
+  product?: string;
+  search?: string;
+  sourceLocation?: string;
+};
+
+export function useStockTransfers(filters: StockTransferListFilters = {}) {
+  return useQuery({
+    queryKey: ["stock-transfers", filters],
+    queryFn: () => {
+      const params = new URLSearchParams();
+      params.set("internal_transfer", "true");
+      params.set("movement_type", "transfer");
+      if (filters.branch) params.set("branch", filters.branch);
+      if (filters.search) params.set("search", filters.search);
+      if (filters.product) params.set("product", filters.product);
+      if (filters.sourceLocation) params.set("source_location", filters.sourceLocation);
+      if (filters.destinationLocation) params.set("destination_location", filters.destinationLocation);
+      if (filters.dateFrom) params.set("date_from", filters.dateFrom);
+      if (filters.dateTo) params.set("date_to", filters.dateTo);
+      if (filters.page && filters.page > 1) params.set("page", String(filters.page));
+      return getList<StockMovement>(`/stock-movements/?${params.toString()}`);
+    },
+  });
+}
+
+export function useStockTransfer(movementId?: string) {
+  return useQuery({
+    enabled: Boolean(movementId),
+    queryKey: ["stock-transfer", movementId],
+    queryFn: async () => {
+      const response = await apiClient.get<StockMovement>(`/stock-movements/${movementId}/`);
+      return response.data;
+    },
   });
 }
 
