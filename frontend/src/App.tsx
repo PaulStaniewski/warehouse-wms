@@ -1,64 +1,12 @@
 import { Link, Navigate, Route, Routes, useLocation } from "react-router-dom";
-import type { ReactNode } from "react";
+import { Component, lazy, Suspense } from "react";
+import type { ComponentType, ErrorInfo, ReactNode } from "react";
 
 import "./App.css";
 import { ActiveBranchProvider, useActiveBranch } from "./api/ActiveBranchContext";
 import { AuthProvider, useAuth } from "./api/AuthContext";
 import { ScannerLayout, WmsLayout } from "./layout/AppLayout";
-import { BranchDetailPage } from "./pages/BranchDetailPage";
-import { BranchesPage } from "./pages/BranchesPage";
-import { CycleCountCreatePage } from "./pages/CycleCountCreatePage";
-import { CycleCountDetailPage } from "./pages/CycleCountDetailPage";
-import { CycleCountReviewQueuePage } from "./pages/CycleCountReviewQueuePage";
-import { CycleCountsPage } from "./pages/CycleCountsPage";
-import { DashboardPage } from "./pages/DashboardPage";
-import { DiscrepanciesPage } from "./pages/DiscrepanciesPage";
-import { DiscrepancyActionQueuePage } from "./pages/DiscrepancyActionQueuePage";
-import { DiscrepancyDetailPage } from "./pages/DiscrepancyDetailPage";
-import { DiscrepancyReconciliationDetailPage } from "./pages/DiscrepancyReconciliationDetailPage";
-import { DiscrepancyReconciliationsPage } from "./pages/DiscrepancyReconciliationsPage";
-import { DiscrepancyReportPage } from "./pages/DiscrepancyReportPage";
-import { EventDetailPage } from "./pages/EventDetailPage";
-import { EventRegisterPage } from "./pages/EventRegisterPage";
-import { InventoryExceptionsPage } from "./pages/InventoryExceptionsPage";
-import { InventoryPage } from "./pages/InventoryPage";
-import { LocationsPage } from "./pages/LocationsPage";
-import { LocationDetailPage } from "./pages/LocationDetailPage";
 import { LoginPage } from "./pages/LoginPage";
-import { OrdersPage } from "./pages/OrdersPage";
-import { PickingShortagesPage } from "./pages/PickingShortagesPage";
-import { ProductsPage } from "./pages/ProductsPage";
-import { ReplenishmentRequestsPage } from "./pages/ReplenishmentRequestsPage";
-import { RouteMonitorPage } from "./pages/RouteMonitorPage";
-import { RouteArchivePage } from "./pages/RouteArchivePage";
-import { RouteDocumentsPage } from "./pages/RouteDocumentsPage";
-import { ScannerContentsPage } from "./pages/ScannerContentsPage";
-import { ScannerControlPage } from "./pages/ScannerControlPage";
-import { ScannerCycleCountDetailPage } from "./pages/ScannerCycleCountDetailPage";
-import { ScannerCycleCountRecountDetailPage } from "./pages/ScannerCycleCountRecountDetailPage";
-import { ScannerCycleCountRecountsPage } from "./pages/ScannerCycleCountRecountsPage";
-import { ScannerCycleCountsPage } from "./pages/ScannerCycleCountsPage";
-import { ScannerHomePage } from "./pages/ScannerHomePage";
-import { ScannerLocationLookupPage } from "./pages/ScannerLocationLookupPage";
-import { ScannerPickingPage } from "./pages/ScannerPickingPage";
-import { ScannerProformasPage } from "./pages/ScannerProformasPage";
-import { ScannerProductLookupPage } from "./pages/ScannerProductLookupPage";
-import { ScannerQuickTransferPage } from "./pages/ScannerQuickTransferPage";
-import { ScannerReceivingPage } from "./pages/ScannerReceivingPage";
-import { ScannerInterBranchArrivalsPage } from "./pages/ScannerInterBranchArrivalsPage";
-import { ScannerTasksPage } from "./pages/ScannerTasksPage";
-import { SourceDiscrepancyReviewDetailPage } from "./pages/SourceDiscrepancyReviewDetailPage";
-import { SourceDiscrepancyReviewsPage } from "./pages/SourceDiscrepancyReviewsPage";
-import { SourceStockVerificationDetailPage } from "./pages/SourceStockVerificationDetailPage";
-import { SourceStockVerificationsPage } from "./pages/SourceStockVerificationsPage";
-import { StockAdjustmentCreatePage } from "./pages/StockAdjustmentCreatePage";
-import { StockAdjustmentDetailPage } from "./pages/StockAdjustmentDetailPage";
-import { StockAdjustmentsPage } from "./pages/StockAdjustmentsPage";
-import { StockTransferDetailPage } from "./pages/StockTransferDetailPage";
-import { StockTransfersPage } from "./pages/StockTransfersPage";
-import { TransitInvestigationDetailPage } from "./pages/TransitInvestigationDetailPage";
-import { TransitInvestigationsPage } from "./pages/TransitInvestigationsPage";
-import { TransportOverviewPage } from "./pages/TransportOverviewPage";
 import {
   getDefaultInterfacePath,
   locationToPath,
@@ -66,6 +14,181 @@ import {
   SCANNER_HOME_PATH,
   WMS_DASHBOARD_PATH,
 } from "./routing";
+
+function lazyNamed<T extends ComponentType<any>>(
+  importer: () => Promise<Record<string, T>>,
+  exportName: string,
+) {
+  return lazy(async () => {
+    const module = await importer();
+    return { default: module[exportName] };
+  });
+}
+
+const BranchDetailPage = lazyNamed(() => import("./pages/BranchDetailPage"), "BranchDetailPage");
+const BranchesPage = lazyNamed(() => import("./pages/BranchesPage"), "BranchesPage");
+const CycleCountCreatePage = lazyNamed(() => import("./pages/CycleCountCreatePage"), "CycleCountCreatePage");
+const CycleCountDetailPage = lazyNamed(() => import("./pages/CycleCountDetailPage"), "CycleCountDetailPage");
+const CycleCountReviewQueuePage = lazyNamed(() => import("./pages/CycleCountReviewQueuePage"), "CycleCountReviewQueuePage");
+const CycleCountsPage = lazyNamed(() => import("./pages/CycleCountsPage"), "CycleCountsPage");
+const DashboardPage = lazyNamed(() => import("./pages/DashboardPage"), "DashboardPage");
+const DiscrepanciesPage = lazyNamed(() => import("./pages/DiscrepanciesPage"), "DiscrepanciesPage");
+const DiscrepancyActionQueuePage = lazyNamed(() => import("./pages/DiscrepancyActionQueuePage"), "DiscrepancyActionQueuePage");
+const DiscrepancyDetailPage = lazyNamed(() => import("./pages/DiscrepancyDetailPage"), "DiscrepancyDetailPage");
+const DiscrepancyReconciliationDetailPage = lazyNamed(
+  () => import("./pages/DiscrepancyReconciliationDetailPage"),
+  "DiscrepancyReconciliationDetailPage",
+);
+const DiscrepancyReconciliationsPage = lazyNamed(
+  () => import("./pages/DiscrepancyReconciliationsPage"),
+  "DiscrepancyReconciliationsPage",
+);
+const DiscrepancyReportPage = lazyNamed(() => import("./pages/DiscrepancyReportPage"), "DiscrepancyReportPage");
+const EventDetailPage = lazyNamed(() => import("./pages/EventDetailPage"), "EventDetailPage");
+const EventRegisterPage = lazyNamed(() => import("./pages/EventRegisterPage"), "EventRegisterPage");
+const InventoryExceptionsPage = lazyNamed(() => import("./pages/InventoryExceptionsPage"), "InventoryExceptionsPage");
+const InventoryPage = lazyNamed(() => import("./pages/InventoryPage"), "InventoryPage");
+const LocationDetailPage = lazyNamed(() => import("./pages/LocationDetailPage"), "LocationDetailPage");
+const LocationsPage = lazyNamed(() => import("./pages/LocationsPage"), "LocationsPage");
+const OrdersPage = lazyNamed(() => import("./pages/OrdersPage"), "OrdersPage");
+const PickingShortagesPage = lazyNamed(() => import("./pages/PickingShortagesPage"), "PickingShortagesPage");
+const ProductsPage = lazyNamed(() => import("./pages/ProductsPage"), "ProductsPage");
+const ReplenishmentRequestsPage = lazyNamed(() => import("./pages/ReplenishmentRequestsPage"), "ReplenishmentRequestsPage");
+const RouteArchivePage = lazyNamed(() => import("./pages/RouteArchivePage"), "RouteArchivePage");
+const RouteDocumentsPage = lazyNamed(() => import("./pages/RouteDocumentsPage"), "RouteDocumentsPage");
+const RouteMonitorPage = lazyNamed(() => import("./pages/RouteMonitorPage"), "RouteMonitorPage");
+const ScannerContentsPage = lazyNamed(() => import("./pages/ScannerContentsPage"), "ScannerContentsPage");
+const ScannerControlPage = lazyNamed(() => import("./pages/ScannerControlPage"), "ScannerControlPage");
+const ScannerCycleCountDetailPage = lazyNamed(
+  () => import("./pages/ScannerCycleCountDetailPage"),
+  "ScannerCycleCountDetailPage",
+);
+const ScannerCycleCountRecountDetailPage = lazyNamed(
+  () => import("./pages/ScannerCycleCountRecountDetailPage"),
+  "ScannerCycleCountRecountDetailPage",
+);
+const ScannerCycleCountRecountsPage = lazyNamed(
+  () => import("./pages/ScannerCycleCountRecountsPage"),
+  "ScannerCycleCountRecountsPage",
+);
+const ScannerCycleCountsPage = lazyNamed(() => import("./pages/ScannerCycleCountsPage"), "ScannerCycleCountsPage");
+const ScannerHomePage = lazyNamed(() => import("./pages/ScannerHomePage"), "ScannerHomePage");
+const ScannerInterBranchArrivalsPage = lazyNamed(
+  () => import("./pages/ScannerInterBranchArrivalsPage"),
+  "ScannerInterBranchArrivalsPage",
+);
+const ScannerLocationLookupPage = lazyNamed(() => import("./pages/ScannerLocationLookupPage"), "ScannerLocationLookupPage");
+const ScannerPickingPage = lazyNamed(() => import("./pages/ScannerPickingPage"), "ScannerPickingPage");
+const ScannerProductLookupPage = lazyNamed(() => import("./pages/ScannerProductLookupPage"), "ScannerProductLookupPage");
+const ScannerProformasPage = lazyNamed(() => import("./pages/ScannerProformasPage"), "ScannerProformasPage");
+const ScannerQuickTransferPage = lazyNamed(() => import("./pages/ScannerQuickTransferPage"), "ScannerQuickTransferPage");
+const ScannerReceivingPage = lazyNamed(() => import("./pages/ScannerReceivingPage"), "ScannerReceivingPage");
+const ScannerTasksPage = lazyNamed(() => import("./pages/ScannerTasksPage"), "ScannerTasksPage");
+const SourceDiscrepancyReviewDetailPage = lazyNamed(
+  () => import("./pages/SourceDiscrepancyReviewDetailPage"),
+  "SourceDiscrepancyReviewDetailPage",
+);
+const SourceDiscrepancyReviewsPage = lazyNamed(
+  () => import("./pages/SourceDiscrepancyReviewsPage"),
+  "SourceDiscrepancyReviewsPage",
+);
+const SourceStockVerificationDetailPage = lazyNamed(
+  () => import("./pages/SourceStockVerificationDetailPage"),
+  "SourceStockVerificationDetailPage",
+);
+const SourceStockVerificationsPage = lazyNamed(
+  () => import("./pages/SourceStockVerificationsPage"),
+  "SourceStockVerificationsPage",
+);
+const StockAdjustmentCreatePage = lazyNamed(() => import("./pages/StockAdjustmentCreatePage"), "StockAdjustmentCreatePage");
+const StockAdjustmentDetailPage = lazyNamed(() => import("./pages/StockAdjustmentDetailPage"), "StockAdjustmentDetailPage");
+const StockAdjustmentsPage = lazyNamed(() => import("./pages/StockAdjustmentsPage"), "StockAdjustmentsPage");
+const StockTransferDetailPage = lazyNamed(() => import("./pages/StockTransferDetailPage"), "StockTransferDetailPage");
+const StockTransfersPage = lazyNamed(() => import("./pages/StockTransfersPage"), "StockTransfersPage");
+const TransitInvestigationDetailPage = lazyNamed(
+  () => import("./pages/TransitInvestigationDetailPage"),
+  "TransitInvestigationDetailPage",
+);
+const TransitInvestigationsPage = lazyNamed(() => import("./pages/TransitInvestigationsPage"), "TransitInvestigationsPage");
+const TransportOverviewPage = lazyNamed(() => import("./pages/TransportOverviewPage"), "TransportOverviewPage");
+
+function PageChunkLoading() {
+  return (
+    <div className="state-box" role="status">
+      Loading page code...
+    </div>
+  );
+}
+
+type PageChunkErrorBoundaryProps = {
+  children: ReactNode;
+  resetKey: string;
+};
+
+type PageChunkErrorBoundaryState = {
+  error: Error | null;
+  resetKey: string;
+};
+
+class PageChunkErrorBoundary extends Component<PageChunkErrorBoundaryProps, PageChunkErrorBoundaryState> {
+  state: PageChunkErrorBoundaryState = {
+    error: null,
+    resetKey: this.props.resetKey,
+  };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  static getDerivedStateFromProps(props: PageChunkErrorBoundaryProps, state: PageChunkErrorBoundaryState) {
+    if (props.resetKey !== state.resetKey) {
+      return { error: null, resetKey: props.resetKey };
+    }
+    return null;
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error("Route page failed to load.", error, info);
+  }
+
+  retry = () => {
+    this.setState({ error: null });
+  };
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="state-box state-box--error" role="alert">
+          <strong>Page code could not be loaded.</strong>
+          <p>Check your connection and try again. If this tab was open during a deployment, reload the page.</p>
+          <div className="access-denied-actions">
+            <button onClick={this.retry} type="button">
+              Retry
+            </button>
+            <button onClick={() => window.location.reload()} type="button">
+              Reload page
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
+
+function LazyPage({ children }: { children: ReactNode }) {
+  const location = useLocation();
+  return (
+    <PageChunkErrorBoundary resetKey={location.pathname}>
+      <Suspense fallback={<PageChunkLoading />}>{children}</Suspense>
+    </PageChunkErrorBoundary>
+  );
+}
+
+function lazyRoute(page: ReactNode) {
+  return <LazyPage>{page}</LazyPage>;
+}
 
 function useInterfaceAccess() {
   const { isError, isLoading, memberships } = useActiveBranch();
@@ -211,47 +334,47 @@ function App() {
             }
           >
             <Route path="wms" element={<Navigate to={WMS_DASHBOARD_PATH} replace />} />
-            <Route path="wms/dashboard" element={<DashboardPage />} />
-            <Route path="wms/products" element={<ProductsPage />} />
-            <Route path="wms/inventory" element={<InventoryPage />} />
-            <Route path="wms/orders" element={<OrdersPage />} />
-            <Route path="wms/branches" element={<BranchesPage />} />
-            <Route path="wms/branches/:id" element={<BranchDetailPage />} />
-            <Route path="wms/locations" element={<LocationsPage />} />
-            <Route path="wms/locations/:id" element={<LocationDetailPage />} />
-            <Route path="wms/stock-transfers" element={<StockTransfersPage />} />
-            <Route path="wms/stock-transfers/:id" element={<StockTransferDetailPage />} />
-            <Route path="wms/stock-adjustments" element={<StockAdjustmentsPage />} />
-            <Route path="wms/stock-adjustments/new" element={<StockAdjustmentCreatePage />} />
-            <Route path="wms/stock-adjustments/:id" element={<StockAdjustmentDetailPage />} />
-            <Route path="wms/cycle-counts" element={<CycleCountsPage />} />
-            <Route path="wms/cycle-count-review-queue" element={<CycleCountReviewQueuePage />} />
-            <Route path="wms/cycle-counts/new" element={<CycleCountCreatePage />} />
-            <Route path="wms/cycle-counts/:id" element={<CycleCountDetailPage />} />
-            <Route path="wms/transport-overview" element={<TransportOverviewPage />} />
-            <Route path="wms/routes-monitor" element={<RouteMonitorPage />} />
-            <Route path="wms/routes/archive" element={<RouteArchivePage />} />
-            <Route path="wms/discrepancy-actions" element={<DiscrepancyActionQueuePage />} />
-            <Route path="wms/replenishment-requests" element={<ReplenishmentRequestsPage />} />
-            <Route path="wms/inventory-exceptions" element={<InventoryExceptionsPage />} />
-            <Route path="wms/picking-shortages" element={<PickingShortagesPage />} />
-            <Route path="wms/discrepancies" element={<DiscrepanciesPage />} />
-            <Route path="wms/discrepancies/:id" element={<DiscrepancyDetailPage />} />
-            <Route path="wms/discrepancies/:id/report" element={<DiscrepancyReportPage />} />
-            <Route path="wms/source-discrepancy-reviews" element={<SourceDiscrepancyReviewsPage />} />
-            <Route path="wms/source-discrepancy-reviews/:id" element={<SourceDiscrepancyReviewDetailPage />} />
-            <Route path="wms/discrepancy-reconciliations" element={<DiscrepancyReconciliationsPage />} />
-            <Route path="wms/discrepancy-reconciliations/:id" element={<DiscrepancyReconciliationDetailPage />} />
-            <Route path="wms/source-stock-verifications" element={<SourceStockVerificationsPage />} />
-            <Route path="wms/source-stock-verifications/:id" element={<SourceStockVerificationDetailPage />} />
-            <Route path="wms/transit-investigations" element={<TransitInvestigationsPage />} />
-            <Route path="wms/transit-investigations/:id" element={<TransitInvestigationDetailPage />} />
-            <Route path="wms/route-runs/:id/documents" element={<RouteDocumentsPage />} />
+            <Route path="wms/dashboard" element={lazyRoute(<DashboardPage />)} />
+            <Route path="wms/products" element={lazyRoute(<ProductsPage />)} />
+            <Route path="wms/inventory" element={lazyRoute(<InventoryPage />)} />
+            <Route path="wms/orders" element={lazyRoute(<OrdersPage />)} />
+            <Route path="wms/branches" element={lazyRoute(<BranchesPage />)} />
+            <Route path="wms/branches/:id" element={lazyRoute(<BranchDetailPage />)} />
+            <Route path="wms/locations" element={lazyRoute(<LocationsPage />)} />
+            <Route path="wms/locations/:id" element={lazyRoute(<LocationDetailPage />)} />
+            <Route path="wms/stock-transfers" element={lazyRoute(<StockTransfersPage />)} />
+            <Route path="wms/stock-transfers/:id" element={lazyRoute(<StockTransferDetailPage />)} />
+            <Route path="wms/stock-adjustments" element={lazyRoute(<StockAdjustmentsPage />)} />
+            <Route path="wms/stock-adjustments/new" element={lazyRoute(<StockAdjustmentCreatePage />)} />
+            <Route path="wms/stock-adjustments/:id" element={lazyRoute(<StockAdjustmentDetailPage />)} />
+            <Route path="wms/cycle-counts" element={lazyRoute(<CycleCountsPage />)} />
+            <Route path="wms/cycle-count-review-queue" element={lazyRoute(<CycleCountReviewQueuePage />)} />
+            <Route path="wms/cycle-counts/new" element={lazyRoute(<CycleCountCreatePage />)} />
+            <Route path="wms/cycle-counts/:id" element={lazyRoute(<CycleCountDetailPage />)} />
+            <Route path="wms/transport-overview" element={lazyRoute(<TransportOverviewPage />)} />
+            <Route path="wms/routes-monitor" element={lazyRoute(<RouteMonitorPage />)} />
+            <Route path="wms/routes/archive" element={lazyRoute(<RouteArchivePage />)} />
+            <Route path="wms/discrepancy-actions" element={lazyRoute(<DiscrepancyActionQueuePage />)} />
+            <Route path="wms/replenishment-requests" element={lazyRoute(<ReplenishmentRequestsPage />)} />
+            <Route path="wms/inventory-exceptions" element={lazyRoute(<InventoryExceptionsPage />)} />
+            <Route path="wms/picking-shortages" element={lazyRoute(<PickingShortagesPage />)} />
+            <Route path="wms/discrepancies" element={lazyRoute(<DiscrepanciesPage />)} />
+            <Route path="wms/discrepancies/:id" element={lazyRoute(<DiscrepancyDetailPage />)} />
+            <Route path="wms/discrepancies/:id/report" element={lazyRoute(<DiscrepancyReportPage />)} />
+            <Route path="wms/source-discrepancy-reviews" element={lazyRoute(<SourceDiscrepancyReviewsPage />)} />
+            <Route path="wms/source-discrepancy-reviews/:id" element={lazyRoute(<SourceDiscrepancyReviewDetailPage />)} />
+            <Route path="wms/discrepancy-reconciliations" element={lazyRoute(<DiscrepancyReconciliationsPage />)} />
+            <Route path="wms/discrepancy-reconciliations/:id" element={lazyRoute(<DiscrepancyReconciliationDetailPage />)} />
+            <Route path="wms/source-stock-verifications" element={lazyRoute(<SourceStockVerificationsPage />)} />
+            <Route path="wms/source-stock-verifications/:id" element={lazyRoute(<SourceStockVerificationDetailPage />)} />
+            <Route path="wms/transit-investigations" element={lazyRoute(<TransitInvestigationsPage />)} />
+            <Route path="wms/transit-investigations/:id" element={lazyRoute(<TransitInvestigationDetailPage />)} />
+            <Route path="wms/route-runs/:id/documents" element={lazyRoute(<RouteDocumentsPage />)} />
             <Route path="wms/current-events" element={<EventsRedirect target="current" />} />
             <Route path="wms/events" element={<EventsRedirect target="current" />} />
-            <Route path="wms/events/current" element={<EventRegisterPage source="current" />} />
-            <Route path="wms/events/archive" element={<EventRegisterPage source="archive" />} />
-            <Route path="wms/events/:source/:id" element={<EventDetailPage />} />
+            <Route path="wms/events/current" element={lazyRoute(<EventRegisterPage source="current" />)} />
+            <Route path="wms/events/archive" element={lazyRoute(<EventRegisterPage source="archive" />)} />
+            <Route path="wms/events/:source/:id" element={lazyRoute(<EventDetailPage />)} />
             <Route path="products" element={<Navigate to="/wms/products" replace />} />
             <Route path="inventory" element={<Navigate to="/wms/inventory" replace />} />
             <Route path="orders" element={<Navigate to="/wms/orders" replace />} />
@@ -267,24 +390,24 @@ function App() {
               </AuthenticatedRoute>
             }
           >
-            <Route path="scanner" element={<ScannerHomePage />} />
-            <Route path="scanner/proformas" element={<ScannerProformasPage />} />
-            <Route path="scanner/tasks" element={<ScannerTasksPage />} />
-            <Route path="scanner/picking" element={<ScannerPickingPage />} />
-            <Route path="scanner/control" element={<ScannerControlPage />} />
-            <Route path="scanner/receiving" element={<ScannerReceivingPage />} />
-            <Route path="scanner/inter-branch-arrivals" element={<ScannerInterBranchArrivalsPage />} />
-            <Route path="scanner/cycle-counts" element={<ScannerCycleCountsPage />} />
-            <Route path="scanner/cycle-counts/:id" element={<ScannerCycleCountDetailPage />} />
-            <Route path="scanner/cycle-count-recounts" element={<ScannerCycleCountRecountsPage />} />
-            <Route path="scanner/cycle-count-recounts/:id" element={<ScannerCycleCountRecountDetailPage />} />
+            <Route path="scanner" element={lazyRoute(<ScannerHomePage />)} />
+            <Route path="scanner/proformas" element={lazyRoute(<ScannerProformasPage />)} />
+            <Route path="scanner/tasks" element={lazyRoute(<ScannerTasksPage />)} />
+            <Route path="scanner/picking" element={lazyRoute(<ScannerPickingPage />)} />
+            <Route path="scanner/control" element={lazyRoute(<ScannerControlPage />)} />
+            <Route path="scanner/receiving" element={lazyRoute(<ScannerReceivingPage />)} />
+            <Route path="scanner/inter-branch-arrivals" element={lazyRoute(<ScannerInterBranchArrivalsPage />)} />
+            <Route path="scanner/cycle-counts" element={lazyRoute(<ScannerCycleCountsPage />)} />
+            <Route path="scanner/cycle-counts/:id" element={lazyRoute(<ScannerCycleCountDetailPage />)} />
+            <Route path="scanner/cycle-count-recounts" element={lazyRoute(<ScannerCycleCountRecountsPage />)} />
+            <Route path="scanner/cycle-count-recounts/:id" element={lazyRoute(<ScannerCycleCountRecountDetailPage />)} />
             <Route path="scanner/routes" element={<Navigate to="/scanner/proformas" replace />} />
             <Route path="scanner/route-runs/:id/picking" element={<Navigate to="/scanner/picking" replace />} />
             <Route path="scanner/route-runs/:id/control" element={<Navigate to="/scanner/control" replace />} />
-            <Route path="scanner/product" element={<ScannerProductLookupPage />} />
-            <Route path="scanner/contents" element={<ScannerContentsPage />} />
-            <Route path="scanner/location" element={<ScannerLocationLookupPage />} />
-            <Route path="scanner/quick-transfer" element={<ScannerQuickTransferPage />} />
+            <Route path="scanner/product" element={lazyRoute(<ScannerProductLookupPage />)} />
+            <Route path="scanner/contents" element={lazyRoute(<ScannerContentsPage />)} />
+            <Route path="scanner/location" element={lazyRoute(<ScannerLocationLookupPage />)} />
+            <Route path="scanner/quick-transfer" element={lazyRoute(<ScannerQuickTransferPage />)} />
           </Route>
           <Route path="*" element={<Navigate to="/wms/dashboard" replace />} />
         </Routes>

@@ -84,6 +84,16 @@ describe("application routing and layouts", () => {
     expect(screen.getByText("GDY_LEADER")).toBeInTheDocument();
   });
 
+  it("keeps legacy event register redirects working with lazy-loaded pages", async () => {
+    setViewport(false);
+    mockApiDefaults();
+
+    renderWithProviders(<App />, { route: "/wms/current-events?actor=GDY" });
+
+    expect((await screen.findAllByRole("heading", { name: "Event Register" })).length).toBeGreaterThan(0);
+    expect(screen.getByLabelText("Actor")).toHaveValue("GDY");
+  });
+
   it("renders grouped WMS sidebar without Scanner menu entries", async () => {
     setViewport(false);
     mockApiDefaults();
