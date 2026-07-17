@@ -231,6 +231,9 @@ export type StockMovement = {
   destination_location_code: string | null;
   movement_type: string;
   movement_type_label: string;
+  adjustment_direction: "increase" | "decrease" | "unknown" | null;
+  adjustment_location: number | null;
+  adjustment_location_code: string | null;
   quantity: string;
   reference: string;
   performed_by: number | null;

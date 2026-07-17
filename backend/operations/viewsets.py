@@ -9,6 +9,7 @@ from django.utils.dateparse import parse_date
 from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.pagination import PageNumberPagination
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.viewsets import ReadOnlyModelViewSet, ViewSet
 
@@ -773,11 +774,14 @@ class ReplenishmentRequestViewSet(ReadOnlyModelViewSet):
 
 
 class StockMovementFilter(django_filters.FilterSet):
+    adjustment_direction = django_filters.CharFilter(method="filter_adjustment_direction")
     branch = django_filters.CharFilter(method="filter_branch")
     date_from = django_filters.DateFilter(field_name="created_at", lookup_expr="date__gte")
     date_to = django_filters.DateFilter(field_name="created_at", lookup_expr="date__lte")
     destination_location = django_filters.CharFilter(field_name="destination_location__code", lookup_expr="iexact")
     internal_transfer = django_filters.BooleanFilter(method="filter_internal_transfer")
+    location = django_filters.CharFilter(method="filter_location")
+    performed_by = django_filters.CharFilter(method="filter_performed_by")
     product = django_filters.CharFilter(method="filter_product")
     source_location = django_filters.CharFilter(field_name="source_location__code", lookup_expr="iexact")
 
@@ -787,17 +791,44 @@ class StockMovementFilter(django_filters.FilterSet):
             "branch",
             "product",
             "movement_type",
+            "adjustment_direction",
             "source_location",
             "destination_location",
+            "location",
             "internal_transfer",
             "date_from",
             "date_to",
+            "performed_by",
         ]
+
+    def filter_adjustment_direction(self, queryset, name, value):
+        normalized = str(value).strip().lower()
+        if normalized == "increase":
+            return queryset.filter(destination_location__isnull=False, source_location__isnull=True)
+        if normalized == "decrease":
+            return queryset.filter(source_location__isnull=False, destination_location__isnull=True)
+        if normalized == "unknown":
+            return queryset.filter(
+                models.Q(source_location__isnull=True, destination_location__isnull=True)
+                | models.Q(source_location__isnull=False, destination_location__isnull=False)
+            )
+        return queryset
 
     def filter_branch(self, queryset, name, value):
         if str(value).isdigit():
             return queryset.filter(branch_id=value)
         return queryset.filter(branch__code__iexact=value)
+
+    def filter_location(self, queryset, name, value):
+        return queryset.filter(
+            models.Q(source_location__code__iexact=value)
+            | models.Q(destination_location__code__iexact=value)
+        )
+
+    def filter_performed_by(self, queryset, name, value):
+        if str(value).isdigit():
+            return queryset.filter(performed_by_id=value)
+        return queryset.filter(performed_by__username__iexact=value)
 
     def filter_product(self, queryset, name, value):
         if str(value).isdigit():
@@ -828,6 +859,7 @@ class StockMovementViewSet(ReadOnlyModelViewSet):
         "performed_by",
     )
     serializer_class = StockMovementSerializer
+    permission_classes = [IsAuthenticated]
     filterset_class = StockMovementFilter
     search_fields = [
         "product__sku",
@@ -843,6 +875,11 @@ class StockMovementViewSet(ReadOnlyModelViewSet):
 
     def get_queryset(self):
         return filter_branch_queryset(super().get_queryset(), self.request, "branch")
+
+
+class StockAdjustmentViewSet(StockMovementViewSet):
+    def get_queryset(self):
+        return super().get_queryset().filter(movement_type=StockMovement.MovementType.ADJUSTMENT)
 
 
 class AuditLogViewSet(ReadOnlyModelViewSet):

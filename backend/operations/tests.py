@@ -278,6 +278,14 @@ class StockTransferHistoryApiTests(APITestCase):
         self.assertEqual(row["status"], "completed")
         self.assertEqual(row["origin"], "Scanner Quick Transfer")
 
+    def test_stock_movement_list_requires_authentication(self):
+        response = self.client.get(
+            "/api/stock-movements/",
+            {"branch": "STH", "movement_type": "transfer", "internal_transfer": "true"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
     def test_internal_transfer_list_is_branch_scoped(self):
         self.client.force_authenticate(self.user)
 
@@ -297,6 +305,137 @@ class StockTransferHistoryApiTests(APITestCase):
         self.assertEqual(forbidden.status_code, status.HTTP_404_NOT_FOUND)
         self.assertEqual(allowed.status_code, status.HTTP_200_OK)
         self.assertEqual(allowed.data["reference"], "SCANNER-TRANSFER-S-01-01-S-02-01")
+
+
+class StockAdjustmentHistoryApiTests(APITestCase):
+    def setUp(self):
+        self.branch = Branch.objects.create(code="ADJ", name="Adjustment Branch", city="Gdynia", country="Poland")
+        self.other_branch = Branch.objects.create(code="AOT", name="Other Adjustment", city="Gdansk", country="Poland")
+        self.user = User.objects.create_user(username="ADJ_WORKER", password="demo12345")
+        UserBranchMembership.objects.create(user=self.user, branch=self.branch, role=UserBranchMembership.Role.WORKER)
+        self.product = Product.objects.create(sku="ADJ-001", name="Adjustment product", barcode="779900000001")
+        self.location = Location.objects.create(
+            branch=self.branch,
+            code="ADJ-01",
+            name="Adjustment location",
+            location_type=Location.LocationType.STORAGE,
+        )
+        self.decrease_location = Location.objects.create(
+            branch=self.branch,
+            code="ADJ-02",
+            name="Decrease location",
+            location_type=Location.LocationType.PICKING,
+        )
+        self.other_location = Location.objects.create(
+            branch=self.other_branch,
+            code="AOT-01",
+            name="Other location",
+            location_type=Location.LocationType.STORAGE,
+        )
+        self.inventory = InventoryItem.objects.create(
+            branch=self.branch,
+            location=self.location,
+            product=self.product,
+            quantity_on_hand=Decimal("5"),
+            quantity_reserved=Decimal("0"),
+        )
+        self.increase = StockMovement.objects.create(
+            branch=self.branch,
+            product=self.product,
+            inventory_item=self.inventory,
+            destination_location=self.location,
+            movement_type=StockMovement.MovementType.ADJUSTMENT,
+            quantity=Decimal("2"),
+            reference="ADJ-INC-001",
+            performed_by=self.user,
+        )
+        self.decrease = StockMovement.objects.create(
+            branch=self.branch,
+            product=self.product,
+            inventory_item=self.inventory,
+            source_location=self.decrease_location,
+            movement_type=StockMovement.MovementType.ADJUSTMENT,
+            quantity=Decimal("1"),
+            reference="ADJ-DEC-001",
+        )
+        self.transfer = StockMovement.objects.create(
+            branch=self.branch,
+            product=self.product,
+            inventory_item=self.inventory,
+            source_location=self.location,
+            destination_location=self.decrease_location,
+            movement_type=StockMovement.MovementType.TRANSFER,
+            quantity=Decimal("1"),
+            reference="TRANSFER-NOT-ADJUSTMENT",
+        )
+        self.other_adjustment = StockMovement.objects.create(
+            branch=self.other_branch,
+            product=self.product,
+            destination_location=self.other_location,
+            movement_type=StockMovement.MovementType.ADJUSTMENT,
+            quantity=Decimal("1"),
+            reference="ADJ-OTHER-001",
+        )
+
+    def test_stock_adjustment_list_requires_authentication(self):
+        response = self.client.get("/api/stock-adjustments/", {"branch": "ADJ"})
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_stock_adjustment_list_shows_only_adjustments_newest_first(self):
+        self.client.force_authenticate(self.user)
+
+        response = self.client.get("/api/stock-adjustments/", {"branch": "ADJ"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 2)
+        references = [row["reference"] for row in response.data["results"]]
+        self.assertEqual(references, ["ADJ-DEC-001", "ADJ-INC-001"])
+        self.assertNotIn("TRANSFER-NOT-ADJUSTMENT", references)
+
+    def test_stock_adjustment_direction_and_location_fields_are_structured(self):
+        self.client.force_authenticate(self.user)
+
+        response = self.client.get("/api/stock-adjustments/", {"branch": "ADJ", "adjustment_direction": "increase"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        row = response.data["results"][0]
+        self.assertEqual(row["reference"], "ADJ-INC-001")
+        self.assertEqual(row["adjustment_direction"], "increase")
+        self.assertEqual(row["adjustment_location"], self.location.id)
+        self.assertEqual(row["adjustment_location_code"], "ADJ-01")
+        self.assertEqual(row["origin"], "Adjustment")
+
+    def test_stock_adjustment_filters_by_location_and_worker(self):
+        self.client.force_authenticate(self.user)
+
+        by_location = self.client.get("/api/stock-adjustments/", {"branch": "ADJ", "location": "ADJ-02"})
+        by_worker = self.client.get("/api/stock-adjustments/", {"branch": "ADJ", "performed_by": "ADJ_WORKER"})
+
+        self.assertEqual(by_location.status_code, status.HTTP_200_OK)
+        self.assertEqual([row["reference"] for row in by_location.data["results"]], ["ADJ-DEC-001"])
+        self.assertEqual(by_worker.status_code, status.HTTP_200_OK)
+        self.assertEqual([row["reference"] for row in by_worker.data["results"]], ["ADJ-INC-001"])
+
+    def test_stock_adjustment_list_is_branch_scoped(self):
+        self.client.force_authenticate(self.user)
+
+        response = self.client.get("/api/stock-adjustments/", {"branch": "AOT"})
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_stock_adjustment_detail_rejects_non_adjustment_and_other_branch(self):
+        self.client.force_authenticate(self.user)
+
+        transfer_response = self.client.get(f"/api/stock-adjustments/{self.transfer.id}/")
+        other_response = self.client.get(f"/api/stock-adjustments/{self.other_adjustment.id}/")
+        allowed_response = self.client.get(f"/api/stock-adjustments/{self.increase.id}/")
+
+        self.assertEqual(transfer_response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(other_response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(allowed_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(allowed_response.data["reference"], "ADJ-INC-001")
 
 
 class PickingTaskCompleteActionTests(APITestCase):

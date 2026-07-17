@@ -140,7 +140,7 @@ export function useStockTransfers(filters: StockTransferListFilters = {}) {
       if (filters.dateFrom) params.set("date_from", filters.dateFrom);
       if (filters.dateTo) params.set("date_to", filters.dateTo);
       if (filters.page && filters.page > 1) params.set("page", String(filters.page));
-      return getList<StockMovement>(`/stock-movements/?${params.toString()}`);
+      return getList<StockMovement>(`/stock-adjustments/?${params.toString()}`);
     },
   });
 }
@@ -149,6 +149,49 @@ export function useStockTransfer(movementId?: string) {
   return useQuery({
     enabled: Boolean(movementId),
     queryKey: ["stock-transfer", movementId],
+    queryFn: async () => {
+      const response = await apiClient.get<StockMovement>(`/stock-adjustments/${movementId}/`);
+      return response.data;
+    },
+  });
+}
+
+export type StockAdjustmentListFilters = {
+  branch?: string;
+  dateFrom?: string;
+  dateTo?: string;
+  direction?: string;
+  location?: string;
+  page?: number;
+  performedBy?: string;
+  product?: string;
+  search?: string;
+};
+
+export function useStockAdjustments(filters: StockAdjustmentListFilters = {}) {
+  return useQuery({
+    queryKey: ["stock-adjustments", filters],
+    queryFn: () => {
+      const params = new URLSearchParams();
+      params.set("movement_type", "adjustment");
+      if (filters.branch) params.set("branch", filters.branch);
+      if (filters.search) params.set("search", filters.search);
+      if (filters.product) params.set("product", filters.product);
+      if (filters.location) params.set("location", filters.location);
+      if (filters.direction) params.set("adjustment_direction", filters.direction);
+      if (filters.performedBy) params.set("performed_by", filters.performedBy);
+      if (filters.dateFrom) params.set("date_from", filters.dateFrom);
+      if (filters.dateTo) params.set("date_to", filters.dateTo);
+      if (filters.page && filters.page > 1) params.set("page", String(filters.page));
+      return getList<StockMovement>(`/stock-movements/?${params.toString()}`);
+    },
+  });
+}
+
+export function useStockAdjustment(movementId?: string) {
+  return useQuery({
+    enabled: Boolean(movementId),
+    queryKey: ["stock-adjustment", movementId],
     queryFn: async () => {
       const response = await apiClient.get<StockMovement>(`/stock-movements/${movementId}/`);
       return response.data;

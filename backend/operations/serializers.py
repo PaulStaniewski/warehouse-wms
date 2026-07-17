@@ -595,8 +595,32 @@ class StockMovementSerializer(serializers.ModelSerializer):
     destination_location_code = serializers.CharField(source="destination_location.code", read_only=True)
     performed_by_username = serializers.CharField(source="performed_by.username", read_only=True)
     movement_type_label = serializers.CharField(source="get_movement_type_display", read_only=True)
+    adjustment_direction = serializers.SerializerMethodField()
+    adjustment_location = serializers.SerializerMethodField()
+    adjustment_location_code = serializers.SerializerMethodField()
     status = serializers.SerializerMethodField()
     origin = serializers.SerializerMethodField()
+
+    def get_adjustment_direction(self, obj) -> str | None:
+        if obj.movement_type != StockMovement.MovementType.ADJUSTMENT:
+            return None
+        if obj.destination_location_id and not obj.source_location_id:
+            return "increase"
+        if obj.source_location_id and not obj.destination_location_id:
+            return "decrease"
+        return "unknown"
+
+    def get_adjustment_location(self, obj) -> int | None:
+        if obj.movement_type != StockMovement.MovementType.ADJUSTMENT:
+            return None
+        location = obj.destination_location or obj.source_location
+        return location.id if location else None
+
+    def get_adjustment_location_code(self, obj) -> str | None:
+        if obj.movement_type != StockMovement.MovementType.ADJUSTMENT:
+            return None
+        location = obj.destination_location or obj.source_location
+        return location.code if location else None
 
     def get_status(self, obj) -> str:
         return "completed"
@@ -622,6 +646,9 @@ class StockMovementSerializer(serializers.ModelSerializer):
             "destination_location_code",
             "movement_type",
             "movement_type_label",
+            "adjustment_direction",
+            "adjustment_location",
+            "adjustment_location_code",
             "quantity",
             "reference",
             "performed_by",

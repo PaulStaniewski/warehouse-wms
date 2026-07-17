@@ -87,6 +87,7 @@ const wmsNavSections: NavSection[] = [
     label: "Inventory Operations",
     items: [
       { to: "/wms/stock-transfers", label: "Stock Transfers", icon: Boxes },
+      { to: "/wms/stock-adjustments", label: "Stock Adjustments", icon: ClipboardList },
     ],
   },
   {
@@ -153,6 +154,7 @@ const wmsPageTitles: Array<[string, string]> = [
   ["/wms/events/archive", "Archive Events"],
   ["/wms/discrepancies", "Discrepancies"],
   ["/wms/branches", "Branches"],
+  ["/wms/stock-adjustments", "Stock Adjustments"],
   ["/wms/stock-transfers", "Stock Transfers"],
   ["/wms/dashboard", "Dashboard"],
   ["/wms/products", "Products"],
