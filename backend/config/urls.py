@@ -1,6 +1,7 @@
 from django.contrib import admin
 from django.urls import include, path
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
+from rest_framework.permissions import AllowAny
 
 from config.api import auth_login, auth_logout, auth_session, current_events, me_branch_memberships, router
 from config.views import health_check
@@ -51,8 +52,8 @@ from operations.scanner_views import (
 
 urlpatterns = [
     path("api/health/", health_check, name="health-check"),
-    path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
-    path("api/docs/", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"),
+    path("api/schema/", SpectacularAPIView.as_view(permission_classes=[AllowAny]), name="schema"),
+    path("api/docs/", SpectacularSwaggerView.as_view(url_name="schema", permission_classes=[AllowAny]), name="swagger-ui"),
     path("api/auth/session/", auth_session, name="auth-session"),
     path("api/auth/login/", auth_login, name="auth-login"),
     path("api/auth/logout/", auth_logout, name="auth-logout"),

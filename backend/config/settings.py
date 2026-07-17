@@ -95,13 +95,12 @@ REDIS_URL = config("REDIS_URL", default="redis://redis:6379/0")
 
 REST_FRAMEWORK = {
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
-    # JWT will replace this development-friendly API authentication layer later.
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "accounts.authentication.CsrfExemptSessionAuthentication",
         "rest_framework.authentication.BasicAuthentication",
     ],
     "DEFAULT_PERMISSION_CLASSES": [
-        "rest_framework.permissions.AllowAny",
+        "rest_framework.permissions.IsAuthenticated",
     ],
     "DEFAULT_FILTER_BACKENDS": [
         "django_filters.rest_framework.DjangoFilterBackend",

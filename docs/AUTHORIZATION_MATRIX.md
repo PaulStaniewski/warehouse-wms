@@ -6,7 +6,7 @@ This document describes the implemented Warehouse WMS authorization model. Front
 
 | User state | Backend behavior | Frontend behavior |
 | --- | --- | --- |
-| Unauthenticated | May access health and authentication/session endpoints. Some legacy/demo read and scanner endpoints still keep the historical permissive DRF default; sensitive command, review, stock movement, cycle count, overview, and exception endpoints are explicitly authenticated. | Redirects protected WMS and Scanner routes to Login with intended destination preserved. |
+| Unauthenticated | May access only explicitly public endpoints such as health, authentication/session, schema, and documentation. Operational API endpoints require authentication by default. | Redirects protected WMS and Scanner routes to Login with intended destination preserved. |
 | Authenticated without branch membership | Has no branch-scoped operational access. | Shows interface unavailable state. |
 | Worker | Can read and execute worker workflows for assigned branches. Cannot execute Leader-only commands. | Sees normal worker WMS/Scanner navigation; Leader-only links and actions are hidden. |
 | Leader | Can read worker surfaces and execute Leader-only commands for assigned branches. | Sees Leader-only navigation and action controls for the active branch. |
@@ -22,11 +22,13 @@ This document describes the implemented Warehouse WMS authorization model. Front
 | `GET /api/auth/session/` | Public session probe; returns unauthenticated state when no session exists. |
 | `POST /api/auth/login/` | Public login endpoint. |
 | `POST /api/auth/logout/` | Public logout endpoint; safe when no session exists. |
+| `GET /api/schema/` | Public OpenAPI schema. |
+| `GET /api/docs/` | Public Swagger UI. |
 | `GET /api/me/branch-memberships/` | Returns memberships only for an authenticated session; unauthenticated callers receive an authentication error response. |
 
-The project still has a compatibility default of `AllowAny` for legacy/demo API surfaces. Endpoints that have completed authorization hardening set `IsAuthenticated` explicitly. This is an intentionally documented transition state, not the target production posture.
+The global DRF default permission is `IsAuthenticated`. Public endpoints must opt in to anonymous access explicitly with `AllowAny`. Operational viewsets, APIViews, scanner endpoints, and custom actions should not declare `AllowAny` unless the exception is documented here.
 
-Explicitly authenticated operational surfaces include:
+Authenticated operational surfaces include:
 
 | Endpoint area | Access |
 | --- | --- |
@@ -37,7 +39,7 @@ Explicitly authenticated operational surfaces include:
 | `/api/transport-overview/` | Authenticated; branch scoped. |
 | `/api/scanner/cycle-counts/` and `/api/scanner/cycle-count-recounts/` | Authenticated; branch scoped scanner execution. |
 
-Remaining legacy/demo endpoints should be moved to explicit authentication in a dedicated compatibility-breaking hardening pass with corresponding test updates.
+Other operational routes inherit the authenticated default and then apply their branch, role, object, and workflow-state checks.
 
 ## Branch Scoping
 
@@ -97,3 +99,4 @@ Remaining legacy/demo endpoints should be moved to explicit authentication in a 
 - Superusers are treated as Leaders across all branches by `membership_role`.
 - Staff users do not receive a bypass unless they are also superusers or have branch memberships.
 - The active branch stored by the frontend selects working context only; it does not grant backend access.
+- The DRF default permission is authenticated access. Anonymous operational access requires an explicit, documented public exception.

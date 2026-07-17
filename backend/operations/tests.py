@@ -15,6 +15,14 @@ from rest_framework.test import APITestCase
 User = get_user_model()
 
 from accounts.models import UserBranchMembership
+
+
+def create_branch_user(username, branch, role=UserBranchMembership.Role.WORKER):
+    user = User.objects.create_user(username=username, password="demo12345")
+    UserBranchMembership.objects.create(user=user, branch=branch, role=role)
+    return user
+
+
 from operations.models import (
     AuditLog,
     CartPickedItem,
@@ -145,11 +153,17 @@ class BranchMembershipAuthorizationTests(APITestCase):
 
     def test_authenticated_operational_api_endpoints_reject_anonymous_access(self):
         for path in [
+            "/api/products/",
+            "/api/locations/",
+            "/api/inventory-items/",
+            "/api/orders/",
+            "/api/route-runs/",
             "/api/stock-movements/",
             "/api/cycle-counts/",
             "/api/inventory-exceptions/",
             "/api/transport-overview/",
             "/api/cycle-count-review-queue/",
+            "/api/scanner/proformas/",
             "/api/scanner/cycle-counts/",
         ]:
             with self.subTest(path=path):
@@ -1745,6 +1759,9 @@ class PickingTaskCompleteActionTests(APITestCase):
             quantity_to_pick=Decimal("2"),
             quantity_picked=Decimal("0"),
         )
+        self.user = create_branch_user("TST_WORKER", self.branch)
+        self.client.force_authenticate(self.user)
+
     def complete_task(self, task=None, location_code="A-01-01", product_code="990000000001"):
         task = task or self.task
         return self.client.post(
@@ -1878,6 +1895,8 @@ class ScannerPickingScanActionTests(APITestCase):
         )
         self.cart = ScannerCart.objects.create(code="CART-01", name="Cart 01", status=ScannerCart.Status.IN_USE)
         self.session = ScannerSession.objects.create(cart=self.cart, worker_code="DEMO")
+        self.user = create_branch_user("SCN_WORKER", self.branch)
+        self.client.force_authenticate(self.user)
 
     def scan(self, route_run_id=None, code="SCAN-001"):
         return self.client.post(
@@ -2338,6 +2357,8 @@ class ScannerContentsLookupTests(APITestCase):
             order=self.empty_order,
             printer_code="ZEBRA-01",
         )
+        self.user = create_branch_user("CNT_WORKER", self.branch)
+        self.client.force_authenticate(self.user)
 
     def create_order(self, reference, customer_name):
         order = Order.objects.create(
@@ -2465,6 +2486,7 @@ class InterBranchPalletArrivalTests(APITestCase):
         self.source_worker = User.objects.create_user(username="GDA_WORKER", password="demo12345")
         UserBranchMembership.objects.create(user=self.worker, branch=self.destination, role=UserBranchMembership.Role.WORKER)
         UserBranchMembership.objects.create(user=self.source_worker, branch=self.source, role=UserBranchMembership.Role.WORKER)
+        self.client.force_authenticate(self.worker)
         self.product = Product.objects.create(sku="ARR-001", name="Arrival item", unit_of_measure="pcs")
         self.location = Location.objects.create(
             branch=self.destination, code="ARR-01", name="Arrival storage", location_type=Location.LocationType.STORAGE
@@ -2625,6 +2647,17 @@ class ScannerReceivingWorkflowTests(APITestCase):
             received_quantity=Decimal("0"),
         )
         TransferPalletArrival.objects.create(pallet=self.pallet, scanned_by_worker_code="WORKER-1")
+        self.worker = User.objects.create_superuser(
+            username="WORKER-1",
+            password="demo12345",
+            email="receiving@example.com",
+        )
+        self.final_leader = User.objects.create_superuser(
+            username="FINAL-LEADER",
+            password="demo12345",
+            email="final-leader@example.com",
+        )
+        self.client.force_authenticate(self.worker)
 
     def create_transfer_pallet_fixture(self, suffix=None):
         suffix = suffix or f"{TransferPallet.objects.count() + 1:03d}"
@@ -2705,16 +2738,19 @@ class ScannerReceivingWorkflowTests(APITestCase):
         )
 
     def confirm_shortage(self, discrepancy, product_code="FILTR-001", quantity="1", operation_id="shortage-1"):
-        return self.client.post(
+        self.client.force_authenticate(self.final_leader)
+        response = self.client.post(
             f"/api/transfer-discrepancies/{discrepancy.id}/confirm-shortage/",
             {
                 "product_code": product_code,
                 "quantity": quantity,
-                "worker_code": "WORKER-1",
+                "worker_code": "FINAL-LEADER",
                 "client_operation_id": operation_id,
             },
             format="json",
         )
+        self.client.force_authenticate(self.worker)
+        return response
 
     def begin_source_review(self, review, worker_code="WORKER-1"):
         return self.client.post(
@@ -2798,12 +2834,13 @@ class ScannerReceivingWorkflowTests(APITestCase):
         note="Source search was completed and the remaining unit could not be located.",
         operation_id="manual-decision-1",
     ):
+        self.client.force_authenticate(self.final_leader)
         return self.client.post(
             f"/api/transfer-discrepancy-reconciliations/{reconciliation.id}/complete-manual/",
             {
                 "outcome": outcome,
                 "decision_note": note,
-                "worker_code": "WORKER-1",
+                "worker_code": "FINAL-LEADER",
                 "client_operation_id": operation_id,
             },
             format="json",
@@ -3469,7 +3506,7 @@ class ScannerReceivingWorkflowTests(APITestCase):
         discrepancy.refresh_from_db()
         self.assertEqual(discrepancy.status, TransferDiscrepancy.Status.CONFIRMED_SHORTAGE)
         self.assertIsNotNone(discrepancy.confirmed_shortage_at)
-        self.assertEqual(discrepancy.confirmed_shortage_by_worker_code, "WORKER-1")
+        self.assertEqual(discrepancy.confirmed_shortage_by_worker_code, "FINAL-LEADER")
         line = discrepancy.items.get(product=self.product)
         self.assertEqual(line.confirmed_shortage_quantity, Decimal("1.000"))
         self.assertEqual(line.recovered_quantity, Decimal("0.000"))
@@ -4119,7 +4156,7 @@ class ScannerReceivingWorkflowTests(APITestCase):
         self.assertEqual(decision.decision_note, "Source search was completed and the remaining unit could not be located.")
         self.assertEqual(reconciliation.status, TransferDiscrepancyReconciliation.Status.COMPLETED)
         self.assertIsNotNone(reconciliation.completed_at)
-        self.assertEqual(reconciliation.completed_by_worker_code, "WORKER-1")
+        self.assertEqual(reconciliation.completed_by_worker_code, "FINAL-LEADER")
         self.assertEqual(reconciliation.route, TransferDiscrepancyReconciliation.Route.SOURCE_STOCK_VERIFICATION)
         self.assertEqual(verification.status, TransferDiscrepancySourceStockVerification.Status.COMPLETED_UNRESOLVED)
         source_after = InventoryItem.objects.filter(
@@ -4746,7 +4783,7 @@ class ScannerReceivingWorkflowTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         manual_event = next(event for event in response.data["results"] if "began source review" in event["message"])
         automatic_event = next(event for event in response.data["results"] if "Source review" in event["message"] and "was created" in event["message"])
-        self.assertEqual(manual_event["actor_display"], "DEMO")
+        self.assertEqual(manual_event["actor_display"], "WORKER-1")
         self.assertEqual(automatic_event["actor_display"], "System")
 
     def test_current_events_are_filtered_by_relevant_branch(self):
@@ -5093,6 +5130,7 @@ class ScannerLookupAndQuickTransferTests(APITestCase):
             quantity_on_hand=Decimal("5"),
             quantity_reserved=Decimal("0"),
         )
+        self.client.force_authenticate(self.user)
 
     def transfer(self, **overrides):
         payload = {
@@ -5267,6 +5305,8 @@ class ScannerPickingJobWorkflowTests(APITestCase):
         self.order_2 = self.create_order("JOB-ORDER-2", self.run_2, self.product_b)
         self.task_1 = self.create_task(self.order_1.lines.first())
         self.task_2 = self.create_task(self.order_2.lines.first())
+        UserBranchMembership.objects.create(user=self.demo_user, branch=self.branch, role=UserBranchMembership.Role.LEADER)
+        self.client.force_authenticate(self.demo_user)
 
     def create_run(self, route, run_number):
         return RouteRun.objects.create(
@@ -5591,6 +5631,7 @@ class ScannerPickingJobWorkflowTests(APITestCase):
         self.create_jobs(route_run_ids=[self.run_1.id, self.run_2.id])
         job = PickingJob.objects.get()
         start = self.start_job(job, cart_code="WOZEK-01")
+        claim_count = PickingTaskClaim.objects.count()
 
         self.client.force_authenticate(self.gdy_leader)
         response = self.client.get(
@@ -5600,7 +5641,7 @@ class ScannerPickingJobWorkflowTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
         self.assertFalse(CartWorkParticipant.objects.filter(user=self.gdy_leader).exists())
-        self.assertEqual(PickingTaskClaim.objects.count(), 0)
+        self.assertEqual(PickingTaskClaim.objects.count(), claim_count)
 
     def test_two_workers_can_poll_same_cart_work_without_changing_claims(self):
         UserBranchMembership.objects.create(user=self.gdy_worker, branch=self.branch, role=UserBranchMembership.Role.WORKER)
@@ -6208,6 +6249,7 @@ class ScannerPickingJobWorkflowTests(APITestCase):
             "/api/scanner/picking/pick/",
             {
                 "cart_work_session_id": cart_work_session_id,
+                "location_code": "J-01-01",
                 "product_code": "JOB-A",
                 "quantity": "2.000",
                 "worker_code": "DEMO",
@@ -6217,8 +6259,8 @@ class ScannerPickingJobWorkflowTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("whole number", response.data["detail"])
-        cart_work_session = CartWorkSession.objects.get(pk=cart_work_session_id)
-        self.assertEqual(cart_work_session.confirmed_location_id, self.location.id)
+        participant = CartWorkParticipant.objects.get(cart_work_session_id=cart_work_session_id, user=self.demo_user)
+        self.assertEqual(participant.confirmed_location_id, self.location.id)
 
     def test_picking_rejects_zero_quantity(self):
         self.create_jobs(route_run_ids=[self.run_1.id])
@@ -6732,7 +6774,29 @@ class ScannerPickingJobWorkflowTests(APITestCase):
             },
             format="json",
         )
-        self.client.post(
+        leave_response = self.client.post(
+            "/api/scanner/cart-work/leave/",
+            {"cart_work_session_id": cart_work_session_id},
+            format="json",
+        )
+        self.assertEqual(leave_response.status_code, status.HTTP_200_OK)
+        UserBranchMembership.objects.create(user=self.gdy_worker, branch=self.branch, role=UserBranchMembership.Role.WORKER)
+        self.client.force_authenticate(self.gdy_worker)
+        join_response = self.client.post("/api/scanner/cart-work/join/", {"cart_barcode": "WOZEK-01"}, format="json")
+        self.assertEqual(join_response.status_code, status.HTTP_200_OK)
+        claim_response = self.client.post(
+            "/api/scanner/cart-work/claim/",
+            {
+                "cart_work_session_id": cart_work_session_id,
+                "picking_task_id": self.task_2.id,
+                "mode": "specific",
+            },
+            format="json",
+        )
+        self.assertEqual(claim_response.status_code, status.HTTP_200_OK)
+        confirm_response = self.confirm_location(cart_work_session_id)
+        self.assertEqual(confirm_response.status_code, status.HTTP_200_OK)
+        second_pick_response = self.client.post(
             "/api/scanner/picking/pick/",
             {
                 "cart_work_session_id": cart_work_session_id,
@@ -6743,6 +6807,7 @@ class ScannerPickingJobWorkflowTests(APITestCase):
             },
             format="json",
         )
+        self.assertEqual(second_pick_response.status_code, status.HTTP_200_OK)
 
         items = self.client.get("/api/scanner/control/cart-items/", {"session_id": session_id})
 
@@ -6776,6 +6841,7 @@ class SeedDemoDataCommandTests(APITestCase):
     def run_seed(self):
         output = StringIO()
         call_command("seed_demo_data", stdout=output)
+        self.client.force_authenticate(User.objects.get(username="DEMO"))
         return output.getvalue()
 
     def available_routes(self):
@@ -6968,6 +7034,8 @@ class RouteRunLifecycleTests(APITestCase):
             quantity_picked=Decimal("0"),
             quantity_prepared=Decimal("0"),
         )
+        self.user = create_branch_user("LFC_LEADER", self.branch, UserBranchMembership.Role.LEADER)
+        self.client.force_authenticate(self.user)
 
     def mark_prepared(self):
         self.order_line.quantity_picked = Decimal("1")
