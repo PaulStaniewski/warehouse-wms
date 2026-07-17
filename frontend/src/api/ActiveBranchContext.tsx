@@ -35,11 +35,17 @@ export function ActiveBranchProvider({ children }: { children: ReactNode }) {
   const [activeBranchCode, setActiveBranchCodeState] = useState(() => localStorage.getItem(ACTIVE_BRANCH_STORAGE_KEY) ?? "");
 
   useEffect(() => {
+    if (auth.isLoading) {
+      return;
+    }
     if (!auth.isAuthenticated) {
       if (activeBranchCode) {
         setActiveBranchCodeState("");
       }
       localStorage.removeItem(ACTIVE_BRANCH_STORAGE_KEY);
+      return;
+    }
+    if (membershipsQuery.isLoading) {
       return;
     }
     if (memberships.length === 0) {
@@ -56,7 +62,7 @@ export function ActiveBranchProvider({ children }: { children: ReactNode }) {
       setActiveBranchCodeState(nextCode);
       localStorage.setItem(ACTIVE_BRANCH_STORAGE_KEY, nextCode);
     }
-  }, [activeBranchCode, auth.isAuthenticated, memberships]);
+  }, [activeBranchCode, auth.isAuthenticated, auth.isLoading, memberships, membershipsQuery.isLoading]);
 
   const value = useMemo<ActiveBranchContextValue>(
     () => ({

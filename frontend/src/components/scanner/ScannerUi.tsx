@@ -108,6 +108,8 @@ export function ScannerStepIndicator({ steps }: { steps: ScannerStep[] }) {
         >
           <span>{index + 1}</span>
           <strong>{step.label}</strong>
+          {step.isActive && <em className="sr-only">Current step</em>}
+          {step.isComplete && <em className="sr-only">Completed</em>}
         </li>
       ))}
     </ol>

@@ -1,5 +1,5 @@
 import react from "@vitejs/plugin-react";
-import { defineConfig } from "vite";
+import { defineConfig } from "vitest/config";
 
 const usePolling = process.env.VITE_USE_POLLING === "true";
 
@@ -25,5 +25,11 @@ export default defineConfig({
         changeOrigin: true,
       },
     },
+  },
+  test: {
+    css: true,
+    environment: "jsdom",
+    globals: true,
+    setupFiles: "./src/test/setup.ts",
   },
 });
