@@ -15,7 +15,7 @@ The project still uses the existing monolithic operations test module. No test p
 
 | Workflow | Roles | API stages covered | Read models verified |
 | --- | --- | --- | --- |
-| Scanner Quick Transfer | Branch Worker, unrelated branch Worker | Scanner transfer command, validation rollback, idempotent repeat submission, branch-protected detail access | Stock Movements / Stock Transfers history, Stock Movement detail, Current Events |
+| Scanner Quick Transfer | Branch Worker, unrelated branch Worker | Scanner transfer command, validation rollback, idempotent repeat submission, concurrent duplicate delivery, branch-protected detail access | Stock Movements / Stock Transfers history, Stock Movement detail, Current Events |
 | Cycle Count safe variance | Branch Leader, Branch Worker, unrelated branch Leader | WMS create/open, blind scanner count/submit, Leader review, adjustment, duplicate adjustment guard, close | Cycle Count detail, Review Queue, Stock Adjustments, Current Events |
 | Cycle Count recount | Branch Leader, Branch Worker | Stale original variance, recount request, blind recount detail, scanner recount submission, acceptance, adjustment, duplicate guard, stale recount rejection | Cycle Count detail, Stock Movements, Current Events |
 
@@ -42,6 +42,25 @@ The tests verify that successful commands update the same state visible to users
 - no duplicate stock mutation on repeated commands,
 - no successful StockMovement or AuditLog after validation failures,
 - Event Register entries for meaningful workflow transitions.
+
+## Quick Transfer Idempotency
+
+Scanner Quick Transfer requires a client-generated `client_operation_id` for every command. The identifier must be a UUID string with at most 64 characters. It represents one intended physical transfer and must be reused only when retrying the same payload after an uncertain response.
+
+The Scanner UI generates the ID before submission, keeps it while the request is pending, preserves it after a failed or uncertain response, and reuses it for manual retry when source, product, destination, and quantity are unchanged. If the operator changes the payload after a failure, the UI creates a new operation ID. After a confirmed success or idempotent replay, the form resets and the next transfer receives a fresh ID.
+
+The backend stores the operation in `ScannerQuickTransferOperation`, which has a database-level unique constraint on `client_operation_id`. The stored operation fingerprint includes:
+
+- authenticated user,
+- branch,
+- product,
+- source location,
+- destination location,
+- quantity.
+
+Exact replay returns the original completed StockMovement response with `replayed: true`, performs no inventory mutation, and creates no second AuditLog event. Reusing the same ID for a different payload or user returns `409 Conflict`. Requests from another branch fail branch authorization before they can replay another branch's work.
+
+The backend checks for an existing operation inside the transaction, locks inventory rows in deterministic order, rechecks the operation after locks, creates the unique operation record before mutation, updates inventory once, creates one StockMovement and one AuditLog, and links the completed operation to the movement. This is protected by `CriticalQuickTransferConcurrencyTests`.
 
 ## Existing Specialized Coverage
 

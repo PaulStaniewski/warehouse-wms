@@ -1212,6 +1212,57 @@ class StockMovement(TimestampedModel):
         return f"{self.movement_type} {self.product.sku} x {self.quantity}"
 
 
+class ScannerQuickTransferOperation(TimestampedModel):
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        COMPLETED = "completed", "Completed"
+
+    client_operation_id = models.CharField(max_length=64, unique=True)
+    branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="scanner_quick_transfer_operations")
+    product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name="scanner_quick_transfer_operations")
+    source_location = models.ForeignKey(
+        Location,
+        on_delete=models.PROTECT,
+        related_name="scanner_quick_transfer_source_operations",
+    )
+    destination_location = models.ForeignKey(
+        Location,
+        on_delete=models.PROTECT,
+        related_name="scanner_quick_transfer_destination_operations",
+    )
+    quantity = models.DecimalField(max_digits=12, decimal_places=3)
+    performed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="scanner_quick_transfer_operations",
+        blank=True,
+        null=True,
+    )
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.PENDING)
+    stock_movement = models.OneToOneField(
+        StockMovement,
+        on_delete=models.PROTECT,
+        related_name="scanner_quick_transfer_operation",
+        blank=True,
+        null=True,
+    )
+    completed_at = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["client_operation_id"]),
+            models.Index(fields=["branch", "status"]),
+            models.Index(fields=["performed_by", "status"]),
+        ]
+        constraints = [
+            models.CheckConstraint(check=models.Q(quantity__gt=0), name="scanner_quick_transfer_quantity_positive"),
+        ]
+
+    def __str__(self) -> str:
+        return self.client_operation_id
+
+
 class CycleCountSession(TimestampedModel):
     class Status(models.TextChoices):
         DRAFT = "draft", "Draft"

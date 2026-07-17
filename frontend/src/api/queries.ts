@@ -1043,17 +1043,20 @@ export function useScannerContents(code: string) {
 export function useScannerQuickTransfer() {
   return useMutation({
     mutationFn: async ({
+      clientOperationId,
       productCode,
       quantity,
       sourceLocationCode,
       targetLocationCode,
     }: {
+      clientOperationId: string;
       productCode: string;
       quantity: string;
       sourceLocationCode: string;
       targetLocationCode: string;
     }) => {
       const response = await apiClient.post<ScannerQuickTransferResponse>("/scanner/quick-transfer/", {
+        client_operation_id: clientOperationId,
         product_code: productCode,
         quantity,
         source_location_code: sourceLocationCode,

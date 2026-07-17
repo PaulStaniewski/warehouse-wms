@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import axios from "axios";
 import { ArrowLeft, CheckCircle2 } from "lucide-react";
@@ -10,6 +10,7 @@ import {
   useScannerQuickTransfer,
 } from "../api/queries";
 import { ScannerScanInput, ScannerStatusMessage, ScannerStepIndicator } from "../components/scanner/ScannerUi";
+import { createOperationId } from "../utils/operationId";
 
 
 function getErrorMessage(error: unknown, fallback: string) {
@@ -20,8 +21,13 @@ function normalize(value: string | null | undefined) {
   return (value ?? "").toLowerCase();
 }
 
+function transferFingerprint(sourceCode: string, productCode: string, targetCode: string, quantity: string) {
+  return [sourceCode.trim().toUpperCase(), productCode.trim().toUpperCase(), targetCode.trim().toUpperCase(), quantity.trim()].join("|");
+}
+
 export function ScannerQuickTransferPage() {
   const queryClient = useQueryClient();
+  const isSubmittingRef = useRef(false);
   const [sourceInput, setSourceInput] = useState("");
   const [sourceCode, setSourceCode] = useState("");
   const [productInput, setProductInput] = useState("");
@@ -29,6 +35,8 @@ export function ScannerQuickTransferPage() {
   const [targetInput, setTargetInput] = useState("");
   const [targetCode, setTargetCode] = useState("");
   const [quantity, setQuantity] = useState("1");
+  const [operationId, setOperationId] = useState<string | null>(null);
+  const [operationFingerprint, setOperationFingerprint] = useState<string | null>(null);
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const sourceLookup = useScannerLocationContents(sourceCode);
   const productLookup = useScannerProductLookup(productCode);
@@ -41,8 +49,14 @@ export function ScannerQuickTransferPage() {
   const canConfirm = Boolean(sourceLookup.data && productLookup.data && targetLookup.data && productInSource);
   const activeStep = !sourceLookup.data ? 1 : !productInSource ? 2 : !targetLookup.data ? 3 : 4;
 
+  function clearOperationId() {
+    setOperationId(null);
+    setOperationFingerprint(null);
+  }
+
   function submitSource(value: string) {
     setMessage(null);
+    clearOperationId();
     setSourceCode(value);
     setProductCode("");
     setProductInput("");
@@ -52,6 +66,7 @@ export function ScannerQuickTransferPage() {
 
   function submitProduct(value: string) {
     setMessage(null);
+    clearOperationId();
     setProductCode(value);
     setTargetCode("");
     setTargetInput("");
@@ -59,10 +74,11 @@ export function ScannerQuickTransferPage() {
 
   function submitTarget(value: string) {
     setMessage(null);
+    clearOperationId();
     setTargetCode(value);
   }
 
-  function resetTransfer() {
+  function resetTransfer(keepMessage = false) {
     setSourceInput("");
     setSourceCode("");
     setProductInput("");
@@ -70,17 +86,26 @@ export function ScannerQuickTransferPage() {
     setTargetInput("");
     setTargetCode("");
     setQuantity("1");
-    setMessage(null);
+    clearOperationId();
+    if (!keepMessage) {
+      setMessage(null);
+    }
   }
 
   async function confirmTransfer() {
-    if (transfer.isPending) {
+    if (transfer.isPending || isSubmittingRef.current) {
       return;
     }
+    isSubmittingRef.current = true;
     setMessage(null);
+    const nextFingerprint = transferFingerprint(sourceCode, productCode, targetCode, quantity);
+    const nextOperationId = operationId && operationFingerprint === nextFingerprint ? operationId : createOperationId();
+    setOperationId(nextOperationId);
+    setOperationFingerprint(nextFingerprint);
 
     try {
       const result = await transfer.mutateAsync({
+        clientOperationId: nextOperationId,
         productCode,
         quantity,
         sourceLocationCode: sourceCode,
@@ -95,8 +120,11 @@ export function ScannerQuickTransferPage() {
         queryClient.invalidateQueries({ queryKey: ["inventory-items"] }),
         queryClient.invalidateQueries({ queryKey: ["stock-transfers"] }),
       ]);
+      resetTransfer(true);
     } catch (error) {
       setMessage({ type: "error", text: getErrorMessage(error, "Quick transfer failed.") });
+    } finally {
+      isSubmittingRef.current = false;
     }
   }
 
@@ -215,7 +243,10 @@ export function ScannerQuickTransferPage() {
             <input
               id="transfer-quantity"
               min="0.001"
-              onChange={(event) => setQuantity(event.target.value)}
+              onChange={(event) => {
+                clearOperationId();
+                setQuantity(event.target.value);
+              }}
               step="0.001"
               type="number"
               value={quantity}
@@ -229,11 +260,7 @@ export function ScannerQuickTransferPage() {
           >
             {transfer.isPending ? "Moving stock..." : "Confirm transfer"}
           </button>
-          {message?.type === "success" && (
-            <button className="scanner-secondary-button" onClick={resetTransfer} type="button">
-              New transfer
-            </button>
-          )}
+          {message?.type === "success" && <p className="scanner-inline-ok">Ready for the next transfer.</p>}
         </article>
       </section>
     </>

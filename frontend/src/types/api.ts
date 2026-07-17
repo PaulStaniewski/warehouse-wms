@@ -248,6 +248,7 @@ export type StockMovement = {
   cycle_count_session_reference: string | null;
   cycle_count_recount_id: number | null;
   cycle_count_recount_reference: string | null;
+  client_operation_id: string | null;
   quantity: string;
   quantity_before: string | null;
   quantity_after: string | null;
@@ -694,8 +695,23 @@ export type ScannerContentsResponse = {
 export type ScannerQuickTransferResponse = {
   message: string;
   movement_id: number;
-  source_inventory: ScannerInventoryPosition;
-  target_inventory: ScannerInventoryPosition;
+  reference: string;
+  client_operation_id: string;
+  replayed: boolean;
+  product: number;
+  product_sku: string;
+  source_location: number;
+  source_location_code: string;
+  target_location: number;
+  target_location_code: string;
+  quantity: string;
+  quantity_before: string | null;
+  quantity_after: string | null;
+  performed_by: number | null;
+  performed_by_username: string | null;
+  created_at: string;
+  source_inventory: ScannerInventoryPosition | null;
+  target_inventory: ScannerInventoryPosition | null;
 };
 
 export type TransferPalletManifestItem = {

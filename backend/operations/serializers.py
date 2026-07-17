@@ -610,6 +610,7 @@ class StockMovementSerializer(serializers.ModelSerializer):
     cycle_count_session_reference = serializers.CharField(source="cycle_count_line.session.reference", read_only=True)
     cycle_count_recount_id = serializers.IntegerField(source="cycle_count_recount.id", read_only=True)
     cycle_count_recount_reference = serializers.CharField(source="cycle_count_recount.reference", read_only=True)
+    client_operation_id = serializers.CharField(source="scanner_quick_transfer_operation.client_operation_id", read_only=True)
     status = serializers.SerializerMethodField()
     origin = serializers.SerializerMethodField()
 
@@ -681,6 +682,7 @@ class StockMovementSerializer(serializers.ModelSerializer):
             "cycle_count_session_reference",
             "cycle_count_recount_id",
             "cycle_count_recount_reference",
+            "client_operation_id",
             "quantity",
             "quantity_before",
             "quantity_after",

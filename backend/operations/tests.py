@@ -1,15 +1,17 @@
 from datetime import datetime, time
 from decimal import Decimal
 from io import StringIO
+import threading
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError, models, transaction
+from django.db import IntegrityError, connections, models, transaction
 from django.utils import timezone
 from rest_framework import status
-from rest_framework.test import APITestCase
+from rest_framework.test import APIClient, APITestCase
+from django.test import TransactionTestCase
 
 
 User = get_user_model()
@@ -49,6 +51,7 @@ from operations.models import (
     RouteRun,
     ScannerCart,
     ScannerCustomerLabel,
+    ScannerQuickTransferOperation,
     ScannerSession,
     StockMovement,
     TransferDiscrepancy,
@@ -5138,6 +5141,7 @@ class ScannerLookupAndQuickTransferTests(APITestCase):
             "product_code": "LOOK-001",
             "target_location_code": "L-02-01",
             "quantity": "1",
+            "client_operation_id": "11111111-1111-4111-8111-111111111111",
         }
         payload.update(overrides)
         return self.client.post("/api/scanner/quick-transfer/", payload, format="json")
@@ -5172,6 +5176,9 @@ class ScannerLookupAndQuickTransferTests(APITestCase):
         target_item = InventoryItem.objects.get(location=self.target_location, product=self.product)
         self.assertEqual(self.source_item.quantity_on_hand, Decimal("3.000"))
         self.assertEqual(target_item.quantity_on_hand, Decimal("2.000"))
+        operation = ScannerQuickTransferOperation.objects.get(client_operation_id="11111111-1111-4111-8111-111111111111")
+        self.assertEqual(operation.status, ScannerQuickTransferOperation.Status.COMPLETED)
+        self.assertEqual(operation.stock_movement_id, response.data["movement_id"])
         self.assertTrue(
             StockMovement.objects.filter(
                 movement_type=StockMovement.MovementType.TRANSFER,
@@ -5221,6 +5228,7 @@ class CriticalQuickTransferIntegrationTests(APITestCase):
         self.branch = Branch.objects.create(code="QTI", name="Quick Transfer Integration", city="Gdynia", country="Poland")
         self.other_branch = Branch.objects.create(code="QTO", name="Other Transfer Branch", city="Gdansk", country="Poland")
         self.worker = create_branch_user("QTI_WORKER", self.branch)
+        self.same_branch_worker = create_branch_user("QTI_OTHER_WORKER", self.branch)
         self.other_worker = create_branch_user("QTO_WORKER", self.other_branch)
         self.source_location = Location.objects.create(
             branch=self.branch,
@@ -5260,7 +5268,7 @@ class CriticalQuickTransferIntegrationTests(APITestCase):
             "target_location_code": self.target_location.code,
             "product_code": self.product.barcode,
             "quantity": "3",
-            "client_operation_id": "qt-integration-001",
+            "client_operation_id": "22222222-2222-4222-8222-222222222222",
         }
         payload.update(overrides)
         return payload
@@ -5278,6 +5286,8 @@ class CriticalQuickTransferIntegrationTests(APITestCase):
         self.assertEqual(first.status_code, status.HTTP_200_OK)
         self.assertEqual(duplicate.status_code, status.HTTP_200_OK)
         self.assertEqual(first.data["movement_id"], duplicate.data["movement_id"])
+        self.assertFalse(first.data["replayed"])
+        self.assertTrue(duplicate.data["replayed"])
 
         self.source_item.refresh_from_db()
         target_item = InventoryItem.objects.get(branch=self.branch, location=self.target_location, product=self.product)
@@ -5290,11 +5300,14 @@ class CriticalQuickTransferIntegrationTests(APITestCase):
 
         movement = StockMovement.objects.get(pk=first.data["movement_id"])
         self.assertEqual(movement.movement_type, StockMovement.MovementType.TRANSFER)
-        self.assertEqual(movement.reference, "SCANNER-TRANSFER-qt-integration-001")
+        self.assertEqual(movement.reference, "SCANNER-TRANSFER-22222222-2222-4222-8222-222222222222")
         self.assertEqual(movement.performed_by, self.worker)
         self.assertEqual(movement.quantity_before, Decimal("10.000"))
         self.assertEqual(movement.quantity_after, Decimal("7.000"))
         self.assertEqual(StockMovement.objects.count(), 1)
+        operation = ScannerQuickTransferOperation.objects.get(client_operation_id="22222222-2222-4222-8222-222222222222")
+        self.assertEqual(operation.stock_movement, movement)
+        self.assertEqual(operation.performed_by, self.worker)
 
         history = self.client.get("/api/stock-movements/", {"branch": "QTI", "movement_type": StockMovement.MovementType.TRANSFER})
         detail = self.client.get(f"/api/stock-movements/{movement.id}/")
@@ -5304,6 +5317,7 @@ class CriticalQuickTransferIntegrationTests(APITestCase):
         self.assertEqual(history.data["results"][0]["id"], movement.id)
         self.assertEqual(history.data["results"][0]["origin"], "Scanner Quick Transfer")
         self.assertEqual(detail.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail.data["client_operation_id"], "22222222-2222-4222-8222-222222222222")
         self.assertEqual(detail.data["source_location_code"], self.source_location.code)
         self.assertEqual(detail.data["destination_location_code"], self.target_location.code)
         self.assertEqual(events.status_code, status.HTTP_200_OK)
@@ -5316,10 +5330,27 @@ class CriticalQuickTransferIntegrationTests(APITestCase):
     def test_quick_transfer_validation_rolls_back_without_history_or_success_event(self):
         self.client.force_authenticate(self.worker)
 
-        same_location = self.post_quick_transfer(target_location_code=self.source_location.code, client_operation_id="qt-bad-same")
-        cross_branch = self.post_quick_transfer(target_location_code=self.cross_branch_location.code, client_operation_id="qt-bad-branch")
-        insufficient = self.post_quick_transfer(quantity="99", client_operation_id="qt-bad-stock")
+        missing_key = self.client.post(
+            "/api/scanner/quick-transfer/",
+            {
+                "source_location_code": self.source_location.code,
+                "target_location_code": self.target_location.code,
+                "product_code": self.product.sku,
+                "quantity": "1",
+            },
+            format="json",
+        )
+        same_location = self.post_quick_transfer(
+            target_location_code=self.source_location.code,
+            client_operation_id="33333333-3333-4333-8333-333333333333",
+        )
+        cross_branch = self.post_quick_transfer(
+            target_location_code=self.cross_branch_location.code,
+            client_operation_id="44444444-4444-4444-8444-444444444444",
+        )
+        insufficient = self.post_quick_transfer(quantity="99", client_operation_id="55555555-5555-4555-8555-555555555555")
 
+        self.assertEqual(missing_key.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(same_location.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(cross_branch.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(insufficient.status_code, status.HTTP_400_BAD_REQUEST)
@@ -5327,11 +5358,133 @@ class CriticalQuickTransferIntegrationTests(APITestCase):
         self.assertEqual(self.source_item.quantity_on_hand, Decimal("10.000"))
         self.assertFalse(InventoryItem.objects.filter(location=self.target_location, product=self.product).exists())
         self.assertFalse(StockMovement.objects.exists())
+        self.assertFalse(ScannerQuickTransferOperation.objects.exists())
         self.assertFalse(AuditLog.objects.filter(event_type="scanner_quick_transfer").exists())
 
         self.client.force_authenticate(self.other_worker)
-        forbidden = self.post_quick_transfer(client_operation_id="qt-bad-auth")
+        forbidden = self.post_quick_transfer(client_operation_id="66666666-6666-4666-8666-666666666666")
         self.assertEqual(forbidden.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_quick_transfer_rejects_operation_id_reuse_for_different_payload_or_user(self):
+        operation_id = "77777777-7777-4777-8777-777777777777"
+        self.client.force_authenticate(self.worker)
+        first = self.post_quick_transfer(client_operation_id=operation_id)
+        changed_quantity = self.post_quick_transfer(client_operation_id=operation_id, quantity="2")
+        other_product = Product.objects.create(sku="QT-002", name="Other Quick Transfer Product", barcode="881000000002")
+        InventoryItem.objects.create(
+            branch=self.branch,
+            location=self.source_location,
+            product=other_product,
+            quantity_on_hand=Decimal("3"),
+            quantity_reserved=Decimal("0"),
+        )
+        changed_product = self.post_quick_transfer(client_operation_id=operation_id, product_code=other_product.sku)
+        changed_source = self.post_quick_transfer(
+            client_operation_id=operation_id,
+            source_location_code=self.target_location.code,
+            target_location_code=self.source_location.code,
+        )
+        self.client.force_authenticate(self.same_branch_worker)
+        other_user = self.post_quick_transfer(client_operation_id=operation_id)
+        self.client.force_authenticate(self.other_worker)
+        other_branch_user = self.post_quick_transfer(client_operation_id=operation_id)
+
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        for response in [changed_quantity, changed_product, changed_source, other_user]:
+            self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(other_branch_user.status_code, status.HTTP_403_FORBIDDEN)
+        self.source_item.refresh_from_db()
+        self.assertEqual(self.source_item.quantity_on_hand, Decimal("7.000"))
+        self.assertEqual(StockMovement.objects.count(), 1)
+        self.assertEqual(AuditLog.objects.filter(event_type="scanner_quick_transfer").count(), 1)
+
+    def test_quick_transfer_failed_stock_request_does_not_consume_operation_id(self):
+        operation_id = "88888888-8888-4888-8888-888888888888"
+        self.client.force_authenticate(self.worker)
+        failed = self.post_quick_transfer(client_operation_id=operation_id, quantity="99")
+        self.assertEqual(failed.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(ScannerQuickTransferOperation.objects.filter(client_operation_id=operation_id).exists())
+
+        self.source_item.quantity_on_hand = Decimal("120")
+        self.source_item.save(update_fields=["quantity_on_hand", "updated_at"])
+        retried = self.post_quick_transfer(client_operation_id=operation_id, quantity="99")
+
+        self.assertEqual(retried.status_code, status.HTTP_200_OK)
+        self.source_item.refresh_from_db()
+        self.assertEqual(self.source_item.quantity_on_hand, Decimal("21.000"))
+
+
+class CriticalQuickTransferConcurrencyTests(TransactionTestCase):
+    reset_sequences = True
+
+    def setUp(self):
+        self.branch = Branch.objects.create(code="QTC", name="Quick Transfer Concurrency", city="Gdynia", country="Poland")
+        self.worker = create_branch_user("QTC_WORKER", self.branch)
+        self.source_location = Location.objects.create(
+            branch=self.branch,
+            code="QTC-SRC",
+            name="Concurrency source",
+            location_type=Location.LocationType.STORAGE,
+        )
+        self.target_location = Location.objects.create(
+            branch=self.branch,
+            code="QTC-DST",
+            name="Concurrency destination",
+            location_type=Location.LocationType.PICKING,
+        )
+        self.product = Product.objects.create(sku="QTC-001", name="Concurrent Quick Transfer Product", barcode="883000000001")
+        self.source_item = InventoryItem.objects.create(
+            branch=self.branch,
+            location=self.source_location,
+            product=self.product,
+            quantity_on_hand=Decimal("10"),
+            quantity_reserved=Decimal("0"),
+        )
+
+    def test_concurrent_duplicate_operation_moves_stock_once(self):
+        operation_id = "99999999-9999-4999-8999-999999999999"
+        payload = {
+            "source_location_code": self.source_location.code,
+            "target_location_code": self.target_location.code,
+            "product_code": self.product.sku,
+            "quantity": "4",
+            "client_operation_id": operation_id,
+        }
+        barrier = threading.Barrier(2)
+        responses = []
+        errors = []
+
+        def submit_duplicate():
+            connections.close_all()
+            client = APIClient()
+            client.force_authenticate(self.worker)
+            try:
+                barrier.wait(timeout=10)
+                response = client.post("/api/scanner/quick-transfer/", payload, format="json")
+                responses.append(response)
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                connections.close_all()
+
+        threads = [threading.Thread(target=submit_duplicate), threading.Thread(target=submit_duplicate)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+
+        self.assertFalse(errors)
+        self.assertEqual(len(responses), 2)
+        self.assertEqual({response.status_code for response in responses}, {status.HTTP_200_OK})
+        self.assertEqual({response.data["movement_id"] for response in responses}, {StockMovement.objects.get().id})
+        self.assertEqual(sum(1 for response in responses if response.data["replayed"]), 1)
+        self.source_item.refresh_from_db()
+        target_item = InventoryItem.objects.get(branch=self.branch, location=self.target_location, product=self.product)
+        self.assertEqual(self.source_item.quantity_on_hand, Decimal("6.000"))
+        self.assertEqual(target_item.quantity_on_hand, Decimal("4.000"))
+        self.assertEqual(StockMovement.objects.count(), 1)
+        self.assertEqual(ScannerQuickTransferOperation.objects.filter(client_operation_id=operation_id).count(), 1)
+        self.assertEqual(AuditLog.objects.filter(event_type="scanner_quick_transfer").count(), 1)
 
 
 class CriticalCycleCountIntegrationTests(APITestCase):

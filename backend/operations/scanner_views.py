@@ -5,7 +5,7 @@ import uuid
 
 from django.core import signing
 from django.contrib.auth import get_user_model
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import F, Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -39,6 +39,7 @@ from operations.models import (
     RouteRun,
     ScannerCart,
     ScannerCustomerLabel,
+    ScannerQuickTransferOperation,
     ScannerSession,
     StockMovement,
     TransferDiscrepancy,
@@ -3465,12 +3466,88 @@ class ScannerReceivingCloseView(APIView):
 
 
 class ScannerQuickTransferView(APIView):
+    def _validate_client_operation_id(self, value):
+        client_operation_id = str(value or "").strip()
+        if not client_operation_id:
+            return None, Response(
+                {"client_operation_id": ["client_operation_id is required for retry-safe quick transfer."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if len(client_operation_id) > 64:
+            return None, Response(
+                {"client_operation_id": ["client_operation_id must be 64 characters or fewer."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            uuid.UUID(client_operation_id)
+        except ValueError:
+            return None, Response(
+                {"client_operation_id": ["client_operation_id must be a valid UUID."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return client_operation_id, None
+
+    def _operation_matches(self, operation, *, branch, product, source_location, target_location, quantity, performed_by):
+        return (
+            operation.branch_id == branch.id
+            and operation.product_id == product.id
+            and operation.source_location_id == source_location.id
+            and operation.destination_location_id == target_location.id
+            and operation.quantity == quantity
+            and operation.performed_by_id == performed_by.id
+        )
+
+    def _operation_conflict_response(self):
+        return Response(
+            {"detail": "client_operation_id was already used for a different quick transfer."},
+            status=status.HTTP_409_CONFLICT,
+        )
+
+    def _completed_response(self, operation, *, replayed=False):
+        movement = operation.stock_movement
+        source_item = (
+            InventoryItem.objects.select_related("branch", "location", "product")
+            .filter(branch=operation.branch, location=operation.source_location, product=operation.product)
+            .first()
+        )
+        target_item = (
+            InventoryItem.objects.select_related("branch", "location", "product")
+            .filter(branch=operation.branch, location=operation.destination_location, product=operation.product)
+            .first()
+        )
+        return Response(
+            {
+                "message": "Quick transfer already completed." if replayed else "Quick transfer completed.",
+                "movement_id": movement.id,
+                "reference": movement.reference,
+                "client_operation_id": operation.client_operation_id,
+                "replayed": replayed,
+                "product": operation.product_id,
+                "product_sku": operation.product.sku,
+                "source_location": operation.source_location_id,
+                "source_location_code": operation.source_location.code,
+                "target_location": operation.destination_location_id,
+                "target_location_code": operation.destination_location.code,
+                "quantity": str(operation.quantity),
+                "quantity_before": str(movement.quantity_before) if movement.quantity_before is not None else None,
+                "quantity_after": str(movement.quantity_after) if movement.quantity_after is not None else None,
+                "performed_by": operation.performed_by_id,
+                "performed_by_username": operation.performed_by.username if operation.performed_by_id and operation.performed_by else None,
+                "created_at": movement.created_at.isoformat(),
+                "source_inventory": _inventory_position_data(source_item) if source_item else None,
+                "target_inventory": _inventory_position_data(target_item) if target_item else None,
+            },
+            status=status.HTTP_200_OK,
+        )
+
     def post(self, request):
         source_location_code = str(request.data.get("source_location_code", "")).strip()
         product_code = str(request.data.get("product_code", "")).strip()
         target_location_code = str(request.data.get("target_location_code", "")).strip()
         quantity_value = request.data.get("quantity", 1)
-        client_operation_id = str(request.data.get("client_operation_id", "")).strip()
+        client_operation_id, id_error = self._validate_client_operation_id(request.data.get("client_operation_id"))
+        if id_error is not None:
+            return id_error
 
         if not source_location_code:
             return Response({"detail": "source_location_code is required."}, status=status.HTTP_400_BAD_REQUEST)
@@ -3508,57 +3585,44 @@ class ScannerQuickTransferView(APIView):
                     {"detail": "Source and target locations must belong to the same branch."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-            if request.user and request.user.is_authenticated:
-                require_branch_access(request.user, source_location.branch)
+            require_branch_access(request.user, source_location.branch)
 
             product = _find_product_by_code(product_code)
             if product is None:
                 return Response({"detail": "Product not found."}, status=status.HTTP_404_NOT_FOUND)
 
-            reference = (
-                f"SCANNER-TRANSFER-{client_operation_id}"
-                if client_operation_id
-                else f"SCANNER-TRANSFER-{source_location.code}-{target_location.code}"
-            )
-            if client_operation_id:
-                existing_movement = (
-                    StockMovement.objects.select_related("source_location", "destination_location", "product")
-                    .filter(
-                        branch=source_location.branch,
-                        product=product,
-                        source_location=source_location,
-                        destination_location=target_location,
-                        movement_type=StockMovement.MovementType.TRANSFER,
-                        reference=reference,
-                    )
-                    .first()
-                )
-                if existing_movement is not None:
-                    source_item = (
-                        InventoryItem.objects.select_for_update()
-                        .filter(branch=source_location.branch, location=source_location, product=product)
-                        .first()
-                    )
-                    target_item = (
-                        InventoryItem.objects.select_for_update()
-                        .filter(branch=target_location.branch, location=target_location, product=product)
-                        .first()
-                    )
-                    return Response(
-                        {
-                            "message": "Quick transfer already completed.",
-                            "movement_id": existing_movement.id,
-                            "source_inventory": _inventory_position_data(source_item) if source_item else None,
-                            "target_inventory": _inventory_position_data(target_item) if target_item else None,
-                        },
-                        status=status.HTTP_200_OK,
-                    )
-
-            source_item = (
-                InventoryItem.objects.select_for_update()
-                .filter(branch=source_location.branch, location=source_location, product=product)
+            existing_operation = (
+                ScannerQuickTransferOperation.objects.select_for_update(of=("self",))
+                .select_related("branch", "product", "source_location", "destination_location", "performed_by", "stock_movement")
+                .filter(client_operation_id=client_operation_id)
                 .first()
             )
+            if existing_operation is not None:
+                if not self._operation_matches(
+                    existing_operation,
+                    branch=source_location.branch,
+                    product=product,
+                    source_location=source_location,
+                    target_location=target_location,
+                    quantity=quantity,
+                    performed_by=request.user,
+                ):
+                    return self._operation_conflict_response()
+                if existing_operation.status == ScannerQuickTransferOperation.Status.COMPLETED and existing_operation.stock_movement_id:
+                    return self._completed_response(existing_operation, replayed=True)
+                return Response({"detail": "Quick transfer operation is still processing."}, status=status.HTTP_409_CONFLICT)
+
+            locked_items = list(
+                InventoryItem.objects.select_for_update()
+                .filter(
+                    branch=source_location.branch,
+                    product=product,
+                    location_id__in=[source_location.id, target_location.id],
+                )
+                .order_by("id")
+            )
+            item_by_location_id = {item.location_id: item for item in locked_items}
+            source_item = item_by_location_id.get(source_location.id)
             if source_item is None:
                 return Response(
                     {"detail": "Product is not available on the source location."},
@@ -3568,23 +3632,80 @@ class ScannerQuickTransferView(APIView):
             if source_item.quantity_on_hand < quantity:
                 return Response({"detail": "Insufficient quantity on source location."}, status=status.HTTP_400_BAD_REQUEST)
 
-            target_item, _ = InventoryItem.objects.select_for_update().get_or_create(
-                branch=target_location.branch,
-                location=target_location,
-                product=product,
-                defaults={"quantity_on_hand": Decimal("0"), "quantity_reserved": Decimal("0")},
+            existing_operation = (
+                ScannerQuickTransferOperation.objects.select_for_update(of=("self",))
+                .select_related("branch", "product", "source_location", "destination_location", "performed_by", "stock_movement")
+                .filter(client_operation_id=client_operation_id)
+                .first()
             )
+            if existing_operation is not None:
+                if not self._operation_matches(
+                    existing_operation,
+                    branch=source_location.branch,
+                    product=product,
+                    source_location=source_location,
+                    target_location=target_location,
+                    quantity=quantity,
+                    performed_by=request.user,
+                ):
+                    return self._operation_conflict_response()
+                if existing_operation.status == ScannerQuickTransferOperation.Status.COMPLETED and existing_operation.stock_movement_id:
+                    return self._completed_response(existing_operation, replayed=True)
+                return Response({"detail": "Quick transfer operation is still processing."}, status=status.HTTP_409_CONFLICT)
+
+            try:
+                operation = ScannerQuickTransferOperation.objects.create(
+                    client_operation_id=client_operation_id,
+                    branch=source_location.branch,
+                    product=product,
+                    source_location=source_location,
+                    destination_location=target_location,
+                    quantity=quantity,
+                    performed_by=request.user,
+                )
+            except IntegrityError:
+                existing_operation = (
+                    ScannerQuickTransferOperation.objects.select_for_update(of=("self",))
+                    .select_related("branch", "product", "source_location", "destination_location", "performed_by", "stock_movement")
+                    .get(client_operation_id=client_operation_id)
+                )
+                if self._operation_matches(
+                    existing_operation,
+                    branch=source_location.branch,
+                    product=product,
+                    source_location=source_location,
+                    target_location=target_location,
+                    quantity=quantity,
+                    performed_by=request.user,
+                ) and existing_operation.status == ScannerQuickTransferOperation.Status.COMPLETED and existing_operation.stock_movement_id:
+                    return self._completed_response(existing_operation, replayed=True)
+                return self._operation_conflict_response()
+
+            target_item = item_by_location_id.get(target_location.id)
+            if target_item is None:
+                target_item = InventoryItem.objects.create(
+                    branch=target_location.branch,
+                    location=target_location,
+                    product=product,
+                    quantity_on_hand=Decimal("0"),
+                    quantity_reserved=Decimal("0"),
+                )
+            else:
+                target_item = InventoryItem.objects.select_for_update().get(pk=target_item.pk)
 
             source_before = source_item.quantity_on_hand
             source_after = source_before - quantity
-            source_item.quantity_on_hand = F("quantity_on_hand") - quantity
+            target_before = target_item.quantity_on_hand
+            target_after = target_before + quantity
+
+            source_item.quantity_on_hand = source_after
             source_item.save(update_fields=["quantity_on_hand", "updated_at"])
 
-            target_item.quantity_on_hand = F("quantity_on_hand") + quantity
+            target_item.quantity_on_hand = target_after
             target_item.save(update_fields=["quantity_on_hand", "updated_at"])
 
             movement = StockMovement.objects.create(
-                branch=source_location.branch,
+                branch=target_location.branch,
                 product=product,
                 inventory_item=source_item,
                 source_location=source_location,
@@ -3593,11 +3714,15 @@ class ScannerQuickTransferView(APIView):
                 quantity=quantity,
                 quantity_before=source_before,
                 quantity_after=source_after,
-                reference=reference,
-                performed_by=request.user if request.user.is_authenticated else None,
+                reference=f"SCANNER-TRANSFER-{client_operation_id}",
+                performed_by=request.user,
             )
+            operation.status = ScannerQuickTransferOperation.Status.COMPLETED
+            operation.stock_movement = movement
+            operation.completed_at = timezone.now()
+            operation.save(update_fields=["status", "stock_movement", "completed_at", "updated_at"])
             AuditLog.objects.create(
-                actor=request.user if request.user.is_authenticated else None,
+                actor=request.user,
                 action_type=AuditLog.ActionType.UPDATE,
                 event_type="scanner_quick_transfer",
                 branch=source_location.branch,
@@ -3617,15 +3742,8 @@ class ScannerQuickTransferView(APIView):
             source_item.refresh_from_db()
             target_item.refresh_from_db()
 
-        return Response(
-            {
-                "message": "Quick transfer completed.",
-                "movement_id": movement.id,
-                "source_inventory": _inventory_position_data(source_item),
-                "target_inventory": _inventory_position_data(target_item),
-            },
-            status=status.HTTP_200_OK,
-        )
+        operation.refresh_from_db()
+        return self._completed_response(operation, replayed=False)
 
 
 def _cycle_count_session_summary(session: CycleCountSession) -> dict:
