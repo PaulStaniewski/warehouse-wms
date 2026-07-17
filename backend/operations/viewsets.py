@@ -22,6 +22,9 @@ from accounts.authorization import (
 )
 from operations.models import (
     AuditLog,
+    CycleCountLine,
+    CycleCountLocation,
+    CycleCountSession,
     DeliveryRoute,
     InterBranchTransfer,
     Order,
@@ -48,6 +51,8 @@ from operations.models import (
 )
 from operations.serializers import (
     AuditLogSerializer,
+    CycleCountLocationSerializer,
+    CycleCountSessionSerializer,
     DeliveryRouteSerializer,
     OrderLineSerializer,
     OrderSerializer,
@@ -80,7 +85,7 @@ from operations.services import (
     get_discrepancy_location,
     source_verification_item_remaining,
 )
-from warehouse.models import InventoryItem, Location, Product
+from warehouse.models import Branch, InventoryItem, Location, Product
 
 
 class TransferDiscrepancyActionPagination(PageNumberPagination):
@@ -865,6 +870,8 @@ class StockMovementViewSet(ReadOnlyModelViewSet):
         "source_location",
         "destination_location",
         "performed_by",
+        "cycle_count_line",
+        "cycle_count_line__session",
     )
     serializer_class = StockMovementSerializer
     permission_classes = [IsAuthenticated]
@@ -1024,6 +1031,412 @@ class StockAdjustmentViewSet(StockMovementViewSet):
 
         movement = self.get_queryset().get(pk=movement.pk)
         return Response(self.get_serializer(movement).data, status=status.HTTP_201_CREATED)
+
+
+class CycleCountSessionFilter(django_filters.FilterSet):
+    branch = django_filters.CharFilter(method="filter_branch")
+    date_from = django_filters.DateFilter(field_name="created_at", lookup_expr="date__gte")
+    date_to = django_filters.DateFilter(field_name="created_at", lookup_expr="date__lte")
+    created_by = django_filters.CharFilter(method="filter_created_by")
+
+    class Meta:
+        model = CycleCountSession
+        fields = ["branch", "status", "date_from", "date_to", "created_by"]
+
+    def filter_branch(self, queryset, name, value):
+        if str(value).isdigit():
+            return queryset.filter(branch_id=value)
+        return queryset.filter(branch__code__iexact=value)
+
+    def filter_created_by(self, queryset, name, value):
+        if str(value).isdigit():
+            return queryset.filter(created_by_id=value)
+        return queryset.filter(created_by__username__iexact=value)
+
+
+class CycleCountSessionViewSet(ReadOnlyModelViewSet):
+    queryset = (
+        CycleCountSession.objects.select_related("branch", "created_by", "opened_by", "reviewed_by", "cancelled_by")
+        .prefetch_related(
+            "locations",
+            "locations__location",
+            "locations__started_by",
+            "locations__submitted_by",
+            "locations__lines",
+            "locations__lines__product",
+            "locations__lines__counted_by",
+            "locations__lines__reconciled_by",
+            "locations__lines__reconciliation_stock_movement",
+            "lines",
+            "lines__product",
+            "lines__location",
+            "lines__counted_by",
+            "lines__reconciled_by",
+            "lines__reconciliation_stock_movement",
+        )
+    )
+    serializer_class = CycleCountSessionSerializer
+    permission_classes = [IsAuthenticated]
+    filterset_class = CycleCountSessionFilter
+    search_fields = ["reference", "name", "note", "branch__code", "created_by__username"]
+    ordering = ["-created_at"]
+    ordering_fields = ["created_at", "opened_at", "submitted_at", "reviewed_at", "status"]
+
+    def get_queryset(self):
+        return filter_branch_queryset(super().get_queryset(), self.request, "branch")
+
+    def _line_for_reconciliation(self, session, line_id):
+        line = (
+            CycleCountLine.objects.select_for_update(of=("self",))
+            .select_related("session", "cycle_count_location", "branch", "location", "product")
+            .filter(pk=line_id, session=session, branch=session.branch)
+            .first()
+        )
+        if line is None:
+            return None, Response({"detail": "Cycle count line was not found in this session."}, status=status.HTTP_404_NOT_FOUND)
+        if line.cycle_count_location.status != CycleCountLocation.Status.SUBMITTED:
+            return None, Response({"detail": "Only submitted cycle count locations can be reconciled."}, status=status.HTTP_400_BAD_REQUEST)
+        variance = line.variance_quantity
+        if variance is None:
+            return None, Response({"detail": "Cycle count line has not been counted."}, status=status.HTTP_400_BAD_REQUEST)
+        if variance == 0:
+            if line.reconciliation_status != CycleCountLine.ReconciliationStatus.NO_VARIANCE:
+                line.reconciliation_status = CycleCountLine.ReconciliationStatus.NO_VARIANCE
+                line.save(update_fields=["reconciliation_status", "updated_at"])
+            return None, Response({"detail": "Line has no variance to reconcile."}, status=status.HTTP_400_BAD_REQUEST)
+        if line.reconciliation_status != CycleCountLine.ReconciliationStatus.PENDING_REVIEW:
+            return None, Response({"detail": "Cycle count line has already been reconciled."}, status=status.HTTP_409_CONFLICT)
+        return line, None
+
+    def _movement_after_snapshot_exists(self, line):
+        if not line.session.snapshot_at:
+            return False
+        return StockMovement.objects.filter(
+            branch=line.branch,
+            product=line.product,
+            created_at__gt=line.session.snapshot_at,
+        ).filter(
+            models.Q(source_location=line.location) | models.Q(destination_location=line.location)
+        ).exclude(cycle_count_line=line).exists()
+
+    def _refresh_movement_warning(self, line):
+        has_movement = self._movement_after_snapshot_exists(line)
+        if has_movement and not line.movement_after_snapshot:
+            line.movement_after_snapshot = True
+            line.save(update_fields=["movement_after_snapshot", "updated_at"])
+        return has_movement
+
+    def create(self, request):
+        branch_code = str(request.data.get("branch", "")).strip()
+        location_ids = request.data.get("location_ids", [])
+        if not branch_code:
+            return Response({"branch": ["Branch is required."]}, status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(location_ids, list) or not location_ids:
+            return Response({"location_ids": ["At least one location is required."]}, status=status.HTTP_400_BAD_REQUEST)
+        if len(location_ids) != len(set(str(location_id) for location_id in location_ids)):
+            return Response({"location_ids": ["Duplicate locations are not allowed."]}, status=status.HTTP_400_BAD_REQUEST)
+        branch = Branch.objects.filter(code__iexact=branch_code).first()
+        if branch is None:
+            return Response({"branch": ["Branch was not found."]}, status=status.HTTP_400_BAD_REQUEST)
+        require_branch_access(request.user, branch, leader_required=True)
+        locations = list(Location.objects.filter(id__in=location_ids, branch=branch).order_by("code"))
+        if len(locations) != len(location_ids):
+            return Response({"location_ids": ["All locations must belong to the active branch."]}, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            session = CycleCountSession.objects.create(
+                branch=branch,
+                name=str(request.data.get("name", "")).strip(),
+                note=str(request.data.get("note", "")).strip(),
+                created_by=request.user,
+            )
+            session.reference = f"CC-{branch.code}-{session.id:06d}"
+            session.save(update_fields=["reference", "updated_at"])
+            CycleCountLocation.objects.bulk_create(
+                [CycleCountLocation(session=session, branch=branch, location=location) for location in locations]
+            )
+            AuditLog.objects.create(
+                actor=request.user,
+                action_type=AuditLog.ActionType.CREATE,
+                event_type="cycle_count_created",
+                branch=branch,
+                reference=session.reference,
+                entity_name="CycleCountSession",
+                entity_id=str(session.id),
+                message=f"Worker {request.user.username} created cycle count session {session.reference}.",
+            )
+
+        return Response(self.get_serializer(self.get_queryset().get(pk=session.pk)).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"], url_path="open")
+    def open(self, request, pk=None):
+        with transaction.atomic():
+            session = (
+                CycleCountSession.objects.select_for_update()
+                .select_related("branch")
+                .prefetch_related("locations", "locations__location")
+                .get(pk=pk)
+            )
+            require_branch_access(request.user, session.branch, leader_required=True)
+            if session.status == CycleCountSession.Status.OPEN:
+                return Response(self.get_serializer(self.get_queryset().get(pk=session.pk)).data)
+            if session.status != CycleCountSession.Status.DRAFT:
+                return Response({"detail": "Only draft cycle count sessions can be opened."}, status=status.HTTP_400_BAD_REQUEST)
+            count_locations = list(session.locations.select_related("location").all())
+            if not count_locations:
+                return Response({"detail": "Cycle count session has no locations."}, status=status.HTTP_400_BAD_REQUEST)
+            snapshot_at = timezone.now()
+            existing_line_count = CycleCountLine.objects.filter(session=session).count()
+            if existing_line_count == 0:
+                inventory_items = InventoryItem.objects.select_related("product", "location").filter(
+                    branch=session.branch,
+                    location_id__in=[count_location.location_id for count_location in count_locations],
+                    quantity_on_hand__gt=0,
+                )
+                location_by_id = {count_location.location_id: count_location for count_location in count_locations}
+                CycleCountLine.objects.bulk_create(
+                    [
+                        CycleCountLine(
+                            session=session,
+                            cycle_count_location=location_by_id[item.location_id],
+                            branch=session.branch,
+                            location=item.location,
+                            product=item.product,
+                            expected_quantity=item.quantity_on_hand,
+                            is_expected=True,
+                        )
+                        for item in inventory_items
+                    ]
+                )
+            session.status = CycleCountSession.Status.OPEN
+            session.snapshot_at = snapshot_at
+            session.opened_at = snapshot_at
+            session.opened_by = request.user
+            session.save(update_fields=["status", "snapshot_at", "opened_at", "opened_by", "updated_at"])
+            AuditLog.objects.create(
+                actor=request.user,
+                action_type=AuditLog.ActionType.STATUS_CHANGE,
+                event_type="cycle_count_opened",
+                branch=session.branch,
+                reference=session.reference,
+                entity_name="CycleCountSession",
+                entity_id=str(session.id),
+                message=f"Worker {request.user.username} opened cycle count session {session.reference} and created the expected stock snapshot.",
+            )
+        return Response(self.get_serializer(self.get_queryset().get(pk=session.pk)).data)
+
+    @action(detail=True, methods=["post"], url_path="close")
+    def close(self, request, pk=None):
+        with transaction.atomic():
+            session = CycleCountSession.objects.select_for_update().select_related("branch").get(pk=pk)
+            require_branch_access(request.user, session.branch, leader_required=True)
+            if session.status != CycleCountSession.Status.AWAITING_REVIEW:
+                return Response({"detail": "Only sessions awaiting review can be closed."}, status=status.HTTP_400_BAD_REQUEST)
+            if session.locations.exclude(status=CycleCountLocation.Status.SUBMITTED).exists():
+                return Response({"detail": "All cycle count locations must be submitted before closing."}, status=status.HTTP_400_BAD_REQUEST)
+            pending_lines = CycleCountLine.objects.filter(
+                session=session,
+                reconciliation_status=CycleCountLine.ReconciliationStatus.PENDING_REVIEW,
+            ).count()
+            if pending_lines:
+                return Response(
+                    {"detail": "All variance lines must be reconciled before closing.", "pending_variance_count": pending_lines},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            session.status = CycleCountSession.Status.CLOSED
+            session.reviewed_at = timezone.now()
+            session.reviewed_by = request.user
+            session.save(update_fields=["status", "reviewed_at", "reviewed_by", "updated_at"])
+            AuditLog.objects.create(
+                actor=request.user,
+                action_type=AuditLog.ActionType.STATUS_CHANGE,
+                event_type="cycle_count_closed",
+                branch=session.branch,
+                reference=session.reference,
+                entity_name="CycleCountSession",
+                entity_id=str(session.id),
+                message=f"Worker {request.user.username} closed reconciled cycle count session {session.reference}. Closing did not create additional stock mutations.",
+            )
+        return Response(self.get_serializer(self.get_queryset().get(pk=session.pk)).data)
+
+    @action(detail=True, methods=["post"], url_path=r"lines/(?P<line_id>[^/.]+)/apply-adjustment")
+    def apply_adjustment(self, request, pk=None, line_id=None):
+        note = str(request.data.get("note", "")).strip()
+        with transaction.atomic():
+            session = CycleCountSession.objects.select_for_update().select_related("branch").get(pk=pk)
+            require_branch_access(request.user, session.branch, leader_required=True)
+            if session.status != CycleCountSession.Status.AWAITING_REVIEW:
+                return Response({"detail": "Cycle count session must be awaiting review."}, status=status.HTTP_400_BAD_REQUEST)
+            line, error_response = self._line_for_reconciliation(session, line_id)
+            if error_response is not None:
+                return error_response
+            variance = line.variance_quantity
+            if self._refresh_movement_warning(line):
+                return Response(
+                    {"detail": "Inventory moved after the cycle count snapshot. Resolve this variance without automatic adjustment or recount later."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            inventory_item = (
+                InventoryItem.objects.select_for_update()
+                .filter(branch=session.branch, location=line.location, product=line.product)
+                .first()
+            )
+            if inventory_item is None:
+                if line.expected_quantity != 0:
+                    return Response({"detail": "Current inventory no longer matches the cycle count snapshot."}, status=status.HTTP_409_CONFLICT)
+                if variance < 0:
+                    return Response({"detail": "Decrease would make stock negative."}, status=status.HTTP_400_BAD_REQUEST)
+                inventory_item = InventoryItem.objects.create(
+                    branch=session.branch,
+                    location=line.location,
+                    product=line.product,
+                    quantity_on_hand=Decimal("0"),
+                    quantity_reserved=Decimal("0"),
+                )
+            quantity_before = inventory_item.quantity_on_hand
+            if quantity_before != line.expected_quantity:
+                line.movement_after_snapshot = True
+                line.save(update_fields=["movement_after_snapshot", "updated_at"])
+                return Response({"detail": "Current inventory no longer matches the cycle count snapshot."}, status=status.HTTP_409_CONFLICT)
+            direction = (
+                StockMovement.AdjustmentDirection.INCREASE
+                if variance > 0
+                else StockMovement.AdjustmentDirection.DECREASE
+            )
+            quantity = abs(variance)
+            quantity_after = quantity_before + variance
+            if quantity_after < 0:
+                return Response({"detail": "Decrease would make stock negative."}, status=status.HTTP_400_BAD_REQUEST)
+            inventory_item.quantity_on_hand = quantity_after
+            inventory_item.save(update_fields=["quantity_on_hand", "updated_at"])
+            adjustment_note = (
+                f"Cycle Count {session.reference}; location {line.location.code}; product {line.product.sku}; "
+                f"expected {line.expected_quantity}; counted {line.counted_quantity}; variance {variance}."
+            )
+            if note:
+                adjustment_note = f"{adjustment_note} Leader note: {note}"
+            movement = StockMovement.objects.create(
+                branch=session.branch,
+                product=line.product,
+                inventory_item=inventory_item,
+                source_location=line.location if direction == StockMovement.AdjustmentDirection.DECREASE else None,
+                destination_location=line.location if direction == StockMovement.AdjustmentDirection.INCREASE else None,
+                movement_type=StockMovement.MovementType.ADJUSTMENT,
+                quantity=quantity,
+                quantity_before=quantity_before,
+                quantity_after=quantity_after,
+                adjustment_direction=direction,
+                adjustment_reason=StockMovement.AdjustmentReason.COUNT_CORRECTION,
+                adjustment_note=adjustment_note,
+                cycle_count_line=line,
+                performed_by=request.user,
+            )
+            movement.reference = f"ADJ-CC-{session.branch.code}-{movement.id:06d}"
+            movement.save(update_fields=["reference", "updated_at"])
+            line.reconciliation_status = CycleCountLine.ReconciliationStatus.ADJUSTMENT_APPLIED
+            line.reconciled_by = request.user
+            line.reconciled_at = timezone.now()
+            line.resolution_note = note
+            line.save(update_fields=[
+                "reconciliation_status",
+                "reconciled_by",
+                "reconciled_at",
+                "resolution_note",
+                "updated_at",
+            ])
+            AuditLog.objects.create(
+                actor=request.user,
+                action_type=AuditLog.ActionType.UPDATE,
+                event_type="cycle_count_variance_adjustment_applied",
+                branch=session.branch,
+                product=line.product,
+                quantity=quantity,
+                source_location=line.location if direction == StockMovement.AdjustmentDirection.DECREASE else None,
+                destination_location=line.location if direction == StockMovement.AdjustmentDirection.INCREASE else None,
+                source_label=line.location.code if direction == StockMovement.AdjustmentDirection.DECREASE else "",
+                destination_label=line.location.code if direction == StockMovement.AdjustmentDirection.INCREASE else "",
+                reference=movement.reference,
+                result=direction,
+                entity_name="CycleCountLine",
+                entity_id=str(line.id),
+                message=(
+                    f"Worker {request.user.username} applied cycle count variance adjustment {movement.reference} "
+                    f"for {session.reference}: {direction} {quantity} {line.product.sku} at {line.location.code} "
+                    f"from {quantity_before} to {quantity_after}."
+                ),
+            )
+        return Response(self.get_serializer(self.get_queryset().get(pk=session.pk)).data)
+
+    @action(detail=True, methods=["post"], url_path=r"lines/(?P<line_id>[^/.]+)/resolve-without-adjustment")
+    def resolve_without_adjustment(self, request, pk=None, line_id=None):
+        note = str(request.data.get("note", "")).strip()
+        if len(note) < 5:
+            return Response({"note": ["A meaningful explanation is required."]}, status=status.HTTP_400_BAD_REQUEST)
+        with transaction.atomic():
+            session = CycleCountSession.objects.select_for_update().select_related("branch").get(pk=pk)
+            require_branch_access(request.user, session.branch, leader_required=True)
+            if session.status != CycleCountSession.Status.AWAITING_REVIEW:
+                return Response({"detail": "Cycle count session must be awaiting review."}, status=status.HTTP_400_BAD_REQUEST)
+            line, error_response = self._line_for_reconciliation(session, line_id)
+            if error_response is not None:
+                return error_response
+            self._refresh_movement_warning(line)
+            variance = line.variance_quantity
+            line.reconciliation_status = CycleCountLine.ReconciliationStatus.NO_ADJUSTMENT_REQUIRED
+            line.reconciled_by = request.user
+            line.reconciled_at = timezone.now()
+            line.resolution_note = note
+            line.save(update_fields=[
+                "reconciliation_status",
+                "reconciled_by",
+                "reconciled_at",
+                "resolution_note",
+                "movement_after_snapshot",
+                "updated_at",
+            ])
+            AuditLog.objects.create(
+                actor=request.user,
+                action_type=AuditLog.ActionType.UPDATE,
+                event_type="cycle_count_variance_resolved_without_adjustment",
+                branch=session.branch,
+                product=line.product,
+                quantity=abs(variance),
+                source_location=line.location,
+                source_label=line.location.code,
+                reference=session.reference,
+                result=CycleCountLine.ReconciliationStatus.NO_ADJUSTMENT_REQUIRED,
+                entity_name="CycleCountLine",
+                entity_id=str(line.id),
+                message=(
+                    f"Worker {request.user.username} resolved cycle count variance for {session.reference} "
+                    f"without stock adjustment: {line.product.sku} at {line.location.code}, variance {variance}."
+                ),
+            )
+        return Response(self.get_serializer(self.get_queryset().get(pk=session.pk)).data)
+
+    @action(detail=True, methods=["post"], url_path="cancel")
+    def cancel(self, request, pk=None):
+        with transaction.atomic():
+            session = CycleCountSession.objects.select_for_update().select_related("branch").get(pk=pk)
+            require_branch_access(request.user, session.branch, leader_required=True)
+            if session.status not in [CycleCountSession.Status.DRAFT, CycleCountSession.Status.OPEN]:
+                return Response({"detail": "Only draft or open sessions can be cancelled."}, status=status.HTTP_400_BAD_REQUEST)
+            session.status = CycleCountSession.Status.CANCELLED
+            session.cancelled_at = timezone.now()
+            session.cancelled_by = request.user
+            session.locations.exclude(status=CycleCountLocation.Status.SUBMITTED).update(status=CycleCountLocation.Status.CANCELLED)
+            session.save(update_fields=["status", "cancelled_at", "cancelled_by", "updated_at"])
+            AuditLog.objects.create(
+                actor=request.user,
+                action_type=AuditLog.ActionType.STATUS_CHANGE,
+                event_type="cycle_count_cancelled",
+                branch=session.branch,
+                reference=session.reference,
+                entity_name="CycleCountSession",
+                entity_id=str(session.id),
+                message=f"Worker {request.user.username} cancelled cycle count session {session.reference}.",
+            )
+        return Response(self.get_serializer(self.get_queryset().get(pk=session.pk)).data)
 
 
 class AuditLogViewSet(ReadOnlyModelViewSet):

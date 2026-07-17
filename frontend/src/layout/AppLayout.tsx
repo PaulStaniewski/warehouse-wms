@@ -88,6 +88,7 @@ const wmsNavSections: NavSection[] = [
     items: [
       { to: "/wms/stock-transfers", label: "Stock Transfers", icon: Boxes },
       { to: "/wms/stock-adjustments", label: "Stock Adjustments", icon: ClipboardList },
+      { to: "/wms/cycle-counts", label: "Cycle Counts", icon: ClipboardCheck },
     ],
   },
   {
@@ -126,6 +127,7 @@ const wmsNavSections: NavSection[] = [
 
 const scannerPageTitles: Array<[string, string]> = [
   ["/scanner/inter-branch-arrivals", "Inter-branch pallet arrivals"],
+  ["/scanner/cycle-counts", "Cycle Counts"],
   ["/scanner/quick-transfer", "Quick Transfer"],
   ["/scanner/proformas", "Proformas"],
   ["/scanner/contents", "Contents"],
@@ -154,6 +156,7 @@ const wmsPageTitles: Array<[string, string]> = [
   ["/wms/events/archive", "Archive Events"],
   ["/wms/discrepancies", "Discrepancies"],
   ["/wms/branches", "Branches"],
+  ["/wms/cycle-counts", "Cycle Counts"],
   ["/wms/stock-adjustments", "Stock Adjustments"],
   ["/wms/stock-transfers", "Stock Transfers"],
   ["/wms/dashboard", "Dashboard"],

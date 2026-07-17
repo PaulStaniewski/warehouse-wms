@@ -10,15 +10,19 @@ from django.db.models import F, Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import status
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from accounts.authorization import branch_ids_filter, require_branch_access
+from accounts.authorization import branch_codes_filter, branch_ids_filter, require_branch_access
 from operations.models import (
     AuditLog,
     CartPickedItem,
     CartWorkParticipant,
     CartWorkSession,
+    CycleCountLine,
+    CycleCountLocation,
+    CycleCountSession,
     InterBranchTransfer,
     Order,
     PalletReceivingScan,
@@ -3577,3 +3581,284 @@ class ScannerQuickTransferView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+def _cycle_count_session_summary(session: CycleCountSession) -> dict:
+    locations = list(session.locations.all())
+    submitted = sum(1 for location in locations if location.status == CycleCountLocation.Status.SUBMITTED)
+    return {
+        "id": session.id,
+        "reference": session.reference,
+        "name": session.name,
+        "branch": session.branch_id,
+        "branch_code": session.branch.code,
+        "status": session.status,
+        "locations_count": len(locations),
+        "submitted_locations_count": submitted,
+        "snapshot_at": session.snapshot_at.isoformat() if session.snapshot_at else None,
+        "opened_at": session.opened_at.isoformat() if session.opened_at else None,
+        "created_at": session.created_at.isoformat() if session.created_at else None,
+    }
+
+
+def _cycle_count_location_summary(count_location: CycleCountLocation) -> dict:
+    lines = list(count_location.lines.select_related("product", "counted_by").all())
+    counted = [line for line in lines if line.counted_quantity is not None]
+    return {
+        "id": count_location.id,
+        "location": count_location.location_id,
+        "location_code": count_location.location.code,
+        "location_name": count_location.location.name,
+        "status": count_location.status,
+        "expected_lines_count": sum(1 for line in lines if line.is_expected),
+        "counted_lines_count": len(counted),
+        "unexpected_lines_count": sum(1 for line in lines if not line.is_expected),
+        "uncounted_expected_count": sum(1 for line in lines if line.is_expected and line.counted_quantity is None),
+        "lines": [
+            {
+                "id": line.id,
+                "product": line.product_id,
+                "product_sku": line.product.sku,
+                "product_name": line.product.name,
+                "counted_quantity": str(line.counted_quantity) if line.counted_quantity is not None else None,
+                "is_expected": line.is_expected,
+                "movement_after_snapshot": line.movement_after_snapshot,
+                "counted_by_username": line.counted_by.username if line.counted_by_id and line.counted_by else None,
+                "counted_at": line.counted_at.isoformat() if line.counted_at else None,
+            }
+            for line in counted
+        ],
+    }
+
+
+def _movement_after_cycle_snapshot(session: CycleCountSession, location: Location, product: Product) -> bool:
+    if not session.snapshot_at:
+        return False
+    return StockMovement.objects.filter(
+        created_at__gt=session.snapshot_at,
+        product=product,
+    ).filter(Q(source_location=location) | Q(destination_location=location)).exists()
+
+
+def _cycle_count_response(session: CycleCountSession) -> dict:
+    session = (
+        CycleCountSession.objects.select_related("branch")
+        .prefetch_related(
+            "locations",
+            "locations__location",
+            "locations__lines",
+            "locations__lines__product",
+            "locations__lines__counted_by",
+        )
+        .get(pk=session.pk)
+    )
+    return {
+        "session": _cycle_count_session_summary(session),
+        "locations": [_cycle_count_location_summary(location) for location in session.locations.all()],
+    }
+
+
+class ScannerCycleCountSessionsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        branch = str(request.query_params.get("branch", "")).strip()
+        if request.user and request.user.is_authenticated and branch:
+            branch_codes_filter(request.user, branch)
+        elif request.user and request.user.is_authenticated:
+            allowed_codes = branch_codes_filter(request.user)
+        else:
+            allowed_codes = set()
+        sessions = (
+            CycleCountSession.objects.select_related("branch")
+            .prefetch_related("locations")
+            .filter(status__in=[CycleCountSession.Status.OPEN, CycleCountSession.Status.IN_PROGRESS])
+            .order_by("-opened_at", "-created_at")
+        )
+        if request.user and request.user.is_authenticated:
+            sessions = sessions.filter(branch__code__in={branch} if branch else allowed_codes)
+        elif branch:
+            sessions = sessions.filter(branch__code__iexact=branch)
+        return Response({"results": [_cycle_count_session_summary(session) for session in sessions]})
+
+
+class ScannerCycleCountSessionDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, session_id):
+        session = CycleCountSession.objects.select_related("branch").filter(pk=session_id).first()
+        if session is None:
+            return Response({"detail": "Cycle count session not found."}, status=status.HTTP_404_NOT_FOUND)
+        if session.status not in [CycleCountSession.Status.OPEN, CycleCountSession.Status.IN_PROGRESS]:
+            return Response({"detail": "Cycle count session is not executable."}, status=status.HTTP_400_BAD_REQUEST)
+        if request.user and request.user.is_authenticated:
+            require_branch_access(request.user, session.branch)
+        return Response(_cycle_count_response(session))
+
+
+class ScannerCycleCountSaveLineView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, session_id, location_id):
+        product_code = str(request.data.get("product_code", "")).strip()
+        quantity_value = request.data.get("quantity", "")
+        if not product_code:
+            return Response({"product_code": ["Product code is required."]}, status=status.HTTP_400_BAD_REQUEST)
+        product = _find_product_by_code(product_code)
+        if product is None:
+            return Response({"product_code": ["Product was not found."]}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            quantity = Decimal(str(quantity_value))
+        except Exception:
+            return Response({"quantity": ["Quantity must be a valid number."]}, status=status.HTTP_400_BAD_REQUEST)
+        if quantity < 0:
+            return Response({"quantity": ["Quantity cannot be negative."]}, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            session = CycleCountSession.objects.select_for_update().select_related("branch").filter(pk=session_id).first()
+            if session is None:
+                return Response({"detail": "Cycle count session not found."}, status=status.HTTP_404_NOT_FOUND)
+            if session.status not in [CycleCountSession.Status.OPEN, CycleCountSession.Status.IN_PROGRESS]:
+                return Response({"detail": "Cycle count session is not executable."}, status=status.HTTP_400_BAD_REQUEST)
+            if request.user and request.user.is_authenticated:
+                require_branch_access(request.user, session.branch)
+            count_location = (
+                CycleCountLocation.objects.select_for_update()
+                .select_related("location")
+                .filter(session=session, location_id=location_id)
+                .first()
+            )
+            if count_location is None:
+                return Response({"detail": "Location does not belong to this cycle count session."}, status=status.HTTP_404_NOT_FOUND)
+            if count_location.status == CycleCountLocation.Status.SUBMITTED:
+                return Response({"detail": "Submitted locations cannot be changed."}, status=status.HTTP_400_BAD_REQUEST)
+            if count_location.status == CycleCountLocation.Status.CANCELLED:
+                return Response({"detail": "Cancelled locations cannot be counted."}, status=status.HTTP_400_BAD_REQUEST)
+            line, _ = CycleCountLine.objects.select_for_update().get_or_create(
+                cycle_count_location=count_location,
+                product=product,
+                defaults={
+                    "session": session,
+                    "branch": session.branch,
+                    "location": count_location.location,
+                    "expected_quantity": Decimal("0"),
+                    "is_expected": False,
+                },
+            )
+            line.counted_quantity = quantity
+            line.counted_by = request.user if request.user.is_authenticated else None
+            line.counted_at = timezone.now()
+            line.movement_after_snapshot = _movement_after_cycle_snapshot(session, count_location.location, product)
+            line.save(update_fields=["counted_quantity", "counted_by", "counted_at", "movement_after_snapshot", "updated_at"])
+            if count_location.status == CycleCountLocation.Status.PENDING:
+                count_location.status = CycleCountLocation.Status.IN_PROGRESS
+                count_location.started_by = request.user if request.user.is_authenticated else None
+                count_location.started_at = timezone.now()
+                count_location.save(update_fields=["status", "started_by", "started_at", "updated_at"])
+            if session.status == CycleCountSession.Status.OPEN:
+                session.status = CycleCountSession.Status.IN_PROGRESS
+                session.save(update_fields=["status", "updated_at"])
+        return Response(_cycle_count_response(session))
+
+
+class ScannerCycleCountSubmitLocationView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, session_id, location_id):
+        confirm_zeroes = bool(request.data.get("confirm_zeroes", False))
+        with transaction.atomic():
+            session = CycleCountSession.objects.select_for_update().select_related("branch").filter(pk=session_id).first()
+            if session is None:
+                return Response({"detail": "Cycle count session not found."}, status=status.HTTP_404_NOT_FOUND)
+            if session.status not in [CycleCountSession.Status.OPEN, CycleCountSession.Status.IN_PROGRESS]:
+                return Response({"detail": "Cycle count session is not executable."}, status=status.HTTP_400_BAD_REQUEST)
+            if request.user and request.user.is_authenticated:
+                require_branch_access(request.user, session.branch)
+            count_location = (
+                CycleCountLocation.objects.select_for_update()
+                .select_related("location")
+                .filter(session=session, location_id=location_id)
+                .first()
+            )
+            if count_location is None:
+                return Response({"detail": "Location does not belong to this cycle count session."}, status=status.HTTP_404_NOT_FOUND)
+            if count_location.status == CycleCountLocation.Status.SUBMITTED:
+                return Response(_cycle_count_response(session))
+            uncounted_expected = list(
+                CycleCountLine.objects.select_for_update()
+                .filter(cycle_count_location=count_location, is_expected=True, counted_quantity__isnull=True)
+            )
+            if uncounted_expected and not confirm_zeroes:
+                return Response(
+                    {
+                        "detail": "Some expected products were not counted. Confirm that they should be recorded as zero.",
+                        "uncounted_expected_count": len(uncounted_expected),
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+            now = timezone.now()
+            for line in uncounted_expected:
+                line.counted_quantity = Decimal("0")
+                line.counted_by = request.user if request.user.is_authenticated else None
+                line.counted_at = now
+                line.movement_after_snapshot = _movement_after_cycle_snapshot(session, count_location.location, line.product)
+                line.reconciliation_status = (
+                    CycleCountLine.ReconciliationStatus.NO_VARIANCE
+                    if line.variance_quantity == 0
+                    else CycleCountLine.ReconciliationStatus.PENDING_REVIEW
+                )
+                line.save(update_fields=[
+                    "counted_quantity",
+                    "counted_by",
+                    "counted_at",
+                    "movement_after_snapshot",
+                    "reconciliation_status",
+                    "updated_at",
+                ])
+            counted_lines = CycleCountLine.objects.select_for_update().filter(
+                cycle_count_location=count_location,
+                counted_quantity__isnull=False,
+                reconciliation_status="",
+            )
+            for line in counted_lines:
+                line.reconciliation_status = (
+                    CycleCountLine.ReconciliationStatus.NO_VARIANCE
+                    if line.variance_quantity == 0
+                    else CycleCountLine.ReconciliationStatus.PENDING_REVIEW
+                )
+                line.save(update_fields=["reconciliation_status", "updated_at"])
+            count_location.status = CycleCountLocation.Status.SUBMITTED
+            count_location.submitted_by = request.user if request.user.is_authenticated else None
+            count_location.submitted_at = now
+            count_location.save(update_fields=["status", "submitted_by", "submitted_at", "updated_at"])
+            remaining = session.locations.exclude(status=CycleCountLocation.Status.SUBMITTED).exists()
+            session.status = CycleCountSession.Status.IN_PROGRESS if remaining else CycleCountSession.Status.AWAITING_REVIEW
+            if not remaining:
+                session.submitted_at = now
+                session.save(update_fields=["status", "submitted_at", "updated_at"])
+            else:
+                session.save(update_fields=["status", "updated_at"])
+            AuditLog.objects.create(
+                actor=request.user if request.user.is_authenticated else None,
+                action_type=AuditLog.ActionType.STATUS_CHANGE,
+                event_type="cycle_count_location_submitted",
+                branch=session.branch,
+                source_location=count_location.location,
+                source_label=count_location.location.code,
+                reference=session.reference,
+                entity_name="CycleCountSession",
+                entity_id=str(session.id),
+                message=f"Worker {_scanner_actor_code(request)} submitted cycle count location {count_location.location.code} for {session.reference}.",
+            )
+            if session.status == CycleCountSession.Status.AWAITING_REVIEW:
+                AuditLog.objects.create(
+                    actor=request.user if request.user.is_authenticated else None,
+                    action_type=AuditLog.ActionType.STATUS_CHANGE,
+                    event_type="cycle_count_awaiting_review",
+                    branch=session.branch,
+                    reference=session.reference,
+                    entity_name="CycleCountSession",
+                    entity_id=str(session.id),
+                    message=f"Cycle count session {session.reference} is awaiting review.",
+                )
+        return Response(_cycle_count_response(session))

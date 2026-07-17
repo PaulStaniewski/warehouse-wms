@@ -9,6 +9,9 @@ import { ArchiveEventsPage } from "./pages/ArchiveEventsPage";
 import { BranchDetailPage } from "./pages/BranchDetailPage";
 import { BranchesPage } from "./pages/BranchesPage";
 import { CurrentEventsPage } from "./pages/CurrentEventsPage";
+import { CycleCountCreatePage } from "./pages/CycleCountCreatePage";
+import { CycleCountDetailPage } from "./pages/CycleCountDetailPage";
+import { CycleCountsPage } from "./pages/CycleCountsPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { DiscrepanciesPage } from "./pages/DiscrepanciesPage";
 import { DiscrepancyActionQueuePage } from "./pages/DiscrepancyActionQueuePage";
@@ -29,6 +32,8 @@ import { RouteArchivePage } from "./pages/RouteArchivePage";
 import { RouteDocumentsPage } from "./pages/RouteDocumentsPage";
 import { ScannerContentsPage } from "./pages/ScannerContentsPage";
 import { ScannerControlPage } from "./pages/ScannerControlPage";
+import { ScannerCycleCountDetailPage } from "./pages/ScannerCycleCountDetailPage";
+import { ScannerCycleCountsPage } from "./pages/ScannerCycleCountsPage";
 import { ScannerHomePage } from "./pages/ScannerHomePage";
 import { ScannerLocationLookupPage } from "./pages/ScannerLocationLookupPage";
 import { ScannerPickingPage } from "./pages/ScannerPickingPage";
@@ -209,6 +214,9 @@ function App() {
             <Route path="wms/stock-adjustments" element={<StockAdjustmentsPage />} />
             <Route path="wms/stock-adjustments/new" element={<StockAdjustmentCreatePage />} />
             <Route path="wms/stock-adjustments/:id" element={<StockAdjustmentDetailPage />} />
+            <Route path="wms/cycle-counts" element={<CycleCountsPage />} />
+            <Route path="wms/cycle-counts/new" element={<CycleCountCreatePage />} />
+            <Route path="wms/cycle-counts/:id" element={<CycleCountDetailPage />} />
             <Route path="wms/routes-monitor" element={<RouteMonitorPage />} />
             <Route path="wms/routes/archive" element={<RouteArchivePage />} />
             <Route path="wms/discrepancy-actions" element={<DiscrepancyActionQueuePage />} />
@@ -251,6 +259,8 @@ function App() {
             <Route path="scanner/control" element={<ScannerControlPage />} />
             <Route path="scanner/receiving" element={<ScannerReceivingPage />} />
             <Route path="scanner/inter-branch-arrivals" element={<ScannerInterBranchArrivalsPage />} />
+            <Route path="scanner/cycle-counts" element={<ScannerCycleCountsPage />} />
+            <Route path="scanner/cycle-counts/:id" element={<ScannerCycleCountDetailPage />} />
             <Route path="scanner/routes" element={<Navigate to="/scanner/proformas" replace />} />
             <Route path="scanner/route-runs/:id/picking" element={<Navigate to="/scanner/picking" replace />} />
             <Route path="scanner/route-runs/:id/control" element={<Navigate to="/scanner/control" replace />} />

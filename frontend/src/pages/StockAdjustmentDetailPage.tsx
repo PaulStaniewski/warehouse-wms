@@ -94,6 +94,13 @@ export function StockAdjustmentDetailPage() {
             <article className="detail-card">
               <span>Origin</span>
               <strong>{adjustment.data.origin}</strong>
+              {adjustment.data.cycle_count_session_id && (
+                <p>
+                  <Link className="table-link mono" to={`/wms/cycle-counts/${adjustment.data.cycle_count_session_id}`}>
+                    {adjustment.data.cycle_count_session_reference ?? "Open Cycle Count"}
+                  </Link>
+                </p>
+              )}
             </article>
             <article className="detail-card">
               <span>Reference</span>

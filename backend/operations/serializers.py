@@ -5,6 +5,9 @@ from rest_framework import serializers
 
 from operations.models import (
     AuditLog,
+    CycleCountLine,
+    CycleCountLocation,
+    CycleCountSession,
     DeliveryRoute,
     Order,
     OrderLine,
@@ -600,6 +603,9 @@ class StockMovementSerializer(serializers.ModelSerializer):
     adjustment_location_code = serializers.SerializerMethodField()
     adjustment_reason_label = serializers.CharField(source="get_adjustment_reason_display", read_only=True)
     adjustment_quantity = serializers.SerializerMethodField()
+    cycle_count_line_id = serializers.IntegerField(source="cycle_count_line.id", read_only=True)
+    cycle_count_session_id = serializers.IntegerField(source="cycle_count_line.session_id", read_only=True)
+    cycle_count_session_reference = serializers.CharField(source="cycle_count_line.session.reference", read_only=True)
     status = serializers.SerializerMethodField()
     origin = serializers.SerializerMethodField()
 
@@ -637,6 +643,8 @@ class StockMovementSerializer(serializers.ModelSerializer):
     def get_origin(self, obj) -> str:
         if obj.movement_type == StockMovement.MovementType.TRANSFER and obj.source_location_id and obj.destination_location_id:
             return "Scanner Quick Transfer"
+        if obj.movement_type == StockMovement.MovementType.ADJUSTMENT and obj.cycle_count_line_id:
+            return "Cycle Count variance reconciliation"
         if obj.movement_type == StockMovement.MovementType.ADJUSTMENT and obj.adjustment_direction and obj.adjustment_reason:
             return "Manual WMS stock adjustment"
         return obj.get_movement_type_display()
@@ -664,6 +672,9 @@ class StockMovementSerializer(serializers.ModelSerializer):
             "adjustment_reason_label",
             "adjustment_note",
             "adjustment_quantity",
+            "cycle_count_line_id",
+            "cycle_count_session_id",
+            "cycle_count_session_reference",
             "quantity",
             "quantity_before",
             "quantity_after",
@@ -672,6 +683,270 @@ class StockMovementSerializer(serializers.ModelSerializer):
             "performed_by_username",
             "status",
             "origin",
+            "created_at",
+            "updated_at",
+        ]
+
+
+class CycleCountLineSerializer(serializers.ModelSerializer):
+    product_sku = serializers.CharField(source="product.sku", read_only=True)
+    product_name = serializers.CharField(source="product.name", read_only=True)
+    location_code = serializers.CharField(source="location.code", read_only=True)
+    counted_by_username = serializers.CharField(source="counted_by.username", read_only=True)
+    reconciled_by_username = serializers.CharField(source="reconciled_by.username", read_only=True)
+    variance_quantity = serializers.SerializerMethodField()
+    variance_status = serializers.SerializerMethodField()
+    reconciliation_status_label = serializers.SerializerMethodField()
+    adjustment_id = serializers.SerializerMethodField()
+    adjustment_reference = serializers.SerializerMethodField()
+    can_apply_adjustment = serializers.SerializerMethodField()
+    adjustment_conflict_reason = serializers.SerializerMethodField()
+
+    def get_variance_quantity(self, obj) -> str | None:
+        variance = obj.variance_quantity
+        return str(variance) if variance is not None else None
+
+    def get_variance_status(self, obj) -> str:
+        variance = obj.variance_quantity
+        if variance is None:
+            return "not_counted"
+        if variance > 0:
+            return "positive"
+        if variance < 0:
+            return "negative"
+        return "zero"
+
+    def get_reconciliation_status_label(self, obj) -> str:
+        return obj.get_reconciliation_status_display() if obj.reconciliation_status else "Not reviewed"
+
+    def get_adjustment_id(self, obj) -> int | None:
+        movement = getattr(obj, "reconciliation_stock_movement", None)
+        return movement.id if movement else None
+
+    def get_adjustment_reference(self, obj) -> str | None:
+        movement = getattr(obj, "reconciliation_stock_movement", None)
+        return movement.reference if movement else None
+
+    def get_can_apply_adjustment(self, obj) -> bool:
+        return self.get_adjustment_conflict_reason(obj) is None
+
+    def get_adjustment_conflict_reason(self, obj) -> str | None:
+        if obj.cycle_count_location.status != CycleCountLocation.Status.SUBMITTED:
+            return "Location has not been submitted."
+        variance = obj.variance_quantity
+        if variance is None:
+            return "Line has not been counted."
+        if variance == 0:
+            return "Line has no variance."
+        if obj.reconciliation_status != CycleCountLine.ReconciliationStatus.PENDING_REVIEW:
+            return "Line has already been reconciled."
+        if obj.movement_after_snapshot:
+            return "Inventory moved after the cycle count snapshot."
+        return None
+
+    class Meta:
+        model = CycleCountLine
+        fields = [
+            "id",
+            "session",
+            "cycle_count_location",
+            "branch",
+            "location",
+            "location_code",
+            "product",
+            "product_sku",
+            "product_name",
+            "expected_quantity",
+            "counted_quantity",
+            "variance_quantity",
+            "variance_status",
+            "reconciliation_status",
+            "reconciliation_status_label",
+            "reconciled_by",
+            "reconciled_by_username",
+            "reconciled_at",
+            "resolution_note",
+            "adjustment_id",
+            "adjustment_reference",
+            "can_apply_adjustment",
+            "adjustment_conflict_reason",
+            "counted_by",
+            "counted_by_username",
+            "counted_at",
+            "is_expected",
+            "movement_after_snapshot",
+            "created_at",
+            "updated_at",
+        ]
+
+
+class CycleCountLocationSerializer(serializers.ModelSerializer):
+    location_code = serializers.CharField(source="location.code", read_only=True)
+    location_name = serializers.CharField(source="location.name", read_only=True)
+    started_by_username = serializers.CharField(source="started_by.username", read_only=True)
+    submitted_by_username = serializers.CharField(source="submitted_by.username", read_only=True)
+    lines = CycleCountLineSerializer(many=True, read_only=True)
+    expected_lines_count = serializers.SerializerMethodField()
+    counted_lines_count = serializers.SerializerMethodField()
+    variance_lines_count = serializers.SerializerMethodField()
+    unexpected_lines_count = serializers.SerializerMethodField()
+
+    def get_expected_lines_count(self, obj) -> int:
+        return obj.lines.filter(is_expected=True).count()
+
+    def get_counted_lines_count(self, obj) -> int:
+        return obj.lines.filter(counted_quantity__isnull=False).count()
+
+    def get_variance_lines_count(self, obj) -> int:
+        return sum(1 for line in obj.lines.all() if line.variance_quantity not in [None, 0])
+
+    def get_unexpected_lines_count(self, obj) -> int:
+        return obj.lines.filter(is_expected=False).count()
+
+    class Meta:
+        model = CycleCountLocation
+        fields = [
+            "id",
+            "session",
+            "branch",
+            "location",
+            "location_code",
+            "location_name",
+            "status",
+            "started_by",
+            "started_by_username",
+            "submitted_by",
+            "submitted_by_username",
+            "started_at",
+            "submitted_at",
+            "expected_lines_count",
+            "counted_lines_count",
+            "variance_lines_count",
+            "unexpected_lines_count",
+            "lines",
+            "created_at",
+            "updated_at",
+        ]
+
+
+class CycleCountSessionSerializer(serializers.ModelSerializer):
+    branch_code = serializers.CharField(source="branch.code", read_only=True)
+    created_by_username = serializers.CharField(source="created_by.username", read_only=True)
+    opened_by_username = serializers.CharField(source="opened_by.username", read_only=True)
+    reviewed_by_username = serializers.CharField(source="reviewed_by.username", read_only=True)
+    cancelled_by_username = serializers.CharField(source="cancelled_by.username", read_only=True)
+    locations = CycleCountLocationSerializer(many=True, read_only=True)
+    locations_count = serializers.SerializerMethodField()
+    submitted_locations_count = serializers.SerializerMethodField()
+    lines_count = serializers.SerializerMethodField()
+    counted_lines_count = serializers.SerializerMethodField()
+    variance_lines_count = serializers.SerializerMethodField()
+    unexpected_lines_count = serializers.SerializerMethodField()
+    positive_variance_quantity = serializers.SerializerMethodField()
+    negative_variance_quantity = serializers.SerializerMethodField()
+    movement_warning_count = serializers.SerializerMethodField()
+    pending_variance_count = serializers.SerializerMethodField()
+    applied_adjustment_count = serializers.SerializerMethodField()
+    no_adjustment_resolution_count = serializers.SerializerMethodField()
+    zero_variance_count = serializers.SerializerMethodField()
+    reconciliation_complete = serializers.SerializerMethodField()
+    can_close = serializers.SerializerMethodField()
+
+    def _lines(self, obj):
+        return list(obj.lines.all())
+
+    def get_locations_count(self, obj) -> int:
+        return obj.locations.count()
+
+    def get_submitted_locations_count(self, obj) -> int:
+        return obj.locations.filter(status=CycleCountLocation.Status.SUBMITTED).count()
+
+    def get_lines_count(self, obj) -> int:
+        return obj.lines.count()
+
+    def get_counted_lines_count(self, obj) -> int:
+        return obj.lines.filter(counted_quantity__isnull=False).count()
+
+    def get_variance_lines_count(self, obj) -> int:
+        return sum(1 for line in self._lines(obj) if line.variance_quantity not in [None, 0])
+
+    def get_unexpected_lines_count(self, obj) -> int:
+        return obj.lines.filter(is_expected=False).count()
+
+    def get_positive_variance_quantity(self, obj) -> str:
+        total = sum((line.variance_quantity for line in self._lines(obj) if line.variance_quantity and line.variance_quantity > 0), 0)
+        return str(total)
+
+    def get_negative_variance_quantity(self, obj) -> str:
+        total = sum((line.variance_quantity for line in self._lines(obj) if line.variance_quantity and line.variance_quantity < 0), 0)
+        return str(abs(total))
+
+    def get_movement_warning_count(self, obj) -> int:
+        return obj.lines.filter(movement_after_snapshot=True).count()
+
+    def get_pending_variance_count(self, obj) -> int:
+        return obj.lines.filter(reconciliation_status=CycleCountLine.ReconciliationStatus.PENDING_REVIEW).count()
+
+    def get_applied_adjustment_count(self, obj) -> int:
+        return obj.lines.filter(reconciliation_status=CycleCountLine.ReconciliationStatus.ADJUSTMENT_APPLIED).count()
+
+    def get_no_adjustment_resolution_count(self, obj) -> int:
+        return obj.lines.filter(reconciliation_status=CycleCountLine.ReconciliationStatus.NO_ADJUSTMENT_REQUIRED).count()
+
+    def get_zero_variance_count(self, obj) -> int:
+        return obj.lines.filter(reconciliation_status=CycleCountLine.ReconciliationStatus.NO_VARIANCE).count()
+
+    def get_reconciliation_complete(self, obj) -> bool:
+        if obj.status == CycleCountSession.Status.CLOSED:
+            return True
+        return not obj.lines.filter(reconciliation_status=CycleCountLine.ReconciliationStatus.PENDING_REVIEW).exists()
+
+    def get_can_close(self, obj) -> bool:
+        if obj.status != CycleCountSession.Status.AWAITING_REVIEW:
+            return False
+        if obj.locations.exclude(status=CycleCountLocation.Status.SUBMITTED).exists():
+            return False
+        return self.get_reconciliation_complete(obj)
+
+    class Meta:
+        model = CycleCountSession
+        fields = [
+            "id",
+            "branch",
+            "branch_code",
+            "reference",
+            "name",
+            "note",
+            "status",
+            "created_by",
+            "created_by_username",
+            "opened_by",
+            "opened_by_username",
+            "reviewed_by",
+            "reviewed_by_username",
+            "cancelled_by",
+            "cancelled_by_username",
+            "snapshot_at",
+            "opened_at",
+            "submitted_at",
+            "reviewed_at",
+            "cancelled_at",
+            "locations_count",
+            "submitted_locations_count",
+            "lines_count",
+            "counted_lines_count",
+            "variance_lines_count",
+            "unexpected_lines_count",
+            "positive_variance_quantity",
+            "negative_variance_quantity",
+            "movement_warning_count",
+            "pending_variance_count",
+            "applied_adjustment_count",
+            "no_adjustment_resolution_count",
+            "zero_variance_count",
+            "reconciliation_complete",
+            "can_close",
+            "locations",
             "created_at",
             "updated_at",
         ]

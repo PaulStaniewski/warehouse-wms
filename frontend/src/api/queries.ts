@@ -6,6 +6,7 @@ import type {
   Branch,
   BranchMembership,
   AuditLog,
+  CycleCountSession,
   InventoryItem,
   InterBranchArrivalResponse,
   InterBranchMMTask,
@@ -20,6 +21,8 @@ import type {
   ReplenishmentRequest,
   RouteRun,
   ScannerContentsResponse,
+  ScannerCycleCountResponse,
+  ScannerCycleCountSession,
   ScannerLocationContentsResponse,
   ScannerPickingScanResponse,
   ScannerPickingShortageResponse,
@@ -244,6 +247,107 @@ export function useCreateStockAdjustment() {
         quantity: payload.quantity,
         reason_code: payload.reasonCode,
       });
+      return response.data;
+    },
+  });
+}
+
+export type CycleCountListFilters = {
+  branch?: string;
+  dateFrom?: string;
+  dateTo?: string;
+  page?: number;
+  search?: string;
+  status?: string;
+};
+
+export function useCycleCounts(filters: CycleCountListFilters = {}) {
+  return useQuery({
+    queryKey: ["cycle-counts", filters],
+    queryFn: () => {
+      const params = new URLSearchParams();
+      if (filters.branch) params.set("branch", filters.branch);
+      if (filters.status) params.set("status", filters.status);
+      if (filters.search) params.set("search", filters.search);
+      if (filters.dateFrom) params.set("date_from", filters.dateFrom);
+      if (filters.dateTo) params.set("date_to", filters.dateTo);
+      if (filters.page && filters.page > 1) params.set("page", String(filters.page));
+      return getList<CycleCountSession>(`/cycle-counts/?${params.toString()}`);
+    },
+  });
+}
+
+export function useCycleCount(sessionId?: string | number) {
+  return useQuery({
+    enabled: Boolean(sessionId),
+    queryKey: ["cycle-count", sessionId],
+    queryFn: async () => {
+      const response = await apiClient.get<CycleCountSession>(`/cycle-counts/${sessionId}/`);
+      return response.data;
+    },
+  });
+}
+
+export function useCreateCycleCount() {
+  return useMutation({
+    mutationFn: async (payload: { branch: string; locationIds: number[]; name: string; note: string }) => {
+      const response = await apiClient.post<CycleCountSession>("/cycle-counts/", {
+        branch: payload.branch,
+        location_ids: payload.locationIds,
+        name: payload.name,
+        note: payload.note,
+      });
+      return response.data;
+    },
+  });
+}
+
+export function useOpenCycleCount() {
+  return useMutation({
+    mutationFn: async (sessionId: number) => {
+      const response = await apiClient.post<CycleCountSession>(`/cycle-counts/${sessionId}/open/`);
+      return response.data;
+    },
+  });
+}
+
+export function useCloseCycleCount() {
+  return useMutation({
+    mutationFn: async (sessionId: number) => {
+      const response = await apiClient.post<CycleCountSession>(`/cycle-counts/${sessionId}/close/`);
+      return response.data;
+    },
+  });
+}
+
+export function useCancelCycleCount() {
+  return useMutation({
+    mutationFn: async (sessionId: number) => {
+      const response = await apiClient.post<CycleCountSession>(`/cycle-counts/${sessionId}/cancel/`);
+      return response.data;
+    },
+  });
+}
+
+export function useApplyCycleCountAdjustment() {
+  return useMutation({
+    mutationFn: async (payload: { sessionId: number; lineId: number; note?: string }) => {
+      const response = await apiClient.post<CycleCountSession>(
+        `/cycle-counts/${payload.sessionId}/lines/${payload.lineId}/apply-adjustment/`,
+        { note: payload.note ?? "" },
+      );
+      return response.data;
+    },
+  });
+}
+
+export function useResolveCycleCountWithoutAdjustment() {
+  return useMutation({
+    mutationFn: async (payload: { sessionId: number; lineId: number; note: string }) => {
+      const response = await apiClient.post<CycleCountSession>(
+        `/cycle-counts/${payload.sessionId}/lines/${payload.lineId}/resolve-without-adjustment/`,
+        { note: payload.note },
+      );
       return response.data;
     },
   });
@@ -875,6 +979,72 @@ export function useScannerQuickTransfer() {
         source_location_code: sourceLocationCode,
         target_location_code: targetLocationCode,
       });
+      return response.data;
+    },
+  });
+}
+
+export function useScannerCycleCounts(branch?: string) {
+  return useQuery({
+    enabled: Boolean(branch),
+    queryKey: ["scanner-cycle-counts", branch],
+    queryFn: async () => {
+      const params = new URLSearchParams();
+      if (branch) params.set("branch", branch);
+      const response = await apiClient.get<{ results: ScannerCycleCountSession[] }>(`/scanner/cycle-counts/?${params.toString()}`);
+      return response.data;
+    },
+  });
+}
+
+export function useScannerCycleCount(sessionId?: string | number) {
+  return useQuery({
+    enabled: Boolean(sessionId),
+    queryKey: ["scanner-cycle-count", sessionId],
+    queryFn: async () => {
+      const response = await apiClient.get<ScannerCycleCountResponse>(`/scanner/cycle-counts/${sessionId}/`);
+      return response.data;
+    },
+  });
+}
+
+export function useScannerCycleCountSaveLine() {
+  return useMutation({
+    mutationFn: async ({
+      locationId,
+      productCode,
+      quantity,
+      sessionId,
+    }: {
+      locationId: number;
+      productCode: string;
+      quantity: string;
+      sessionId: number;
+    }) => {
+      const response = await apiClient.post<ScannerCycleCountResponse>(
+        `/scanner/cycle-counts/${sessionId}/locations/${locationId}/count/`,
+        { product_code: productCode, quantity },
+      );
+      return response.data;
+    },
+  });
+}
+
+export function useScannerCycleCountSubmitLocation() {
+  return useMutation({
+    mutationFn: async ({
+      confirmZeroes,
+      locationId,
+      sessionId,
+    }: {
+      confirmZeroes: boolean;
+      locationId: number;
+      sessionId: number;
+    }) => {
+      const response = await apiClient.post<ScannerCycleCountResponse>(
+        `/scanner/cycle-counts/${sessionId}/locations/${locationId}/submit/`,
+        { confirm_zeroes: confirmZeroes },
+      );
       return response.data;
     },
   });

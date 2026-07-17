@@ -238,6 +238,9 @@ export type StockMovement = {
   adjustment_reason_label: string;
   adjustment_note: string;
   adjustment_quantity: string | null;
+  cycle_count_line_id: number | null;
+  cycle_count_session_id: number | null;
+  cycle_count_session_reference: string | null;
   quantity: string;
   quantity_before: string | null;
   quantity_after: string | null;
@@ -248,6 +251,143 @@ export type StockMovement = {
   origin: string;
   created_at: string;
   updated_at: string;
+};
+
+export type CycleCountLine = {
+  id: number;
+  session: number;
+  cycle_count_location: number;
+  branch: number;
+  location: number;
+  location_code: string;
+  product: number;
+  product_sku: string;
+  product_name: string;
+  expected_quantity: string;
+  counted_quantity: string | null;
+  variance_quantity: string | null;
+  variance_status: "not_counted" | "positive" | "negative" | "zero";
+  reconciliation_status: "no_variance" | "pending_review" | "adjustment_applied" | "no_adjustment_required" | "";
+  reconciliation_status_label: string;
+  reconciled_by: number | null;
+  reconciled_by_username: string | null;
+  reconciled_at: string | null;
+  resolution_note: string;
+  adjustment_id: number | null;
+  adjustment_reference: string | null;
+  can_apply_adjustment: boolean;
+  adjustment_conflict_reason: string | null;
+  counted_by: number | null;
+  counted_by_username: string | null;
+  counted_at: string | null;
+  is_expected: boolean;
+  movement_after_snapshot: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CycleCountLocation = {
+  id: number;
+  session: number;
+  branch: number;
+  location: number;
+  location_code: string;
+  location_name: string;
+  status: string;
+  started_by: number | null;
+  started_by_username: string | null;
+  submitted_by: number | null;
+  submitted_by_username: string | null;
+  started_at: string | null;
+  submitted_at: string | null;
+  expected_lines_count: number;
+  counted_lines_count: number;
+  variance_lines_count: number;
+  unexpected_lines_count: number;
+  lines: CycleCountLine[];
+};
+
+export type CycleCountSession = {
+  id: number;
+  branch: number;
+  branch_code: string;
+  reference: string;
+  name: string;
+  note: string;
+  status: string;
+  created_by: number | null;
+  created_by_username: string | null;
+  opened_by: number | null;
+  opened_by_username: string | null;
+  reviewed_by: number | null;
+  reviewed_by_username: string | null;
+  cancelled_by: number | null;
+  cancelled_by_username: string | null;
+  snapshot_at: string | null;
+  opened_at: string | null;
+  submitted_at: string | null;
+  reviewed_at: string | null;
+  cancelled_at: string | null;
+  locations_count: number;
+  submitted_locations_count: number;
+  lines_count: number;
+  counted_lines_count: number;
+  variance_lines_count: number;
+  unexpected_lines_count: number;
+  positive_variance_quantity: string;
+  negative_variance_quantity: string;
+  movement_warning_count: number;
+  pending_variance_count: number;
+  applied_adjustment_count: number;
+  no_adjustment_resolution_count: number;
+  zero_variance_count: number;
+  reconciliation_complete: boolean;
+  can_close: boolean;
+  locations: CycleCountLocation[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type ScannerCycleCountSession = {
+  id: number;
+  reference: string;
+  name: string;
+  branch: number;
+  branch_code: string;
+  status: string;
+  locations_count: number;
+  submitted_locations_count: number;
+  snapshot_at: string | null;
+  opened_at: string | null;
+  created_at: string | null;
+};
+
+export type ScannerCycleCountLocation = {
+  id: number;
+  location: number;
+  location_code: string;
+  location_name: string;
+  status: string;
+  expected_lines_count: number;
+  counted_lines_count: number;
+  unexpected_lines_count: number;
+  uncounted_expected_count: number;
+  lines: Array<{
+    id: number;
+    product: number;
+    product_sku: string;
+    product_name: string;
+    counted_quantity: string | null;
+    is_expected: boolean;
+    movement_after_snapshot: boolean;
+    counted_by_username: string | null;
+    counted_at: string | null;
+  }>;
+};
+
+export type ScannerCycleCountResponse = {
+  session: ScannerCycleCountSession;
+  locations: ScannerCycleCountLocation[];
 };
 
 export type TransferDiscrepancyAction = {

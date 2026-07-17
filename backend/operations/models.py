@@ -1174,6 +1174,13 @@ class StockMovement(TimestampedModel):
         blank=True,
     )
     adjustment_note = models.TextField(blank=True)
+    cycle_count_line = models.OneToOneField(
+        "CycleCountLine",
+        on_delete=models.PROTECT,
+        related_name="reconciliation_stock_movement",
+        blank=True,
+        null=True,
+    )
     performed_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -1196,6 +1203,174 @@ class StockMovement(TimestampedModel):
 
     def __str__(self) -> str:
         return f"{self.movement_type} {self.product.sku} x {self.quantity}"
+
+
+class CycleCountSession(TimestampedModel):
+    class Status(models.TextChoices):
+        DRAFT = "draft", "Draft"
+        OPEN = "open", "Open"
+        IN_PROGRESS = "in_progress", "In progress"
+        AWAITING_REVIEW = "awaiting_review", "Awaiting review"
+        CLOSED = "closed", "Closed"
+        CANCELLED = "cancelled", "Cancelled"
+
+    branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="cycle_count_sessions")
+    reference = models.CharField(max_length=64, unique=True, blank=True)
+    name = models.CharField(max_length=255, blank=True)
+    note = models.TextField(blank=True)
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.DRAFT)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="created_cycle_count_sessions",
+        blank=True,
+        null=True,
+    )
+    opened_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="opened_cycle_count_sessions",
+        blank=True,
+        null=True,
+    )
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="reviewed_cycle_count_sessions",
+        blank=True,
+        null=True,
+    )
+    cancelled_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="cancelled_cycle_count_sessions",
+        blank=True,
+        null=True,
+    )
+    snapshot_at = models.DateTimeField(blank=True, null=True)
+    opened_at = models.DateTimeField(blank=True, null=True)
+    submitted_at = models.DateTimeField(blank=True, null=True)
+    reviewed_at = models.DateTimeField(blank=True, null=True)
+    cancelled_at = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["branch", "status"]),
+            models.Index(fields=["reference"]),
+            models.Index(fields=["created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return self.reference or f"Cycle count session {self.id}"
+
+
+class CycleCountLocation(TimestampedModel):
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        IN_PROGRESS = "in_progress", "In progress"
+        SUBMITTED = "submitted", "Submitted"
+        CANCELLED = "cancelled", "Cancelled"
+
+    session = models.ForeignKey(CycleCountSession, on_delete=models.CASCADE, related_name="locations")
+    branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="cycle_count_locations")
+    location = models.ForeignKey(Location, on_delete=models.PROTECT, related_name="cycle_count_locations")
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.PENDING)
+    started_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="started_cycle_count_locations",
+        blank=True,
+        null=True,
+    )
+    submitted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="submitted_cycle_count_locations",
+        blank=True,
+        null=True,
+    )
+    started_at = models.DateTimeField(blank=True, null=True)
+    submitted_at = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        ordering = ["location__code"]
+        constraints = [
+            models.UniqueConstraint(fields=["session", "location"], name="unique_cycle_count_location_per_session"),
+        ]
+        indexes = [
+            models.Index(fields=["branch", "status"]),
+            models.Index(fields=["session", "status"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.session.reference} / {self.location.code}"
+
+
+class CycleCountLine(TimestampedModel):
+    class ReconciliationStatus(models.TextChoices):
+        NO_VARIANCE = "no_variance", "No variance"
+        PENDING_REVIEW = "pending_review", "Pending review"
+        ADJUSTMENT_APPLIED = "adjustment_applied", "Adjustment applied"
+        NO_ADJUSTMENT_REQUIRED = "no_adjustment_required", "No adjustment required"
+
+    session = models.ForeignKey(CycleCountSession, on_delete=models.CASCADE, related_name="lines")
+    cycle_count_location = models.ForeignKey(CycleCountLocation, on_delete=models.CASCADE, related_name="lines")
+    branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="cycle_count_lines")
+    location = models.ForeignKey(Location, on_delete=models.PROTECT, related_name="cycle_count_lines")
+    product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name="cycle_count_lines")
+    expected_quantity = models.DecimalField(max_digits=12, decimal_places=3, default=0)
+    counted_quantity = models.DecimalField(max_digits=12, decimal_places=3, blank=True, null=True)
+    counted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="counted_cycle_count_lines",
+        blank=True,
+        null=True,
+    )
+    counted_at = models.DateTimeField(blank=True, null=True)
+    is_expected = models.BooleanField(default=True)
+    movement_after_snapshot = models.BooleanField(default=False)
+    reconciliation_status = models.CharField(
+        max_length=32,
+        choices=ReconciliationStatus.choices,
+        blank=True,
+    )
+    reconciled_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="reconciled_cycle_count_lines",
+        blank=True,
+        null=True,
+    )
+    reconciled_at = models.DateTimeField(blank=True, null=True)
+    resolution_note = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["location__code", "product__sku"]
+        constraints = [
+            models.UniqueConstraint(fields=["cycle_count_location", "product"], name="unique_cycle_count_line_product_per_location"),
+            models.CheckConstraint(check=models.Q(expected_quantity__gte=0), name="cycle_count_expected_non_negative"),
+            models.CheckConstraint(
+                check=models.Q(counted_quantity__gte=0) | models.Q(counted_quantity__isnull=True),
+                name="cycle_count_counted_non_negative",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["session", "location"]),
+            models.Index(fields=["branch", "product"]),
+            models.Index(fields=["movement_after_snapshot"]),
+            models.Index(fields=["reconciliation_status"]),
+        ]
+
+    @property
+    def variance_quantity(self):
+        if self.counted_quantity is None:
+            return None
+        return self.counted_quantity - self.expected_quantity
+
+    def __str__(self) -> str:
+        return f"{self.session.reference} / {self.location.code} / {self.product.sku}"
 
 
 class TransferDiscrepancyRecovery(TimestampedModel):
