@@ -380,6 +380,7 @@ a {
 .scanner-shell {
   display: flex;
   min-height: 100vh;
+  min-height: 100dvh;
   flex-direction: column;
   background: #f4f6f8;
 }
@@ -390,11 +391,12 @@ a {
   z-index: 30;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 16px;
   min-height: 62px;
   border-bottom: 1px solid #dce3e8;
   background: #ffffff;
-  padding: 0 18px;
+  padding: 10px 18px;
 }
 
 .scanner-topbar-brand {
@@ -411,6 +413,18 @@ a {
   font-size: 1rem;
 }
 
+.scanner-topbar-title {
+  display: grid;
+  gap: 2px;
+  min-width: 160px;
+}
+
+.scanner-topbar-title span {
+  color: #687985;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
 .scanner-topbar-meta {
   margin-left: auto;
   color: #687985;
@@ -418,10 +432,36 @@ a {
   font-weight: 800;
 }
 
+.scanner-topbar-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.scanner-topbar-actions a,
+.scanner-topbar-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 42px;
+  border: 1px solid #c8d3d9;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #153f4b;
+  font: inherit;
+  font-weight: 900;
+  padding: 0 12px;
+  cursor: pointer;
+}
+
 .scanner-content {
+  flex: 1;
   width: 100%;
   max-width: 100%;
   min-width: 0;
+  overflow-y: auto;
   padding: 24px;
 }
 
@@ -1753,6 +1793,11 @@ a {
   gap: 8px;
 }
 
+.scanner-scan-panel small {
+  color: #647782;
+  font-weight: 800;
+}
+
 .scanner-scan-panel span {
   color: #153f4b;
   font-size: 0.875rem;
@@ -1767,6 +1812,12 @@ a {
   color: #172026;
   font-size: 1.125rem;
   font-weight: 900;
+}
+
+.scanner-scan-panel input:focus {
+  border-color: #1d4f5d;
+  box-shadow: 0 0 0 3px rgba(29, 79, 93, 0.14);
+  outline: 0;
 }
 
 .scanner-scan-panel button {
@@ -1784,6 +1835,10 @@ a {
   background: #c8d3d9;
   color: #526570;
   cursor: not-allowed;
+}
+
+.scanner-scan-panel--shared {
+  margin-bottom: 0;
 }
 
 .scanner-workflow-grid {
@@ -2225,6 +2280,12 @@ a {
   color: #74510c;
 }
 
+.scanner-message--info {
+  border: 1px solid #b9d5e4;
+  background: #eef7fb;
+  color: #175f7d;
+}
+
 .scanner-home-header,
 .scanner-tool-panel,
 .scanner-result-card,
@@ -2254,6 +2315,24 @@ a {
   font-size: 2rem;
 }
 
+.scanner-menu-sections {
+  display: grid;
+  gap: 22px;
+}
+
+.scanner-menu-section {
+  display: grid;
+  gap: 12px;
+}
+
+.scanner-menu-section h2 {
+  margin: 0;
+  color: #40525c;
+  font-size: 0.82rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
 .scanner-menu-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
@@ -2271,6 +2350,7 @@ a {
   background: #ffffff;
   padding: 20px;
   color: #172026;
+  touch-action: manipulation;
 }
 
 .scanner-menu-card:hover {
@@ -2652,6 +2732,7 @@ a {
   margin-top: 10px;
   background: #ffffff;
   color: #153f4b;
+  font: inherit;
   font-weight: 900;
   cursor: pointer;
 }
@@ -2946,11 +3027,71 @@ a {
   display: grid;
   grid-template-columns: minmax(220px, 0.6fr) minmax(260px, 1fr);
   gap: 18px;
+  align-items: center;
   margin-bottom: 18px;
 }
 
 .scanner-tool-panel .scanner-scan-panel {
   margin: 0;
+}
+
+.scanner-step-indicator {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.scanner-step-indicator__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 48px;
+  border: 1px solid #dce3e8;
+  border-radius: 8px;
+  background: #f8fafb;
+  color: #526570;
+  padding: 8px;
+}
+
+.scanner-step-indicator__item span {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 8px;
+  background: #dce3e8;
+  color: #40525c;
+  font-size: 0.8rem;
+  font-weight: 900;
+}
+
+.scanner-step-indicator__item strong {
+  overflow: hidden;
+  font-size: 0.82rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scanner-step-indicator__item.is-active {
+  border-color: #1d4f5d;
+  background: #eef7f8;
+  color: #153f4b;
+}
+
+.scanner-step-indicator__item.is-active span,
+.scanner-step-indicator__item.is-complete span {
+  background: #1d4f5d;
+  color: #ffffff;
+}
+
+.scanner-step-indicator__item.is-complete {
+  border-color: #9bd3b0;
+  background: #eaf7ee;
+  color: #17633a;
 }
 
 .scanner-result-card {
@@ -4430,6 +4571,7 @@ tr:last-child td {
 
   .scanner-tool-panel,
   .scanner-result-card,
+  .scanner-step-indicator,
   .scanner-job-card,
   .scanner-list-row,
   .scanner-cart-panel,
@@ -4469,6 +4611,51 @@ tr:last-child td {
 }
 
 @media (max-width: 640px) {
+  .scanner-topbar {
+    align-items: flex-start;
+    gap: 8px 10px;
+    padding: 8px 12px;
+  }
+
+  .scanner-topbar-brand {
+    min-height: 38px;
+  }
+
+  .scanner-topbar-title {
+    flex: 1 1 calc(100% - 120px);
+    min-width: 0;
+  }
+
+  .scanner-topbar-title h2,
+  .scanner-topbar-title span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .scanner-topbar-meta {
+    order: 3;
+    width: 100%;
+    margin-left: 0;
+    font-size: 0.78rem;
+  }
+
+  .scanner-topbar-actions {
+    order: 4;
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+  }
+
+  .scanner-topbar-actions a,
+  .scanner-topbar-actions button {
+    min-height: 44px;
+  }
+
+  .scanner-content {
+    padding: 16px 12px 28px;
+  }
+
   .topbar,
   .content {
     padding-left: 20px;
@@ -4554,6 +4741,44 @@ tr:last-child td {
   .scanner-active-control-item header {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .scanner-home-header,
+  .scanner-tool-panel,
+  .scanner-result-card,
+  .scanner-step-card {
+    padding: 16px;
+  }
+
+  .scanner-home-header h1,
+  .scanner-tool-panel h1 {
+    font-size: 1.65rem;
+  }
+
+  .scanner-menu-grid {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .scanner-menu-card {
+    grid-template-columns: 40px minmax(0, 1fr) 24px;
+    min-height: 92px;
+    padding: 14px;
+  }
+
+  .scanner-menu-card strong {
+    font-size: 1.15rem;
+  }
+
+  .scanner-scan-panel {
+    padding: 14px;
+  }
+
+  .scanner-scan-panel input,
+  .scanner-scan-panel button,
+  .scanner-confirm-button,
+  .scanner-secondary-button {
+    min-height: 56px;
   }
 
   .scanner-active-control-item dl,

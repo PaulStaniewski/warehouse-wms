@@ -1,4 +1,4 @@
-import { type FormEvent, useState } from "react";
+import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import axios from "axios";
 import { ArrowLeft, CheckCircle2 } from "lucide-react";
@@ -9,6 +9,7 @@ import {
   useScannerProductLookup,
   useScannerQuickTransfer,
 } from "../api/queries";
+import { ScannerScanInput, ScannerStatusMessage, ScannerStepIndicator } from "../components/scanner/ScannerUi";
 
 
 function getErrorMessage(error: unknown, fallback: string) {
@@ -38,29 +39,44 @@ export function ScannerQuickTransferPage() {
     return normalize(item.product_sku) === scanned || normalize(item.product_barcode) === scanned;
   });
   const canConfirm = Boolean(sourceLookup.data && productLookup.data && targetLookup.data && productInSource);
+  const activeStep = !sourceLookup.data ? 1 : !productInSource ? 2 : !targetLookup.data ? 3 : 4;
 
-  function submitSource(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  function submitSource(value: string) {
     setMessage(null);
-    setSourceCode(sourceInput.trim());
+    setSourceCode(value);
     setProductCode("");
+    setProductInput("");
     setTargetCode("");
+    setTargetInput("");
   }
 
-  function submitProduct(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  function submitProduct(value: string) {
     setMessage(null);
-    setProductCode(productInput.trim());
+    setProductCode(value);
     setTargetCode("");
+    setTargetInput("");
   }
 
-  function submitTarget(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  function submitTarget(value: string) {
     setMessage(null);
-    setTargetCode(targetInput.trim());
+    setTargetCode(value);
+  }
+
+  function resetTransfer() {
+    setSourceInput("");
+    setSourceCode("");
+    setProductInput("");
+    setProductCode("");
+    setTargetInput("");
+    setTargetCode("");
+    setQuantity("1");
+    setMessage(null);
   }
 
   async function confirmTransfer() {
+    if (transfer.isPending) {
+      return;
+    }
     setMessage(null);
 
     try {
@@ -93,13 +109,21 @@ export function ScannerQuickTransferPage() {
         </Link>
       </div>
 
-      {message && <div className={`scanner-message scanner-message--${message.type}`}>{message.text}</div>}
+      {message && <ScannerStatusMessage type={message.type}>{message.text}</ScannerStatusMessage>}
 
       <section className="scanner-tool-panel">
         <div>
           <p>Quick transfer</p>
           <h1>Move stock</h1>
         </div>
+        <ScannerStepIndicator
+          steps={[
+            { label: "Source", isActive: activeStep === 1, isComplete: Boolean(sourceLookup.data) },
+            { label: "Product", isActive: activeStep === 2, isComplete: Boolean(productInSource) },
+            { label: "Target", isActive: activeStep === 3, isComplete: Boolean(targetLookup.data) },
+            { label: "Confirm", isActive: activeStep === 4, isComplete: message?.type === "success" },
+          ]}
+        />
       </section>
 
       <section className="scanner-step-list">
@@ -109,22 +133,16 @@ export function ScannerQuickTransferPage() {
             <h2>Scan source location</h2>
             {sourceLookup.data && <CheckCircle2 size={24} />}
           </header>
-          <form className="scanner-scan-panel" onSubmit={submitSource}>
-            <label htmlFor="source-location">
-              <span>Source location</span>
-              <input
-                autoComplete="off"
-                autoFocus
-                id="source-location"
-                onChange={(event) => setSourceInput(event.target.value)}
-                placeholder="Example A-01-01"
-                value={sourceInput}
-              />
-            </label>
-            <button disabled={!sourceInput.trim() || sourceLookup.isFetching} type="submit">
-              Confirm
-            </button>
-          </form>
+          <ScannerScanInput
+            autoFocus={activeStep === 1}
+            id="source-location"
+            isPending={sourceLookup.isFetching}
+            label="Source location"
+            onChange={setSourceInput}
+            onSubmit={submitSource}
+            placeholder="Example A-01-01"
+            value={sourceInput}
+          />
           {sourceLookup.isError && (
             <p className="scanner-inline-error">{getErrorMessage(sourceLookup.error, "Source location not found.")}</p>
           )}
@@ -137,22 +155,17 @@ export function ScannerQuickTransferPage() {
             <h2>Scan product</h2>
             {productInSource && <CheckCircle2 size={24} />}
           </header>
-          <form className="scanner-scan-panel" onSubmit={submitProduct}>
-            <label htmlFor="transfer-product">
-              <span>Product SKU or barcode</span>
-              <input
-                autoComplete="off"
-                disabled={!sourceLookup.data}
-                id="transfer-product"
-                onChange={(event) => setProductInput(event.target.value)}
-                placeholder="Example FILTR-001"
-                value={productInput}
-              />
-            </label>
-            <button disabled={!sourceLookup.data || !productInput.trim() || productLookup.isFetching} type="submit">
-              Confirm
-            </button>
-          </form>
+          <ScannerScanInput
+            autoFocus={activeStep === 2}
+            disabled={!sourceLookup.data}
+            id="transfer-product"
+            isPending={productLookup.isFetching}
+            label="Product SKU or barcode"
+            onChange={setProductInput}
+            onSubmit={submitProduct}
+            placeholder="Example FILTR-001"
+            value={productInput}
+          />
           {productLookup.isError && (
             <p className="scanner-inline-error">{getErrorMessage(productLookup.error, "Product not found.")}</p>
           )}
@@ -172,22 +185,17 @@ export function ScannerQuickTransferPage() {
             <h2>Scan target location</h2>
             {targetLookup.data && <CheckCircle2 size={24} />}
           </header>
-          <form className="scanner-scan-panel" onSubmit={submitTarget}>
-            <label htmlFor="target-location">
-              <span>Target location</span>
-              <input
-                autoComplete="off"
-                disabled={!productInSource}
-                id="target-location"
-                onChange={(event) => setTargetInput(event.target.value)}
-                placeholder="Example A-02-01"
-                value={targetInput}
-              />
-            </label>
-            <button disabled={!productInSource || !targetInput.trim() || targetLookup.isFetching} type="submit">
-              Confirm
-            </button>
-          </form>
+          <ScannerScanInput
+            autoFocus={activeStep === 3}
+            disabled={!productInSource}
+            id="target-location"
+            isPending={targetLookup.isFetching}
+            label="Target location"
+            onChange={setTargetInput}
+            onSubmit={submitTarget}
+            placeholder="Example A-02-01"
+            value={targetInput}
+          />
           {targetLookup.isError && (
             <p className="scanner-inline-error">{getErrorMessage(targetLookup.error, "Target location not found.")}</p>
           )}
@@ -218,6 +226,11 @@ export function ScannerQuickTransferPage() {
           >
             {transfer.isPending ? "Moving stock..." : "Confirm transfer"}
           </button>
+          {message?.type === "success" && (
+            <button className="scanner-secondary-button" onClick={resetTransfer} type="button">
+              New transfer
+            </button>
+          )}
         </article>
       </section>
     </>

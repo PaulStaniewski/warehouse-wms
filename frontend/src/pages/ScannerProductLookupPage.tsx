@@ -1,9 +1,10 @@
-import { type FormEvent, useState } from "react";
+import { useState } from "react";
 import axios from "axios";
 import { ArrowLeft } from "lucide-react";
 import { Link } from "react-router-dom";
 
 import { useScannerProductLookup } from "../api/queries";
+import { ScannerScanInput, ScannerStatusMessage } from "../components/scanner/ScannerUi";
 
 
 function getErrorMessage(error: unknown) {
@@ -15,9 +16,8 @@ export function ScannerProductLookupPage() {
   const [searchCode, setSearchCode] = useState("");
   const lookup = useScannerProductLookup(searchCode);
 
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setSearchCode(inputCode.trim());
+  function handleSubmit(value: string) {
+    setSearchCode(value);
   }
 
   return (
@@ -34,25 +34,20 @@ export function ScannerProductLookupPage() {
           <p>Product lookup</p>
           <h1>Scan product</h1>
         </div>
-        <form className="scanner-scan-panel" onSubmit={handleSubmit}>
-          <label htmlFor="product-code">
-            <span>Scan product SKU, barcode, or code</span>
-            <input
-              autoComplete="off"
-              autoFocus
-              id="product-code"
-              onChange={(event) => setInputCode(event.target.value)}
-              placeholder="Scan or type code and press Enter"
-              value={inputCode}
-            />
-          </label>
-          <button disabled={!inputCode.trim() || lookup.isFetching} type="submit">
-            {lookup.isFetching ? "Searching..." : "Search"}
-          </button>
-        </form>
+        <ScannerScanInput
+          autoFocus
+          buttonLabel="Search"
+          id="product-code"
+          isPending={lookup.isFetching}
+          label="Scan product SKU, barcode, or code"
+          onChange={setInputCode}
+          onSubmit={handleSubmit}
+          placeholder="Scan or type code and press Enter"
+          value={inputCode}
+        />
       </section>
 
-      {lookup.isError && <div className="scanner-message scanner-message--error">{getErrorMessage(lookup.error)}</div>}
+      {lookup.isError && <ScannerStatusMessage type="error">{getErrorMessage(lookup.error)}</ScannerStatusMessage>}
 
       {!searchCode && <div className="state-box">Scan a product to see current stock positions.</div>}
 

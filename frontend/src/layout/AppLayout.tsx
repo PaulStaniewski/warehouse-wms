@@ -1,6 +1,7 @@
 import {
   ArchiveRestore,
   AlertTriangle,
+  ArrowLeft,
   Barcode,
   Boxes,
   ChevronDown,
@@ -8,8 +9,10 @@ import {
   ClipboardList,
   ExternalLink,
   History,
+  Home,
   LayoutDashboard,
   ListChecks,
+  LogOut,
   MapPin,
   PackageSearch,
   Route,
@@ -18,7 +21,7 @@ import {
   Warehouse,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { NavLink, Outlet, useLocation } from "react-router-dom";
+import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useEffect, useMemo, useState } from "react";
 
 import { useActiveBranch } from "../api/ActiveBranchContext";
@@ -352,8 +355,12 @@ export function WmsLayout() {
 
 export function ScannerLayout() {
   const location = useLocation();
+  const navigate = useNavigate();
+  const auth = useAuth();
+  const { activeBranch, activeBranchCode, activeMembership } = useActiveBranch();
   const scannerSession = useStoredScannerSession();
   const title = titleForPath(location.pathname, scannerPageTitles, "Scanner");
+  const isHome = location.pathname === "/scanner";
 
   return (
     <div className="scanner-shell">
@@ -362,8 +369,36 @@ export function ScannerLayout() {
           <ScanLine size={20} />
           <span>Scanner</span>
         </NavLink>
-        <h2>{title}</h2>
-        <span className="scanner-topbar-meta">{scannerSession ? `Cart: ${scannerSession.cart_code}` : "Warehouse scanner"}</span>
+        <div className="scanner-topbar-title">
+          <h2>{title}</h2>
+          <span>
+            {activeBranchCode
+              ? `${activeBranchCode}${activeBranch?.name ? ` / ${activeBranch.name}` : ""}`
+              : "No active branch"}
+            {activeMembership?.role_label ? ` / ${activeMembership.role_label}` : ""}
+          </span>
+        </div>
+        <span className="scanner-topbar-meta">{scannerSession ? `Cart: ${scannerSession.cart_code}` : "No active cart"}</span>
+        <div className="scanner-topbar-actions">
+          {!isHome && (
+            <button aria-label="Go back" onClick={() => navigate(-1)} type="button">
+              <ArrowLeft size={17} />
+              Back
+            </button>
+          )}
+          {!isHome && (
+            <NavLink aria-label="Scanner home" to="/scanner">
+              <Home size={17} />
+              Home
+            </NavLink>
+          )}
+          {auth.isAuthenticated && (
+            <button onClick={() => void auth.logout()} type="button">
+              <LogOut size={17} />
+              Logout
+            </button>
+          )}
+        </div>
       </header>
       <main className="scanner-content">
         <Outlet />

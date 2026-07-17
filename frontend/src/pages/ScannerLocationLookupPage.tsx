@@ -1,9 +1,10 @@
-import { type FormEvent, useState } from "react";
+import { useState } from "react";
 import axios from "axios";
 import { ArrowLeft } from "lucide-react";
 import { Link } from "react-router-dom";
 
 import { useScannerLocationContents } from "../api/queries";
+import { ScannerScanInput, ScannerStatusMessage } from "../components/scanner/ScannerUi";
 
 
 function getErrorMessage(error: unknown) {
@@ -19,9 +20,8 @@ export function ScannerLocationLookupPage() {
   const [searchCode, setSearchCode] = useState("");
   const lookup = useScannerLocationContents(searchCode);
 
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setSearchCode(inputCode.trim());
+  function handleSubmit(value: string) {
+    setSearchCode(value);
   }
 
   return (
@@ -38,25 +38,20 @@ export function ScannerLocationLookupPage() {
           <p>Location lookup</p>
           <h1>Scan location</h1>
         </div>
-        <form className="scanner-scan-panel" onSubmit={handleSubmit}>
-          <label htmlFor="location-code">
-            <span>Scan location code</span>
-            <input
-              autoComplete="off"
-              autoFocus
-              id="location-code"
-              onChange={(event) => setInputCode(event.target.value)}
-              placeholder="Scan or type location and press Enter"
-              value={inputCode}
-            />
-          </label>
-          <button disabled={!inputCode.trim() || lookup.isFetching} type="submit">
-            {lookup.isFetching ? "Searching..." : "Search"}
-          </button>
-        </form>
+        <ScannerScanInput
+          autoFocus
+          buttonLabel="Search"
+          id="location-code"
+          isPending={lookup.isFetching}
+          label="Scan location code"
+          onChange={setInputCode}
+          onSubmit={handleSubmit}
+          placeholder="Scan or type location and press Enter"
+          value={inputCode}
+        />
       </section>
 
-      {lookup.isError && <div className="scanner-message scanner-message--error">{getErrorMessage(lookup.error)}</div>}
+      {lookup.isError && <ScannerStatusMessage type="error">{getErrorMessage(lookup.error)}</ScannerStatusMessage>}
 
       {!searchCode && <div className="state-box">Scan a location to see its contents.</div>}
 
