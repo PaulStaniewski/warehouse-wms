@@ -39,7 +39,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       localStorage.removeItem(ACTIVE_BRANCH_STORAGE_KEY);
       queryClient.clear();
       queryClient.setQueryData(["auth", "session"], data);
-      navigate("/wms/dashboard", { replace: true });
     },
   });
 

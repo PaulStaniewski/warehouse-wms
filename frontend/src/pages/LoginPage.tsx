@@ -1,8 +1,9 @@
-import { FormEvent, useEffect, useState } from "react";
-import { Navigate } from "react-router-dom";
+import { FormEvent, useState } from "react";
+import { Navigate, useLocation, useNavigate } from "react-router-dom";
 import axios from "axios";
 
 import { useAuth } from "../api/AuthContext";
+import { resolveIntendedPath } from "../routing";
 
 function getErrorMessage(error: unknown) {
   return axios.isAxiosError(error) ? error.response?.data?.detail || "Login failed." : "Login failed.";
@@ -10,17 +11,20 @@ function getErrorMessage(error: unknown) {
 
 export function LoginPage() {
   const auth = useAuth();
+  const location = useLocation();
+  const navigate = useNavigate();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const intendedPath = resolveIntendedPath(location.state);
 
-  useEffect(() => {
-    localStorage.removeItem("warehouse-wms-active-branch");
-  }, []);
+  if (auth.isLoading) {
+    return <div className="auth-loading">Checking authentication...</div>;
+  }
 
   if (auth.isAuthenticated) {
-    return <Navigate to="/wms/dashboard" replace />;
+    return <Navigate replace to={intendedPath ?? "/"} />;
   }
 
   async function handleSubmit(event: FormEvent) {
@@ -29,6 +33,7 @@ export function LoginPage() {
     setIsSubmitting(true);
     try {
       await auth.login(username, password);
+      navigate(intendedPath ?? "/", { replace: true });
     } catch (loginError) {
       setError(getErrorMessage(loginError));
     } finally {

@@ -1,10 +1,10 @@
-import { Navigate, Route, Routes } from "react-router-dom";
+import { Link, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import type { ReactNode } from "react";
 
 import "./App.css";
-import { ActiveBranchProvider } from "./api/ActiveBranchContext";
+import { ActiveBranchProvider, useActiveBranch } from "./api/ActiveBranchContext";
 import { AuthProvider, useAuth } from "./api/AuthContext";
-import { AppLayout } from "./layout/AppLayout";
+import { ScannerLayout, WmsLayout } from "./layout/AppLayout";
 import { ArchiveEventsPage } from "./pages/ArchiveEventsPage";
 import { CurrentEventsPage } from "./pages/CurrentEventsPage";
 import { DashboardPage } from "./pages/DashboardPage";
@@ -41,19 +41,134 @@ import { SourceStockVerificationDetailPage } from "./pages/SourceStockVerificati
 import { SourceStockVerificationsPage } from "./pages/SourceStockVerificationsPage";
 import { TransitInvestigationDetailPage } from "./pages/TransitInvestigationDetailPage";
 import { TransitInvestigationsPage } from "./pages/TransitInvestigationsPage";
+import {
+  getDefaultInterfacePath,
+  locationToPath,
+  LOGIN_PATH,
+  SCANNER_HOME_PATH,
+  WMS_DASHBOARD_PATH,
+} from "./routing";
 
-function ProtectedWmsRoute({ children }: { children: ReactNode }) {
+function useInterfaceAccess() {
+  const { isError, isLoading, memberships } = useActiveBranch();
+
+  // The current backend model has branch memberships but no separate interface-level permission.
+  const hasBranchAccess = memberships.length > 0;
+
+  return {
+    canAccessWms: hasBranchAccess,
+    canAccessScanner: hasBranchAccess,
+    isError,
+    isLoading,
+  };
+}
+
+function isMobileDefaultViewport() {
+  return window.matchMedia("(max-width: 768px)").matches;
+}
+
+function AccessDeniedState({
+  canAccessScanner,
+  canAccessWms,
+  detail = "Your account does not have access to this interface.",
+}: {
+  canAccessScanner: boolean;
+  canAccessWms: boolean;
+  detail?: string;
+}) {
   const auth = useAuth();
+
+  return (
+    <main className="access-denied-page">
+      <section className="access-denied-panel">
+        <span className="login-kicker">Access denied</span>
+        <h1>Interface unavailable</h1>
+        <p>{detail}</p>
+        <div className="access-denied-actions">
+          {canAccessWms && <Link to={WMS_DASHBOARD_PATH}>Open WMS</Link>}
+          {canAccessScanner && <Link to={SCANNER_HOME_PATH}>Open Scanner</Link>}
+          {!canAccessWms && !canAccessScanner && (
+            <button onClick={() => void auth.logout()} type="button">
+              Logout
+            </button>
+          )}
+        </div>
+      </section>
+    </main>
+  );
+}
+
+function AuthenticatedRoute({ children }: { children: ReactNode }) {
+  const auth = useAuth();
+  const location = useLocation();
 
   if (auth.isLoading) {
     return <div className="auth-loading">Checking authentication...</div>;
   }
 
   if (!auth.isAuthenticated) {
-    return <Navigate to="/login" replace />;
+    return <Navigate replace state={{ from: locationToPath(location) }} to={LOGIN_PATH} />;
   }
 
   return children;
+}
+
+function ProtectedWmsRoute({ children }: { children: ReactNode }) {
+  const access = useInterfaceAccess();
+
+  if (access.isLoading) {
+    return <div className="auth-loading">Loading branch access...</div>;
+  }
+  if (access.isError) {
+    return <AccessDeniedState canAccessScanner={false} canAccessWms={false} detail="Branch access could not be loaded." />;
+  }
+  if (!access.canAccessWms) {
+    return <AccessDeniedState canAccessScanner={access.canAccessScanner} canAccessWms={false} />;
+  }
+
+  return children;
+}
+
+function ProtectedScannerRoute({ children }: { children: ReactNode }) {
+  const access = useInterfaceAccess();
+
+  if (access.isLoading) {
+    return <div className="auth-loading">Loading branch access...</div>;
+  }
+  if (access.isError) {
+    return <AccessDeniedState canAccessScanner={false} canAccessWms={false} detail="Branch access could not be loaded." />;
+  }
+  if (!access.canAccessScanner) {
+    return <AccessDeniedState canAccessScanner={false} canAccessWms={access.canAccessWms} />;
+  }
+
+  return children;
+}
+
+function InterfaceEntryResolver() {
+  const auth = useAuth();
+  const access = useInterfaceAccess();
+
+  if (auth.isLoading) {
+    return <div className="auth-loading">Checking authentication...</div>;
+  }
+  if (!auth.isAuthenticated) {
+    return <Navigate replace state={{ from: "/" }} to={LOGIN_PATH} />;
+  }
+  if (access.isLoading) {
+    return <div className="auth-loading">Loading branch access...</div>;
+  }
+  if (access.isError) {
+    return <AccessDeniedState canAccessScanner={false} canAccessWms={false} detail="Branch access could not be loaded." />;
+  }
+
+  const path = getDefaultInterfacePath(access, isMobileDefaultViewport());
+
+  if (!path) {
+    return <AccessDeniedState canAccessScanner={false} canAccessWms={false} detail="No WMS or Scanner interface is available for this account." />;
+  }
+
+  return <Navigate replace to={path} />;
 }
 
 function App() {
@@ -62,14 +177,17 @@ function App() {
       <ActiveBranchProvider>
         <Routes>
           <Route path="login" element={<LoginPage />} />
+          <Route path="/" element={<InterfaceEntryResolver />} />
           <Route
             element={
-              <ProtectedWmsRoute>
-                <AppLayout />
-              </ProtectedWmsRoute>
+              <AuthenticatedRoute>
+                <ProtectedWmsRoute>
+                  <WmsLayout />
+                </ProtectedWmsRoute>
+              </AuthenticatedRoute>
             }
           >
-            <Route index element={<Navigate to="/wms/dashboard" replace />} />
+            <Route path="wms" element={<Navigate to={WMS_DASHBOARD_PATH} replace />} />
             <Route path="wms/dashboard" element={<DashboardPage />} />
             <Route path="wms/products" element={<ProductsPage />} />
             <Route path="wms/inventory" element={<InventoryPage />} />
@@ -101,7 +219,15 @@ function App() {
             <Route path="locations" element={<Navigate to="/wms/locations" replace />} />
             <Route path="routes-monitor" element={<Navigate to="/wms/routes-monitor" replace />} />
           </Route>
-          <Route element={<AppLayout />}>
+          <Route
+            element={
+              <AuthenticatedRoute>
+                <ProtectedScannerRoute>
+                  <ScannerLayout />
+                </ProtectedScannerRoute>
+              </AuthenticatedRoute>
+            }
+          >
             <Route path="scanner" element={<ScannerHomePage />} />
             <Route path="scanner/proformas" element={<ScannerProformasPage />} />
             <Route path="scanner/tasks" element={<ScannerTasksPage />} />

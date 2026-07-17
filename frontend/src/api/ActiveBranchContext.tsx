@@ -12,6 +12,7 @@ type ActiveBranchContextValue = {
   branches: Branch[];
   memberships: BranchMembership[];
   isLoading: boolean;
+  isError: boolean;
   setActiveBranchCode: (code: string) => void;
 };
 
@@ -63,6 +64,7 @@ export function ActiveBranchProvider({ children }: { children: ReactNode }) {
       branches,
       memberships,
       isLoading: auth.isAuthenticated && membershipsQuery.isLoading,
+      isError: auth.isAuthenticated && membershipsQuery.isError,
       setActiveBranchCode: (code: string) => {
         if (memberships.some((membership) => membership.branch_code === code)) {
           setActiveBranchCodeState(code);
@@ -70,7 +72,7 @@ export function ActiveBranchProvider({ children }: { children: ReactNode }) {
         }
       },
     }),
-    [activeBranchCode, branches, memberships, membershipsQuery.isLoading],
+    [activeBranchCode, auth.isAuthenticated, branches, memberships, membershipsQuery.isError, membershipsQuery.isLoading],
   );
 
   return <ActiveBranchContext.Provider value={value}>{children}</ActiveBranchContext.Provider>;
