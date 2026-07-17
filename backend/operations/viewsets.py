@@ -157,6 +157,8 @@ class AuditLogFilter(django_filters.FilterSet):
     actor_name = django_filters.CharFilter(field_name="actor__username", lookup_expr="iexact")
     event_type = django_filters.CharFilter(field_name="event_type", lookup_expr="iexact")
     result = django_filters.CharFilter(field_name="result", lookup_expr="iexact")
+    date_from = django_filters.DateFilter(field_name="created_at", lookup_expr="date__gte")
+    date_to = django_filters.DateFilter(field_name="created_at", lookup_expr="date__lte")
 
     def filter_location(self, queryset, name, value):
         return queryset.filter(
@@ -173,7 +175,20 @@ class AuditLogFilter(django_filters.FilterSet):
 
     class Meta:
         model = AuditLog
-        fields = ["actor", "actor_name", "action", "action_type", "event_type", "result", "product", "cart", "location", "order"]
+        fields = [
+            "actor",
+            "actor_name",
+            "action",
+            "action_type",
+            "event_type",
+            "result",
+            "product",
+            "cart",
+            "location",
+            "order",
+            "date_from",
+            "date_to",
+        ]
 
 
 class RouteRunFilter(django_filters.FilterSet):
@@ -1725,6 +1740,14 @@ class AuditLogViewSet(ReadOnlyModelViewSet):
     filterset_class = AuditLogFilter
     search_fields = ["entity_name", "entity_id", "message", "actor__username"]
     ordering_fields = ["action_type", "entity_name", "created_at"]
+
+    def get_object(self):
+        event = super().get_object()
+        if self.request.user.is_authenticated:
+            allowed = {code.lower() for code in branch_codes_filter(self.request.user)}
+            if not any(self._event_visible_for_branch(event, code) for code in allowed):
+                raise PermissionDenied("You do not have access to this event.")
+        return event
 
     def _event_visible_for_branch(self, event, branch_code: str) -> bool:
         branch_code = branch_code.lower()

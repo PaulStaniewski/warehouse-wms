@@ -1,5 +1,4 @@
 import {
-  Archive,
   ArchiveRestore,
   AlertTriangle,
   Barcode,
@@ -117,11 +116,10 @@ const wmsNavSections: NavSection[] = [
     items: [
       {
         to: "/wms/events/current",
-        label: "Current Events",
+        label: "Event Register",
         icon: History,
-        activePatterns: ["/wms/events/current", "/wms/current-events"],
+        activePatterns: ["/wms/events", "/wms/current-events"],
       },
-      { to: "/wms/events/archive", label: "Archive Events", icon: Archive },
     ],
   },
   {
@@ -151,6 +149,7 @@ const scannerPageTitles: Array<[string, string]> = [
 ];
 
 const wmsPageTitles: Array<[string, string]> = [
+  ["/wms/events", "Event Register"],
   ["/wms/transport-overview", "Transport Overview"],
   ["/wms/inventory-exceptions", "Inventory Exceptions"],
   ["/wms/source-stock-verifications", "Source Stock"],
@@ -163,9 +162,6 @@ const wmsPageTitles: Array<[string, string]> = [
   ["/wms/route-runs", "Route Documents"],
   ["/wms/routes-monitor", "Route Monitor"],
   ["/wms/routes/archive", "Routes Archive"],
-  ["/wms/events/current", "Current Events"],
-  ["/wms/current-events", "Current Events"],
-  ["/wms/events/archive", "Archive Events"],
   ["/wms/discrepancies", "Discrepancies"],
   ["/wms/branches", "Branches"],
   ["/wms/cycle-counts", "Cycle Counts"],

@@ -174,7 +174,7 @@ function RecentActivity({ branchCode }: { branchCode: string }) {
       <div className="section-header">
         <h2>Recent Activity</h2>
         <Link className="dashboard-section-link" to="/wms/events/current">
-          Current Events
+          Open Event Register
         </Link>
       </div>
       <div className="dashboard-activity-panel">
@@ -186,14 +186,14 @@ function RecentActivity({ branchCode }: { branchCode: string }) {
           <p className="empty-panel-text">No recent branch activity found.</p>
         ) : (
           rows.map((event) => (
-            <article className="dashboard-activity-row" key={event.id}>
+            <Link className="dashboard-activity-row" key={event.id} to={`/wms/events/${event.source}/${event.id}`}>
               <time>{formatDateTime(event.created_at)}</time>
               <div>
-                <strong>{event.event_type.replaceAll("_", " ")}</strong>
+                <strong>{event.event_type_label || event.event_type.replaceAll("_", " ")}</strong>
                 <span>{event.message || event.reference || event.entity_name}</span>
               </div>
               <small>{event.actor_display || event.actor_username || "System"}</small>
-            </article>
+            </Link>
           ))
         )}
       </div>

@@ -5,10 +5,8 @@ import "./App.css";
 import { ActiveBranchProvider, useActiveBranch } from "./api/ActiveBranchContext";
 import { AuthProvider, useAuth } from "./api/AuthContext";
 import { ScannerLayout, WmsLayout } from "./layout/AppLayout";
-import { ArchiveEventsPage } from "./pages/ArchiveEventsPage";
 import { BranchDetailPage } from "./pages/BranchDetailPage";
 import { BranchesPage } from "./pages/BranchesPage";
-import { CurrentEventsPage } from "./pages/CurrentEventsPage";
 import { CycleCountCreatePage } from "./pages/CycleCountCreatePage";
 import { CycleCountDetailPage } from "./pages/CycleCountDetailPage";
 import { CycleCountReviewQueuePage } from "./pages/CycleCountReviewQueuePage";
@@ -20,6 +18,8 @@ import { DiscrepancyDetailPage } from "./pages/DiscrepancyDetailPage";
 import { DiscrepancyReconciliationDetailPage } from "./pages/DiscrepancyReconciliationDetailPage";
 import { DiscrepancyReconciliationsPage } from "./pages/DiscrepancyReconciliationsPage";
 import { DiscrepancyReportPage } from "./pages/DiscrepancyReportPage";
+import { EventDetailPage } from "./pages/EventDetailPage";
+import { EventRegisterPage } from "./pages/EventRegisterPage";
 import { InventoryExceptionsPage } from "./pages/InventoryExceptionsPage";
 import { InventoryPage } from "./pages/InventoryPage";
 import { LocationsPage } from "./pages/LocationsPage";
@@ -189,6 +189,11 @@ function InterfaceEntryResolver() {
   return <Navigate replace to={path} />;
 }
 
+function EventsRedirect({ target }: { target: "current" | "archive" }) {
+  const location = useLocation();
+  return <Navigate replace to={`/wms/events/${target}${location.search}`} />;
+}
+
 function App() {
   return (
     <AuthProvider>
@@ -242,9 +247,11 @@ function App() {
             <Route path="wms/transit-investigations" element={<TransitInvestigationsPage />} />
             <Route path="wms/transit-investigations/:id" element={<TransitInvestigationDetailPage />} />
             <Route path="wms/route-runs/:id/documents" element={<RouteDocumentsPage />} />
-            <Route path="wms/current-events" element={<CurrentEventsPage />} />
-            <Route path="wms/events/current" element={<CurrentEventsPage />} />
-            <Route path="wms/events/archive" element={<ArchiveEventsPage />} />
+            <Route path="wms/current-events" element={<EventsRedirect target="current" />} />
+            <Route path="wms/events" element={<EventsRedirect target="current" />} />
+            <Route path="wms/events/current" element={<EventRegisterPage source="current" />} />
+            <Route path="wms/events/archive" element={<EventRegisterPage source="archive" />} />
+            <Route path="wms/events/:source/:id" element={<EventDetailPage />} />
             <Route path="products" element={<Navigate to="/wms/products" replace />} />
             <Route path="inventory" element={<Navigate to="/wms/inventory" replace />} />
             <Route path="orders" element={<Navigate to="/wms/orders" replace />} />

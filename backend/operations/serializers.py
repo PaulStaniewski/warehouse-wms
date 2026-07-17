@@ -1,6 +1,7 @@
 import re
 from decimal import Decimal
 
+from django.utils import timezone
 from rest_framework import serializers
 
 from operations.models import (
@@ -1132,6 +1133,26 @@ class AuditLogSerializer(serializers.ModelSerializer):
     transfer_reference = serializers.CharField(source="transfer.reference", read_only=True)
     pallet_code = serializers.CharField(source="pallet.scan_code", read_only=True)
     discrepancy_reference = serializers.CharField(source="discrepancy.reference", read_only=True)
+    source = serializers.SerializerMethodField()
+    event_type_label = serializers.SerializerMethodField()
+    event_category = serializers.SerializerMethodField()
+    metadata = serializers.SerializerMethodField()
+    related_links = serializers.SerializerMethodField()
+
+    CATEGORY_PREFIXES = [
+        ("cycle_count", "Cycle Counts"),
+        ("receive", "Receiving"),
+        ("inter_branch", "Transfers"),
+        ("mm_", "Transfers"),
+        ("picking", "Picking"),
+        ("pick", "Picking"),
+        ("control", "Picking"),
+        ("replenishment", "Inventory"),
+        ("stock_adjustment", "Stock Adjustments"),
+        ("scanner_quick_transfer", "Inventory"),
+        ("transfer", "Transfers"),
+        ("route", "Routes"),
+    ]
 
     def get_actor_display(self, obj) -> str:
         if obj.actor_id and obj.actor:
@@ -1145,6 +1166,91 @@ class AuditLogSerializer(serializers.ModelSerializer):
         if obj.route_run_id is None:
             return None
         return str(obj.route_run)
+
+    def get_source(self, obj) -> str:
+        return "current" if obj.created_at >= timezone.now() - timezone.timedelta(days=30) else "archive"
+
+    def get_event_type_label(self, obj) -> str:
+        value = obj.event_type or obj.action_type
+        return value.replace("_", " ").title() if value else "Event"
+
+    def get_event_category(self, obj) -> str:
+        value = obj.event_type or obj.entity_name or obj.action_type
+        lowered = value.lower()
+        if obj.discrepancy_id or "discrepancy" in lowered:
+            return "Discrepancies"
+        if obj.route_run_id:
+            return "Routes"
+        if obj.transfer_id or obj.pallet_id:
+            return "Transfers"
+        for prefix, category in self.CATEGORY_PREFIXES:
+            if lowered.startswith(prefix):
+                return category
+        if obj.product_id or obj.source_location_id or obj.destination_location_id:
+            return "Inventory"
+        if obj.actor_id and lowered in ["login", "logout"]:
+            return "Authentication/System"
+        return "Other"
+
+    def get_metadata(self, obj) -> list[dict]:
+        fields = [
+            ("Action type", obj.action_type),
+            ("Event type", obj.event_type),
+            ("Result", obj.result),
+            ("Reference", obj.reference),
+            ("Entity", obj.entity_name),
+            ("Entity ID", obj.entity_id),
+            ("Product", obj.product.sku if obj.product_id and obj.product else None),
+            ("Quantity", obj.quantity),
+            ("Expected quantity", obj.expected_quantity),
+            ("Checked quantity", obj.checked_quantity),
+            ("Source location", obj.source_location.code if obj.source_location_id and obj.source_location else obj.source_label),
+            ("Destination location", obj.destination_location.code if obj.destination_location_id and obj.destination_location else obj.destination_label),
+            ("Cart", obj.cart.code if obj.cart_id and obj.cart else None),
+            ("Order", obj.order.external_reference if obj.order_id and obj.order else None),
+            ("Route run", self.get_route_run_label(obj)),
+            ("Transfer", obj.transfer.reference if obj.transfer_id and obj.transfer else None),
+            ("Pallet", obj.pallet.scan_code if obj.pallet_id and obj.pallet else None),
+            ("Discrepancy", obj.discrepancy.reference if obj.discrepancy_id and obj.discrepancy else None),
+        ]
+        return [
+            {"label": label, "value": str(value)}
+            for label, value in fields
+            if value not in [None, ""]
+        ]
+
+    def get_related_links(self, obj) -> list[dict]:
+        links = []
+        if obj.route_run_id:
+            links.append({"label": "Route documents", "url": f"/wms/route-runs/{obj.route_run_id}/documents"})
+        if obj.transfer_id:
+            links.append({"label": "Stock transfer", "url": f"/wms/stock-transfers/{obj.transfer_id}"})
+        if obj.discrepancy_id:
+            links.append({"label": "Discrepancy", "url": f"/wms/discrepancies/{obj.discrepancy_id}"})
+        if obj.product_id:
+            links.append({"label": "Product", "url": f"/wms/products"})
+        if obj.source_location_id:
+            links.append({"label": "Source location", "url": f"/wms/locations/{obj.source_location_id}"})
+        if obj.destination_location_id and obj.destination_location_id != obj.source_location_id:
+            links.append({"label": "Destination location", "url": f"/wms/locations/{obj.destination_location_id}"})
+        if obj.entity_name == "CycleCountSession" and obj.entity_id:
+            links.append({"label": "Cycle Count", "url": f"/wms/cycle-counts/{obj.entity_id}"})
+        if obj.entity_name == "TransferDiscrepancySourceReview" and obj.entity_id:
+            links.append({"label": "Source Review", "url": f"/wms/source-discrepancy-reviews/{obj.entity_id}"})
+        if obj.entity_name == "TransferDiscrepancyReconciliation" and obj.entity_id:
+            links.append({"label": "Reconciliation", "url": f"/wms/discrepancy-reconciliations/{obj.entity_id}"})
+        if obj.entity_name == "TransferDiscrepancyTransitInvestigation" and obj.entity_id:
+            links.append({"label": "Transit Investigation", "url": f"/wms/transit-investigations/{obj.entity_id}"})
+        if obj.entity_name == "TransferDiscrepancySourceStockVerification" and obj.entity_id:
+            links.append({"label": "Source Stock", "url": f"/wms/source-stock-verifications/{obj.entity_id}"})
+        seen = set()
+        unique_links = []
+        for link in links:
+            key = (link["label"], link["url"])
+            if key not in seen:
+                seen.add(key)
+                unique_links.append(link)
+        return unique_links
 
     class Meta:
         model = AuditLog
@@ -1181,6 +1287,11 @@ class AuditLogSerializer(serializers.ModelSerializer):
             "pallet_code",
             "discrepancy",
             "discrepancy_reference",
+            "source",
+            "event_type_label",
+            "event_category",
+            "metadata",
+            "related_links",
             "result",
             "reference",
             "entity_name",

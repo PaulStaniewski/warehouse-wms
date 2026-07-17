@@ -209,6 +209,11 @@ export type AuditLog = {
   pallet_code: string | null;
   discrepancy: number | null;
   discrepancy_reference: string | null;
+  source: "current" | "archive";
+  event_type_label: string;
+  event_category: string;
+  metadata: Array<{ label: string; value: string }>;
+  related_links: Array<{ label: string; url: string }>;
   result: string;
   reference: string;
   entity_name: string;

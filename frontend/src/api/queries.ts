@@ -1759,9 +1759,12 @@ export function useCompleteTransferDiscrepancyTransitInvestigation() {
 export type CurrentEventFilters = {
   actor?: string;
   cart?: string;
+  dateFrom?: string;
+  dateTo?: string;
   eventType?: string;
   location?: string;
   order?: string;
+  page?: number;
   product?: string;
   result?: string;
   search?: string;
@@ -1781,8 +1784,22 @@ export function useCurrentAuditLogs(branch?: string, filters: CurrentEventFilter
       if (filters.location) params.set("location", filters.location);
       if (filters.order) params.set("order", filters.order);
       if (filters.actor) params.set("actor", filters.actor);
+      if (filters.dateFrom) params.set("date_from", filters.dateFrom);
+      if (filters.dateTo) params.set("date_to", filters.dateTo);
+      if (filters.page && filters.page > 1) params.set("page", String(filters.page));
       const query = params.toString();
       return getList<AuditLog>(`/current-events/${query ? `?${query}` : ""}`);
+    },
+  });
+}
+
+export function useAuditLogDetail(id?: string) {
+  return useQuery({
+    enabled: Boolean(id),
+    queryKey: ["audit-log", id],
+    queryFn: async () => {
+      const response = await apiClient.get<AuditLog>(`/audit-logs/${id}/`);
+      return response.data;
     },
   });
 }
@@ -1925,10 +1942,27 @@ export function useMarkReplenishmentOrderedManually() {
   });
 }
 
-export function useArchiveAuditLogs(dateFrom: string, dateTo: string) {
+export function useArchiveAuditLogs(branch?: string, filters: CurrentEventFilters = {}) {
+  const dateFrom = filters.dateFrom ?? "";
+  const dateTo = filters.dateTo ?? "";
   return useQuery({
     enabled: Boolean(dateFrom && dateTo),
-    queryKey: ["audit-logs", "archive", dateFrom, dateTo],
-    queryFn: () => getList<AuditLog>(`/audit-logs/archive/?date_from=${dateFrom}&date_to=${dateTo}`),
+    queryKey: ["audit-logs", "archive", branch, filters],
+    queryFn: () => {
+      const params = new URLSearchParams();
+      params.set("date_from", dateFrom);
+      params.set("date_to", dateTo);
+      if (branch) params.set("branch", branch);
+      if (filters.search) params.set("search", filters.search);
+      if (filters.eventType) params.set("event_type", filters.eventType);
+      if (filters.product) params.set("product", filters.product);
+      if (filters.result) params.set("result", filters.result);
+      if (filters.cart) params.set("cart", filters.cart);
+      if (filters.location) params.set("location", filters.location);
+      if (filters.order) params.set("order", filters.order);
+      if (filters.actor) params.set("actor", filters.actor);
+      if (filters.page && filters.page > 1) params.set("page", String(filters.page));
+      return getList<AuditLog>(`/audit-logs/archive/?${params.toString()}`);
+    },
   });
 }

@@ -22,7 +22,7 @@ export function ArchiveEventsPage() {
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
   const canFetch = Boolean(dateFrom && dateTo);
-  const auditLogs = useArchiveAuditLogs(dateFrom, dateTo);
+  const auditLogs = useArchiveAuditLogs(undefined, { dateFrom, dateTo });
 
   return (
     <>

@@ -627,6 +627,96 @@ class TransportOverviewApiTests(APITestCase):
         self.assertEqual(response.data["attention_items"], [])
 
 
+class EventRegisterApiTests(APITestCase):
+    def setUp(self):
+        self.branch = Branch.objects.create(code="GDY", name="Gdynia", city="Gdynia", country="Poland")
+        self.other_branch = Branch.objects.create(code="GDA", name="Gdansk", city="Gdansk", country="Poland")
+        self.user = User.objects.create_user(username="GDY_EVENT_WORKER", password="demo12345")
+        self.other_user = User.objects.create_user(username="GDA_EVENT_WORKER", password="demo12345")
+        UserBranchMembership.objects.create(user=self.user, branch=self.branch, role=UserBranchMembership.Role.WORKER)
+        UserBranchMembership.objects.create(user=self.other_user, branch=self.other_branch, role=UserBranchMembership.Role.WORKER)
+        self.product = Product.objects.create(sku="EV-P1", name="Event product", barcode="770000000001")
+        self.location = Location.objects.create(
+            branch=self.branch,
+            code="EV-01",
+            name="Event location",
+            location_type=Location.LocationType.STORAGE,
+        )
+
+    def create_event(self, *, branch=None, event_type="pick", message="Worker GDY_EVENT_WORKER picked stock.", created_at=None):
+        event = AuditLog.objects.create(
+            actor=self.user,
+            action_type=AuditLog.ActionType.UPDATE,
+            event_type=event_type,
+            branch=branch or self.branch,
+            product=self.product,
+            quantity=Decimal("2"),
+            source_location=self.location,
+            reference="EV-REF-001",
+            entity_name="StockMovement",
+            entity_id="101",
+            message=message,
+        )
+        if created_at is not None:
+            AuditLog.objects.filter(pk=event.pk).update(created_at=created_at)
+            event.refresh_from_db()
+        return event
+
+    def test_current_events_expose_register_presentation_fields(self):
+        self.create_event(event_type="stock_adjustment_created")
+        self.client.force_authenticate(self.user)
+
+        response = self.client.get("/api/audit-logs/current/", {"branch": "GDY", "event_type": "stock_adjustment_created"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        event = response.data["results"][0]
+        self.assertEqual(event["source"], "current")
+        self.assertEqual(event["event_type_label"], "Stock Adjustment Created")
+        self.assertEqual(event["event_category"], "Stock Adjustments")
+        self.assertTrue(any(item["label"] == "Product" for item in event["metadata"]))
+        self.assertTrue(any(link["label"] == "Source location" for link in event["related_links"]))
+
+    def test_archive_requires_date_range_and_uses_same_presentation(self):
+        archived_at = timezone.now() - timezone.timedelta(days=45)
+        self.create_event(event_type="receive", created_at=archived_at)
+        self.client.force_authenticate(self.user)
+
+        missing_dates = self.client.get("/api/audit-logs/archive/", {"branch": "GDY"})
+        response = self.client.get(
+            "/api/audit-logs/archive/",
+            {
+                "branch": "GDY",
+                "date_from": archived_at.date().isoformat(),
+                "date_to": timezone.localdate().isoformat(),
+                "event_type": "receive",
+            },
+        )
+
+        self.assertEqual(missing_dates.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["results"][0]["source"], "archive")
+        self.assertEqual(response.data["results"][0]["event_category"], "Receiving")
+
+    def test_event_detail_respects_branch_membership(self):
+        event = self.create_event()
+
+        self.client.force_authenticate(self.user)
+        allowed = self.client.get(f"/api/audit-logs/{event.id}/")
+        self.client.force_authenticate(self.other_user)
+        forbidden = self.client.get(f"/api/audit-logs/{event.id}/")
+
+        self.assertEqual(allowed.status_code, status.HTTP_200_OK)
+        self.assertEqual(forbidden.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_branch_query_manipulation_is_rejected(self):
+        self.create_event()
+        self.client.force_authenticate(self.user)
+
+        response = self.client.get("/api/audit-logs/current/", {"branch": "GDA"})
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+
 class StockTransferHistoryApiTests(APITestCase):
     def setUp(self):
         self.branch = Branch.objects.create(code="STH", name="Stock History", city="Gdynia", country="Poland")
