@@ -7,6 +7,7 @@ import type {
   BranchMembership,
   AuditLog,
   CycleCountSession,
+  CycleCountReviewQueueResponse,
   InventoryItem,
   InterBranchArrivalResponse,
   InterBranchMMTask,
@@ -69,6 +70,7 @@ function buildCountPath(endpoint: string, branch?: string, status?: string, bran
   const params = new URLSearchParams();
   if (branch) params.set(branchParam, branch);
   if (status) params.set("status", status);
+  params.set("page_size", "1");
   const query = params.toString();
   return `${endpoint}${query ? `?${query}` : ""}`;
 }
@@ -385,6 +387,45 @@ export function useCancelCycleCountRecount() {
         `/cycle-counts/${payload.sessionId}/recounts/${payload.recountId}/cancel/`,
         { note: payload.note },
       );
+      return response.data;
+    },
+  });
+}
+
+export type CycleCountReviewQueueFilters = {
+  branch?: string;
+  dateFrom?: string;
+  dateTo?: string;
+  itemType?: string;
+  location?: string;
+  page?: number;
+  pageSize?: number;
+  product?: string;
+  recountStatus?: string;
+  reconciliationStatus?: string;
+  search?: string;
+  staleOnly?: boolean;
+};
+
+export function useCycleCountReviewQueue(filters: CycleCountReviewQueueFilters = {}) {
+  return useQuery({
+    enabled: Boolean(filters.branch),
+    queryKey: ["cycle-count-review-queue", filters],
+    queryFn: async () => {
+      const params = new URLSearchParams();
+      if (filters.branch) params.set("branch", filters.branch);
+      if (filters.itemType) params.set("item_type", filters.itemType);
+      if (filters.search) params.set("search", filters.search);
+      if (filters.location) params.set("location", filters.location);
+      if (filters.product) params.set("product", filters.product);
+      if (filters.recountStatus) params.set("recount_status", filters.recountStatus);
+      if (filters.reconciliationStatus) params.set("reconciliation_status", filters.reconciliationStatus);
+      if (filters.staleOnly) params.set("stale_only", "true");
+      if (filters.dateFrom) params.set("date_from", filters.dateFrom);
+      if (filters.dateTo) params.set("date_to", filters.dateTo);
+      if (filters.page && filters.page > 1) params.set("page", String(filters.page));
+      if (filters.pageSize) params.set("page_size", String(filters.pageSize));
+      const response = await apiClient.get<CycleCountReviewQueueResponse>(`/cycle-count-review-queue/?${params.toString()}`);
       return response.data;
     },
   });

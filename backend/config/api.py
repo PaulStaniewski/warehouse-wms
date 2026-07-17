@@ -3,6 +3,7 @@ from rest_framework.routers import DefaultRouter
 from accounts.viewsets import AuthLoginView, AuthLogoutView, AuthSessionView, CurrentUserBranchMembershipsView
 from operations.viewsets import (
     AuditLogViewSet,
+    CycleCountReviewQueueViewSet,
     CycleCountSessionViewSet,
     DeliveryRouteViewSet,
     OrderLineViewSet,
@@ -31,6 +32,7 @@ router.register("locations", LocationViewSet, basename="location")
 router.register("products", ProductViewSet, basename="product")
 router.register("inventory-items", InventoryItemViewSet, basename="inventory-item")
 router.register("cycle-counts", CycleCountSessionViewSet, basename="cycle-count")
+router.register("cycle-count-review-queue", CycleCountReviewQueueViewSet, basename="cycle-count-review-queue")
 router.register("delivery-routes", DeliveryRouteViewSet, basename="delivery-route")
 router.register("route-runs", RouteRunViewSet, basename="route-run")
 router.register("orders", OrderViewSet, basename="order")

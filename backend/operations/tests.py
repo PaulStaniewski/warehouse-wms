@@ -1036,6 +1036,121 @@ class CycleCountWorkflowTests(APITestCase):
         self.inventory.refresh_from_db()
         self.assertEqual(self.inventory.quantity_on_hand, Decimal("5.000"))
 
+    def get_cycle_count_review_queue(self, **params):
+        query = {"branch": "CCB", **params}
+        return self.client.get("/api/cycle-count-review-queue/", query)
+
+    def test_cycle_count_review_queue_requires_branch_leader_and_is_branch_scoped(self):
+        self.submit_counted_session("7")
+
+        self.client.force_authenticate(None)
+        unauthenticated = self.get_cycle_count_review_queue()
+        self.client.force_authenticate(self.worker)
+        worker = self.get_cycle_count_review_queue()
+        self.client.force_authenticate(self.other_leader)
+        other_branch = self.client.get("/api/cycle-count-review-queue/", {"branch": "CCO"})
+        other_forbidden = self.get_cycle_count_review_queue()
+        self.client.force_authenticate(self.leader)
+        leader = self.get_cycle_count_review_queue()
+
+        self.assertEqual(unauthenticated.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(worker.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(other_branch.status_code, status.HTTP_200_OK)
+        self.assertEqual(other_branch.data["count"], 0)
+        self.assertEqual(other_forbidden.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(leader.status_code, status.HTTP_200_OK)
+        self.assertEqual(leader.data["summary"]["variance_pending_review"], 1)
+
+    def test_cycle_count_review_queue_categories_summary_and_actions(self):
+        stale_session, stale_line = self.submit_counted_session("8")
+        StockMovement.objects.create(
+            branch=self.branch,
+            product=self.product,
+            inventory_item=self.inventory,
+            source_location=self.location,
+            movement_type=StockMovement.MovementType.PICK,
+            quantity=Decimal("1"),
+            reference="QUEUE-STALE",
+        )
+        pending_session, pending_line = self.submit_counted_session("7")
+
+        requested_session, requested_line = self.submit_counted_session("6")
+        self.client.post(
+            f"/api/cycle-counts/{requested_session.id}/lines/{requested_line.id}/request-recount/",
+            {"reason": "Queue requested recount."},
+            format="json",
+        )
+
+        submitted_session, submitted_line = self.submit_counted_session("6")
+        self.client.post(
+            f"/api/cycle-counts/{submitted_session.id}/lines/{submitted_line.id}/request-recount/",
+            {"reason": "Queue submitted recount."},
+            format="json",
+        )
+        submitted_recount = CycleCountRecount.objects.get(original_line=submitted_line)
+        self.client.force_authenticate(self.worker)
+        self.client.post(
+            f"/api/scanner/cycle-count-recounts/{submitted_recount.id}/submit/",
+            {"location_code": self.location.code, "product_code": self.product.sku, "quantity": "6"},
+            format="json",
+        )
+        self.client.force_authenticate(self.leader)
+
+        accepted_session, accepted_line = self.submit_counted_session("6")
+        self.client.post(
+            f"/api/cycle-counts/{accepted_session.id}/lines/{accepted_line.id}/request-recount/",
+            {"reason": "Queue accepted recount."},
+            format="json",
+        )
+        accepted_recount = CycleCountRecount.objects.get(original_line=accepted_line)
+        self.client.force_authenticate(self.worker)
+        self.client.post(
+            f"/api/scanner/cycle-count-recounts/{accepted_recount.id}/submit/",
+            {"location_code": self.location.code, "product_code": self.product.sku, "quantity": "6"},
+            format="json",
+        )
+        self.client.force_authenticate(self.leader)
+        self.client.post(f"/api/cycle-counts/{accepted_session.id}/recounts/{accepted_recount.id}/accept/", {}, format="json")
+
+        ready_session, _ = self.submit_counted_session("5")
+
+        response = self.get_cycle_count_review_queue()
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        summary = response.data["summary"]
+        self.assertEqual(summary["variance_pending_review"], 1)
+        self.assertGreaterEqual(summary["stale_variance"], 1)
+        self.assertEqual(summary["recount_requested"], 1)
+        self.assertEqual(summary["recount_waiting_review"], 1)
+        self.assertEqual(summary["accepted_recount_pending_reconciliation"], 1)
+        self.assertEqual(summary["session_waiting_close"], 1)
+        rows = response.data["results"]
+        priorities = [row["priority"] for row in rows]
+        self.assertEqual(priorities, sorted(priorities))
+        pending_row = next(row for row in rows if row["line"] == pending_line.id)
+        self.assertIn("apply_adjustment", pending_row["valid_actions"])
+        stale_row = next(row for row in rows if row["line"] == stale_line.id)
+        self.assertEqual(stale_row["item_type"], "stale_variance")
+        self.assertNotIn("apply_adjustment", stale_row["valid_actions"])
+        self.assertIn("request_recount", stale_row["valid_actions"])
+        ready_row = next(row for row in rows if row["session"] == ready_session.id and row["item_type"] == "session_waiting_close")
+        self.assertIn("close_session", ready_row["valid_actions"])
+
+    def test_cycle_count_review_queue_filters_and_pagination_use_all_matching_summary(self):
+        self.submit_counted_session("7")
+        self.submit_counted_session("8")
+
+        filtered = self.get_cycle_count_review_queue(item_type="variance_pending_review", page_size="1")
+        search = self.get_cycle_count_review_queue(search="CC-P1")
+        missing = self.get_cycle_count_review_queue(product="NOPE")
+
+        self.assertEqual(filtered.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(filtered.data["results"]), 1)
+        self.assertEqual(filtered.data["summary"]["variance_pending_review"], 2)
+        self.assertEqual(filtered.data["count"], 2)
+        self.assertEqual(search.data["summary"]["total"], 2)
+        self.assertEqual(missing.data["summary"]["total"], 0)
+
     def test_other_branch_user_cannot_view_or_count(self):
         self.client.force_authenticate(self.leader)
         session_id = self.create_session().data["id"]

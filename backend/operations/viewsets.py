@@ -9,6 +9,7 @@ from django.utils.dateparse import parse_date
 from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.pagination import PageNumberPagination
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.viewsets import ReadOnlyModelViewSet, ViewSet
@@ -20,6 +21,7 @@ from accounts.authorization import (
     require_any_branch_access,
     require_branch_access,
 )
+from accounts.models import UserBranchMembership
 from operations.models import (
     AuditLog,
     CycleCountLine,
@@ -54,6 +56,7 @@ from operations.serializers import (
     AuditLogSerializer,
     CycleCountLocationSerializer,
     CycleCountRecountSerializer,
+    CycleCountReviewQueueItemSerializer,
     CycleCountSessionSerializer,
     DeliveryRouteSerializer,
     OrderLineSerializer,
@@ -1911,6 +1914,295 @@ class TransferDiscrepancyActionViewSet(ViewSet):
         page = paginator.paginate_queryset(rows, request)
         serializer = self.serializer_class(page, many=True)
         return paginator.get_paginated_response(serializer.data)
+
+
+class CycleCountReviewQueueViewSet(ViewSet):
+    serializer_class = CycleCountReviewQueueItemSerializer
+    pagination_class = TransferDiscrepancyActionPagination
+    permission_classes = [IsAuthenticated]
+
+    ITEM_LABELS = {
+        "variance_pending_review": "Variance pending review",
+        "stale_variance": "Stale variance",
+        "recount_requested": "Recount requested",
+        "recount_in_progress": "Recount in progress",
+        "recount_waiting_review": "Recount waiting for review",
+        "accepted_recount_pending_reconciliation": "Accepted recount pending reconciliation",
+        "session_waiting_close": "Session ready to close",
+    }
+    PRIORITY = {
+        "stale_variance": 10,
+        "recount_waiting_review": 20,
+        "accepted_recount_pending_reconciliation": 30,
+        "variance_pending_review": 40,
+        "session_waiting_close": 50,
+        "recount_requested": 60,
+        "recount_in_progress": 70,
+    }
+    ACTIVE_RECOUNT_STATUSES = [
+        CycleCountRecount.Status.REQUESTED,
+        CycleCountRecount.Status.IN_PROGRESS,
+        CycleCountRecount.Status.SUBMITTED,
+    ]
+
+    def _leader_branch_codes(self, request):
+        requested = request.query_params.get("branch", "").strip()
+        if request.user.is_superuser:
+            return branch_codes_filter(request.user, requested)
+        queryset = UserBranchMembership.objects.filter(user=request.user, role=UserBranchMembership.Role.LEADER)
+        if requested:
+            queryset = queryset.filter(branch__code__iexact=requested)
+        codes = set(queryset.values_list("branch__code", flat=True))
+        if requested and not codes:
+            raise PermissionDenied("This queue requires a Leader role in the requested branch.")
+        if not codes:
+            raise PermissionDenied("This queue requires a Leader role.")
+        return codes
+
+    def _movement_after_baseline(self, branch, product, location, baseline_at, exclude_recount=None):
+        if not baseline_at:
+            return False
+        queryset = StockMovement.objects.filter(branch=branch, product=product, created_at__gt=baseline_at).filter(
+            models.Q(source_location=location) | models.Q(destination_location=location)
+        )
+        if exclude_recount is not None:
+            queryset = queryset.exclude(cycle_count_recount=exclude_recount)
+        return queryset.exists()
+
+    def _inventory_quantities(self, lines):
+        keys = {(line.branch_id, line.location_id, line.product_id) for line in lines}
+        if not keys:
+            return {}
+        query = models.Q()
+        for branch_id, location_id, product_id in keys:
+            query |= models.Q(branch_id=branch_id, location_id=location_id, product_id=product_id)
+        return {
+            (item.branch_id, item.location_id, item.product_id): item.quantity_on_hand
+            for item in InventoryItem.objects.filter(query)
+        }
+
+    def _base_line_row(self, line, item_type, waiting_since, actions, *, recount=None, effective_counted=None, effective_variance=None, is_stale=False, movement_after_baseline=False):
+        return {
+            "key": f"{item_type}-{line.id}-{recount.id if recount else 'line'}",
+            "item_type": item_type,
+            "item_type_label": self.ITEM_LABELS[item_type],
+            "priority": self.PRIORITY[item_type],
+            "branch": line.branch_id,
+            "branch_code": line.branch.code,
+            "session": line.session_id,
+            "session_reference": line.session.reference,
+            "session_status": line.session.status,
+            "line": line.id,
+            "recount": recount.id if recount else None,
+            "recount_reference": recount.reference if recount else "",
+            "location": line.location_id,
+            "location_code": line.location.code,
+            "product": line.product_id,
+            "product_sku": line.product.sku,
+            "product_name": line.product.name,
+            "expected_quantity": str(line.expected_quantity),
+            "original_counted_quantity": str(line.counted_quantity) if line.counted_quantity is not None else "",
+            "effective_counted_quantity": str(effective_counted if effective_counted is not None else line.counted_quantity or ""),
+            "effective_variance": str(effective_variance if effective_variance is not None else line.variance_quantity or ""),
+            "movement_after_snapshot": line.movement_after_snapshot,
+            "movement_after_baseline": movement_after_baseline,
+            "is_stale": is_stale,
+            "reconciliation_status": line.reconciliation_status,
+            "recount_status": recount.status if recount else "",
+            "waiting_since": waiting_since,
+            "valid_actions": actions,
+            "detail_url": f"/wms/cycle-counts/{line.session_id}",
+        }
+
+    def _build_rows(self, branch_codes):
+        lines = list(
+            CycleCountLine.objects.select_related(
+                "session",
+                "branch",
+                "location",
+                "product",
+                "cycle_count_location",
+            )
+            .prefetch_related("recounts")
+            .filter(
+                branch__code__in=branch_codes,
+                session__status=CycleCountSession.Status.AWAITING_REVIEW,
+                cycle_count_location__status=CycleCountLocation.Status.SUBMITTED,
+                reconciliation_status=CycleCountLine.ReconciliationStatus.PENDING_REVIEW,
+            )
+            .order_by("session__reference", "location__code", "product__sku")
+        )
+        inventory = self._inventory_quantities(lines)
+        rows = []
+
+        for line in lines:
+            recounts = sorted(list(line.recounts.all()), key=lambda recount: recount.requested_at)
+            active = [
+                recount for recount in recounts
+                if recount.status in self.ACTIVE_RECOUNT_STATUSES
+            ]
+            accepted = [
+                recount for recount in recounts
+                if recount.status == CycleCountRecount.Status.ACCEPTED
+            ]
+            if active:
+                recount = active[-1]
+                if recount.status == CycleCountRecount.Status.REQUESTED:
+                    rows.append(self._base_line_row(line, "recount_requested", recount.requested_at, ["open_detail", "open_scanner_recount", "cancel_recount"], recount=recount))
+                elif recount.status == CycleCountRecount.Status.IN_PROGRESS:
+                    rows.append(self._base_line_row(line, "recount_in_progress", recount.started_at or recount.requested_at, ["open_detail", "open_scanner_recount", "cancel_recount"], recount=recount))
+                else:
+                    stale = recount.movement_after_baseline or self._movement_after_baseline(recount.branch, recount.product, recount.location, recount.baseline_at, recount)
+                    actions = ["open_detail", "cancel_recount"]
+                    if not stale:
+                        actions.insert(1, "accept_recount")
+                    rows.append(self._base_line_row(
+                        line,
+                        "recount_waiting_review",
+                        recount.counted_at or recount.updated_at,
+                        actions,
+                        recount=recount,
+                        effective_counted=recount.counted_quantity,
+                        effective_variance=recount.variance_quantity,
+                        is_stale=stale,
+                        movement_after_baseline=stale,
+                    ))
+                continue
+
+            if accepted:
+                recount = sorted(accepted, key=lambda item: item.accepted_at or item.updated_at)[-1]
+                current = inventory.get((line.branch_id, line.location_id, line.product_id), Decimal("0"))
+                stale = recount.movement_after_baseline or current != recount.baseline_quantity
+                actions = ["open_detail", "resolve_without_adjustment", "request_recount"]
+                if not stale and recount.variance_quantity not in [None, 0]:
+                    actions.insert(1, "apply_adjustment")
+                rows.append(self._base_line_row(
+                    line,
+                    "accepted_recount_pending_reconciliation",
+                    recount.accepted_at or recount.updated_at,
+                    actions,
+                    recount=recount,
+                    effective_counted=recount.counted_quantity,
+                    effective_variance=recount.variance_quantity,
+                    is_stale=stale,
+                    movement_after_baseline=stale,
+                ))
+                continue
+
+            current = inventory.get((line.branch_id, line.location_id, line.product_id), Decimal("0"))
+            stale = (
+                line.movement_after_snapshot
+                or current != line.expected_quantity
+                or self._movement_after_baseline(line.branch, line.product, line.location, line.session.snapshot_at)
+            )
+            item_type = "stale_variance" if stale else "variance_pending_review"
+            actions = ["open_detail", "resolve_without_adjustment", "request_recount"]
+            if not stale:
+                actions.insert(1, "apply_adjustment")
+            rows.append(self._base_line_row(line, item_type, line.counted_at or line.updated_at, actions, is_stale=stale))
+
+        session_rows = self._session_close_rows(branch_codes)
+        rows.extend(session_rows)
+        return rows
+
+    def _session_close_rows(self, branch_codes):
+        sessions = (
+            CycleCountSession.objects.select_related("branch")
+            .prefetch_related("lines", "locations", "recounts")
+            .filter(branch__code__in=branch_codes, status=CycleCountSession.Status.AWAITING_REVIEW)
+        )
+        rows = []
+        for session in sessions:
+            if session.locations.exclude(status=CycleCountLocation.Status.SUBMITTED).exists():
+                continue
+            if session.lines.filter(reconciliation_status=CycleCountLine.ReconciliationStatus.PENDING_REVIEW).exists():
+                continue
+            if session.recounts.filter(status__in=self.ACTIVE_RECOUNT_STATUSES).exists():
+                continue
+            rows.append({
+                "key": f"session-close-{session.id}",
+                "item_type": "session_waiting_close",
+                "item_type_label": self.ITEM_LABELS["session_waiting_close"],
+                "priority": self.PRIORITY["session_waiting_close"],
+                "branch": session.branch_id,
+                "branch_code": session.branch.code,
+                "session": session.id,
+                "session_reference": session.reference,
+                "session_status": session.status,
+                "line": None,
+                "recount": None,
+                "recount_reference": "",
+                "location": None,
+                "location_code": "",
+                "product": None,
+                "product_sku": "",
+                "product_name": "",
+                "expected_quantity": "",
+                "original_counted_quantity": "",
+                "effective_counted_quantity": "",
+                "effective_variance": "",
+                "movement_after_snapshot": False,
+                "movement_after_baseline": False,
+                "is_stale": False,
+                "reconciliation_status": "",
+                "recount_status": "",
+                "waiting_since": session.submitted_at or session.updated_at,
+                "valid_actions": ["open_detail", "close_session"],
+                "detail_url": f"/wms/cycle-counts/{session.id}",
+            })
+        return rows
+
+    def _filter_rows(self, rows, request):
+        item_type = request.query_params.get("item_type", "").strip()
+        search = request.query_params.get("search", "").strip().lower()
+        location = request.query_params.get("location", "").strip().lower()
+        product = request.query_params.get("product", "").strip().lower()
+        recount_status = request.query_params.get("recount_status", "").strip()
+        reconciliation_status = request.query_params.get("reconciliation_status", "").strip()
+        stale_only = request.query_params.get("stale_only", "").strip().lower() in ["1", "true", "yes"]
+        date_from = parse_date(request.query_params.get("date_from", ""))
+        date_to = parse_date(request.query_params.get("date_to", ""))
+
+        if item_type:
+            rows = [row for row in rows if row["item_type"] == item_type]
+        if search:
+            rows = [
+                row for row in rows
+                if any(search in str(row.get(key, "")).lower() for key in ["session_reference", "location_code", "product_sku", "product_name", "recount_reference"])
+            ]
+        if location:
+            rows = [row for row in rows if location in row["location_code"].lower()]
+        if product:
+            rows = [row for row in rows if product in row["product_sku"].lower() or product in row["product_name"].lower()]
+        if recount_status:
+            rows = [row for row in rows if row["recount_status"] == recount_status]
+        if reconciliation_status:
+            rows = [row for row in rows if row["reconciliation_status"] == reconciliation_status]
+        if stale_only:
+            rows = [row for row in rows if row["is_stale"]]
+        if date_from is not None:
+            rows = [row for row in rows if row["waiting_since"].date() >= date_from]
+        if date_to is not None:
+            rows = [row for row in rows if row["waiting_since"].date() <= date_to]
+        return rows
+
+    def _summary(self, rows):
+        return {
+            "total": len(rows),
+            **{item_type: sum(1 for row in rows if row["item_type"] == item_type) for item_type in self.ITEM_LABELS},
+        }
+
+    def list(self, request):
+        branch_codes = self._leader_branch_codes(request)
+        rows = self._filter_rows(self._build_rows(branch_codes), request)
+        rows = sorted(rows, key=lambda row: (row["priority"], row["waiting_since"], row["session_reference"], row["key"]))
+        summary = self._summary(rows)
+        paginator = self.pagination_class()
+        page = paginator.paginate_queryset(rows, request)
+        serializer = self.serializer_class(page, many=True)
+        response = paginator.get_paginated_response(serializer.data)
+        response.data["summary"] = summary
+        return response
 
 
 class TransferDiscrepancyViewSet(ReadOnlyModelViewSet):

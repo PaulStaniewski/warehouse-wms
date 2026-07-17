@@ -89,6 +89,7 @@ const wmsNavSections: NavSection[] = [
       { to: "/wms/stock-transfers", label: "Stock Transfers", icon: Boxes },
       { to: "/wms/stock-adjustments", label: "Stock Adjustments", icon: ClipboardList },
       { to: "/wms/cycle-counts", label: "Cycle Counts", icon: ClipboardCheck },
+      { to: "/wms/cycle-count-review-queue", label: "Review Queue", icon: ListChecks },
     ],
   },
   {
@@ -158,6 +159,7 @@ const wmsPageTitles: Array<[string, string]> = [
   ["/wms/discrepancies", "Discrepancies"],
   ["/wms/branches", "Branches"],
   ["/wms/cycle-counts", "Cycle Counts"],
+  ["/wms/cycle-count-review-queue", "Cycle Count Review Queue"],
   ["/wms/stock-adjustments", "Stock Adjustments"],
   ["/wms/stock-transfers", "Stock Transfers"],
   ["/wms/dashboard", "Dashboard"],

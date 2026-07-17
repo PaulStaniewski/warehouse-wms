@@ -1210,6 +1210,49 @@ class TransferDiscrepancyActionSerializer(serializers.Serializer):
     created_at = serializers.DateTimeField()
 
 
+class CycleCountReviewQueueItemSerializer(serializers.Serializer):
+    key = serializers.CharField()
+    item_type = serializers.CharField()
+    item_type_label = serializers.CharField()
+    priority = serializers.IntegerField()
+    branch = serializers.IntegerField()
+    branch_code = serializers.CharField()
+    session = serializers.IntegerField()
+    session_reference = serializers.CharField()
+    session_status = serializers.CharField()
+    line = serializers.IntegerField(allow_null=True)
+    recount = serializers.IntegerField(allow_null=True)
+    recount_reference = serializers.CharField(allow_blank=True)
+    location = serializers.IntegerField(allow_null=True)
+    location_code = serializers.CharField(allow_blank=True)
+    product = serializers.IntegerField(allow_null=True)
+    product_sku = serializers.CharField(allow_blank=True)
+    product_name = serializers.CharField(allow_blank=True)
+    expected_quantity = serializers.CharField(allow_blank=True)
+    original_counted_quantity = serializers.CharField(allow_blank=True)
+    effective_counted_quantity = serializers.CharField(allow_blank=True)
+    effective_variance = serializers.CharField(allow_blank=True)
+    movement_after_snapshot = serializers.BooleanField()
+    movement_after_baseline = serializers.BooleanField()
+    is_stale = serializers.BooleanField()
+    reconciliation_status = serializers.CharField(allow_blank=True)
+    recount_status = serializers.CharField(allow_blank=True)
+    waiting_since = serializers.DateTimeField()
+    valid_actions = serializers.ListField(child=serializers.CharField())
+    detail_url = serializers.CharField()
+
+
+class CycleCountReviewQueueSummarySerializer(serializers.Serializer):
+    total = serializers.IntegerField()
+    variance_pending_review = serializers.IntegerField()
+    stale_variance = serializers.IntegerField()
+    recount_requested = serializers.IntegerField()
+    recount_in_progress = serializers.IntegerField()
+    recount_waiting_review = serializers.IntegerField()
+    accepted_recount_pending_reconciliation = serializers.IntegerField()
+    session_waiting_close = serializers.IntegerField()
+
+
 class TransferDiscrepancyItemSerializer(serializers.ModelSerializer):
     product_sku = serializers.CharField(source="product.sku", read_only=True)
     product_name = serializers.CharField(source="product.name", read_only=True)

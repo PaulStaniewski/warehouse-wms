@@ -11,6 +11,7 @@ import { BranchesPage } from "./pages/BranchesPage";
 import { CurrentEventsPage } from "./pages/CurrentEventsPage";
 import { CycleCountCreatePage } from "./pages/CycleCountCreatePage";
 import { CycleCountDetailPage } from "./pages/CycleCountDetailPage";
+import { CycleCountReviewQueuePage } from "./pages/CycleCountReviewQueuePage";
 import { CycleCountsPage } from "./pages/CycleCountsPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { DiscrepanciesPage } from "./pages/DiscrepanciesPage";
@@ -217,6 +218,7 @@ function App() {
             <Route path="wms/stock-adjustments/new" element={<StockAdjustmentCreatePage />} />
             <Route path="wms/stock-adjustments/:id" element={<StockAdjustmentDetailPage />} />
             <Route path="wms/cycle-counts" element={<CycleCountsPage />} />
+            <Route path="wms/cycle-count-review-queue" element={<CycleCountReviewQueuePage />} />
             <Route path="wms/cycle-counts/new" element={<CycleCountCreatePage />} />
             <Route path="wms/cycle-counts/:id" element={<CycleCountDetailPage />} />
             <Route path="wms/routes-monitor" element={<RouteMonitorPage />} />

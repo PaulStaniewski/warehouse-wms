@@ -221,6 +221,11 @@ export function DashboardPage() {
     endpoint: "/transfer-discrepancy-actions/",
     key: "action-queue",
   });
+  const cycleCountReviewQueue = useDashboardResourceCount({
+    branch: activeBranchCode,
+    endpoint: "/cycle-count-review-queue/",
+    key: "cycle-count-review-queue",
+  });
   const activeOrders = useDashboardResourceCount({
     branch: activeBranchCode,
     endpoint: "/orders/",
@@ -311,6 +316,14 @@ export function DashboardPage() {
       icon: <ListChecks size={22} />,
       label: "Action queue",
       to: "/wms/discrepancy-actions",
+    },
+    {
+      countQuery: cycleCountReviewQueue,
+      description: "Cycle Count variances, recounts and close-ready sessions",
+      icon: <ClipboardCheck size={22} />,
+      label: "Cycle Count review",
+      to: "/wms/cycle-count-review-queue",
+      tone: "attention",
     },
     {
       countQuery: activeOrders,

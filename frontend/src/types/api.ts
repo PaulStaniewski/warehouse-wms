@@ -404,6 +404,53 @@ export type CycleCountSession = {
   updated_at: string;
 };
 
+export type CycleCountReviewQueueSummary = {
+  total: number;
+  variance_pending_review: number;
+  stale_variance: number;
+  recount_requested: number;
+  recount_in_progress: number;
+  recount_waiting_review: number;
+  accepted_recount_pending_reconciliation: number;
+  session_waiting_close: number;
+};
+
+export type CycleCountReviewQueueItem = {
+  key: string;
+  item_type: string;
+  item_type_label: string;
+  priority: number;
+  branch: number;
+  branch_code: string;
+  session: number;
+  session_reference: string;
+  session_status: string;
+  line: number | null;
+  recount: number | null;
+  recount_reference: string;
+  location: number | null;
+  location_code: string;
+  product: number | null;
+  product_sku: string;
+  product_name: string;
+  expected_quantity: string;
+  original_counted_quantity: string;
+  effective_counted_quantity: string;
+  effective_variance: string;
+  movement_after_snapshot: boolean;
+  movement_after_baseline: boolean;
+  is_stale: boolean;
+  reconciliation_status: string;
+  recount_status: string;
+  waiting_since: string;
+  valid_actions: string[];
+  detail_url: string;
+};
+
+export type CycleCountReviewQueueResponse = PaginatedResponse<CycleCountReviewQueueItem> & {
+  summary: CycleCountReviewQueueSummary;
+};
+
 export type ScannerCycleCountSession = {
   id: number;
   reference: string;
