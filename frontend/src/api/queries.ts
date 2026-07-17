@@ -120,6 +120,20 @@ export function useOrders(branch?: string) {
   });
 }
 
+export type LocationListFilters = {
+  branch?: string;
+  isActive?: string;
+  locationType?: string;
+  page?: number;
+  search?: string;
+};
+
+export type BranchListFilters = {
+  isActive?: string;
+  page?: number;
+  search?: string;
+};
+
 export function useLocations(branch?: string) {
   return useQuery({
     queryKey: ["locations", branch],
@@ -127,10 +141,55 @@ export function useLocations(branch?: string) {
   });
 }
 
-export function useBranches() {
+export function useLocationList(filters: LocationListFilters = {}) {
   return useQuery({
-    queryKey: ["branches"],
-    queryFn: () => getList<Branch>("/branches/"),
+    queryKey: ["locations", "register", filters],
+    queryFn: () => {
+      const params = new URLSearchParams();
+      if (filters.branch) params.set("branch", filters.branch);
+      if (filters.search) params.set("search", filters.search);
+      if (filters.locationType) params.set("location_type", filters.locationType);
+      if (filters.isActive) params.set("is_active", filters.isActive);
+      if (filters.page && filters.page > 1) params.set("page", String(filters.page));
+      const query = params.toString();
+      return getList<Location>(`/locations/${query ? `?${query}` : ""}`);
+    },
+  });
+}
+
+export function useLocation(locationId?: string) {
+  return useQuery({
+    enabled: Boolean(locationId),
+    queryKey: ["location", locationId],
+    queryFn: async () => {
+      const response = await apiClient.get<Location>(`/locations/${locationId}/`);
+      return response.data;
+    },
+  });
+}
+
+export function useBranches(filters: BranchListFilters = {}) {
+  return useQuery({
+    queryKey: ["branches", filters],
+    queryFn: () => {
+      const params = new URLSearchParams();
+      if (filters.search) params.set("search", filters.search);
+      if (filters.isActive) params.set("is_active", filters.isActive);
+      if (filters.page && filters.page > 1) params.set("page", String(filters.page));
+      const query = params.toString();
+      return getList<Branch>(`/branches/${query ? `?${query}` : ""}`);
+    },
+  });
+}
+
+export function useBranch(branchId?: string) {
+  return useQuery({
+    enabled: Boolean(branchId),
+    queryKey: ["branch", branchId],
+    queryFn: async () => {
+      const response = await apiClient.get<Branch>(`/branches/${branchId}/`);
+      return response.data;
+    },
   });
 }
 

@@ -22,6 +22,8 @@ export type Branch = {
   city: string;
   country: string;
   is_active: boolean;
+  created_at: string;
+  updated_at: string;
 };
 
 export type BranchMembership = {
@@ -42,6 +44,8 @@ export type Location = {
   name: string;
   location_type: string;
   is_active: boolean;
+  created_at: string;
+  updated_at: string;
 };
 
 export type Product = {

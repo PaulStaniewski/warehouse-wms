@@ -7,7 +7,6 @@ import {
   ClipboardCheck,
   ClipboardList,
   ExternalLink,
-  Forklift,
   History,
   LayoutDashboard,
   ListChecks,
@@ -81,7 +80,6 @@ const wmsNavSections: NavSection[] = [
     items: [
       { to: "/wms/inventory", label: "Inventory", icon: Boxes },
       { to: "/wms/products", label: "Products", icon: PackageSearch },
-      { to: "/wms/locations", label: "Locations", icon: MapPin },
     ],
   },
   {
@@ -106,6 +104,14 @@ const wmsNavSections: NavSection[] = [
         activePatterns: ["/wms/events/current", "/wms/current-events"],
       },
       { to: "/wms/events/archive", label: "Archive Events", icon: Archive },
+    ],
+  },
+  {
+    id: "administration",
+    label: "Administration",
+    items: [
+      { to: "/wms/branches", label: "Branches", icon: Warehouse },
+      { to: "/wms/locations", label: "Locations", icon: MapPin },
     ],
   },
 ];
@@ -139,6 +145,7 @@ const wmsPageTitles: Array<[string, string]> = [
   ["/wms/current-events", "Current Events"],
   ["/wms/events/archive", "Archive Events"],
   ["/wms/discrepancies", "Discrepancies"],
+  ["/wms/branches", "Branches"],
   ["/wms/dashboard", "Dashboard"],
   ["/wms/products", "Products"],
   ["/wms/inventory", "Inventory"],

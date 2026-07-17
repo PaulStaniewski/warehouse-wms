@@ -6,6 +6,8 @@ import { ActiveBranchProvider, useActiveBranch } from "./api/ActiveBranchContext
 import { AuthProvider, useAuth } from "./api/AuthContext";
 import { ScannerLayout, WmsLayout } from "./layout/AppLayout";
 import { ArchiveEventsPage } from "./pages/ArchiveEventsPage";
+import { BranchDetailPage } from "./pages/BranchDetailPage";
+import { BranchesPage } from "./pages/BranchesPage";
 import { CurrentEventsPage } from "./pages/CurrentEventsPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { DiscrepanciesPage } from "./pages/DiscrepanciesPage";
@@ -16,6 +18,7 @@ import { DiscrepancyReconciliationsPage } from "./pages/DiscrepancyReconciliatio
 import { DiscrepancyReportPage } from "./pages/DiscrepancyReportPage";
 import { InventoryPage } from "./pages/InventoryPage";
 import { LocationsPage } from "./pages/LocationsPage";
+import { LocationDetailPage } from "./pages/LocationDetailPage";
 import { LoginPage } from "./pages/LoginPage";
 import { OrdersPage } from "./pages/OrdersPage";
 import { PickingShortagesPage } from "./pages/PickingShortagesPage";
@@ -192,7 +195,10 @@ function App() {
             <Route path="wms/products" element={<ProductsPage />} />
             <Route path="wms/inventory" element={<InventoryPage />} />
             <Route path="wms/orders" element={<OrdersPage />} />
+            <Route path="wms/branches" element={<BranchesPage />} />
+            <Route path="wms/branches/:id" element={<BranchDetailPage />} />
             <Route path="wms/locations" element={<LocationsPage />} />
+            <Route path="wms/locations/:id" element={<LocationDetailPage />} />
             <Route path="wms/routes-monitor" element={<RouteMonitorPage />} />
             <Route path="wms/routes/archive" element={<RouteArchivePage />} />
             <Route path="wms/discrepancy-actions" element={<DiscrepancyActionQueuePage />} />

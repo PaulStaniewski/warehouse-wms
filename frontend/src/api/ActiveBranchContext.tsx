@@ -29,6 +29,8 @@ export function ActiveBranchProvider({ children }: { children: ReactNode }) {
     city: membership.branch_city,
     country: membership.branch_country,
     is_active: true,
+    created_at: "",
+    updated_at: "",
   }));
   const [activeBranchCode, setActiveBranchCodeState] = useState(() => localStorage.getItem(ACTIVE_BRANCH_STORAGE_KEY) ?? "");
 
