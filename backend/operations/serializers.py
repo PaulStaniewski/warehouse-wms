@@ -2171,3 +2171,51 @@ class InventoryExceptionSummarySerializer(serializers.Serializer):
     oldest_waiting_since = serializers.DateTimeField(allow_null=True)
     categories = InventoryExceptionCategorySerializer(many=True)
     immediate_attention = InventoryExceptionTopItemSerializer(many=True)
+
+
+class TransportOverviewSummarySerializer(serializers.Serializer):
+    active_route_runs = serializers.IntegerField()
+    preparing_route_runs = serializers.IntegerField()
+    ready_to_close_route_runs = serializers.IntegerField()
+    transfers_in_transit = serializers.IntegerField()
+    pallets_awaiting_receipt = serializers.IntegerField()
+    unresolved_discrepancy_transfers = serializers.IntegerField()
+    transit_investigations = serializers.IntegerField()
+
+
+class TransportOverviewRouteSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    route_code = serializers.CharField()
+    route_name = serializers.CharField()
+    branch_code = serializers.CharField()
+    service_date = serializers.DateField()
+    run_number = serializers.IntegerField()
+    status = serializers.CharField()
+    order_count = serializers.IntegerField()
+    line_count = serializers.IntegerField()
+    picked_line_count = serializers.IntegerField()
+    pending_line_count = serializers.IntegerField()
+    progress_percent = serializers.FloatField()
+    departure_time = serializers.TimeField()
+    ready_at = serializers.DateTimeField(allow_null=True)
+    documents_printed_at = serializers.DateTimeField(allow_null=True)
+    destination = serializers.CharField()
+
+
+class TransportAttentionItemSerializer(serializers.Serializer):
+    key = serializers.CharField()
+    item_type = serializers.CharField()
+    label = serializers.CharField()
+    reference = serializers.CharField()
+    source_branch_code = serializers.CharField(allow_blank=True)
+    destination_branch_code = serializers.CharField(allow_blank=True)
+    status = serializers.CharField()
+    waiting_since = serializers.DateTimeField(allow_null=True)
+    destination = serializers.CharField()
+    priority = serializers.IntegerField()
+
+
+class TransportOverviewSerializer(serializers.Serializer):
+    summary = TransportOverviewSummarySerializer()
+    active_routes = TransportOverviewRouteSerializer(many=True)
+    attention_items = TransportAttentionItemSerializer(many=True)

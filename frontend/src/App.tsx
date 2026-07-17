@@ -58,6 +58,7 @@ import { StockTransferDetailPage } from "./pages/StockTransferDetailPage";
 import { StockTransfersPage } from "./pages/StockTransfersPage";
 import { TransitInvestigationDetailPage } from "./pages/TransitInvestigationDetailPage";
 import { TransitInvestigationsPage } from "./pages/TransitInvestigationsPage";
+import { TransportOverviewPage } from "./pages/TransportOverviewPage";
 import {
   getDefaultInterfacePath,
   locationToPath,
@@ -222,6 +223,7 @@ function App() {
             <Route path="wms/cycle-count-review-queue" element={<CycleCountReviewQueuePage />} />
             <Route path="wms/cycle-counts/new" element={<CycleCountCreatePage />} />
             <Route path="wms/cycle-counts/:id" element={<CycleCountDetailPage />} />
+            <Route path="wms/transport-overview" element={<TransportOverviewPage />} />
             <Route path="wms/routes-monitor" element={<RouteMonitorPage />} />
             <Route path="wms/routes/archive" element={<RouteArchivePage />} />
             <Route path="wms/discrepancy-actions" element={<DiscrepancyActionQueuePage />} />

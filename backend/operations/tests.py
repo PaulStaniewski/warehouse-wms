@@ -466,6 +466,167 @@ class InventoryExceptionSummaryApiTests(APITestCase):
         self.assertIsNone(response.data["oldest_waiting_since"])
 
 
+class TransportOverviewApiTests(APITestCase):
+    def setUp(self):
+        self.branch = Branch.objects.create(code="GDY", name="Gdynia", city="Gdynia", country="Poland")
+        self.other_branch = Branch.objects.create(code="GDA", name="Gdansk", city="Gdansk", country="Poland")
+        self.unrelated_branch = Branch.objects.create(code="WAW", name="Warsaw", city="Warsaw", country="Poland")
+        self.worker = User.objects.create_user(username="GDY_TRANSPORT_WORKER", password="demo12345")
+        self.other_worker = User.objects.create_user(username="GDA_TRANSPORT_WORKER", password="demo12345")
+        UserBranchMembership.objects.create(user=self.worker, branch=self.branch, role=UserBranchMembership.Role.WORKER)
+        UserBranchMembership.objects.create(user=self.other_worker, branch=self.other_branch, role=UserBranchMembership.Role.WORKER)
+        self.route = DeliveryRoute.objects.create(branch=self.branch, code="TR-01", name="Morning route")
+        self.other_route = DeliveryRoute.objects.create(branch=self.other_branch, code="TR-02", name="Other route")
+
+    def create_route_run(self, status_value, *, route=None, run_number=1):
+        return RouteRun.objects.create(
+            route=route or self.route,
+            service_date=timezone.localdate(),
+            run_number=run_number,
+            order_cutoff_time=time(8, 0),
+            sync_time=time(8, 30),
+            departure_time=time(10, 0),
+            status=status_value,
+            ready_at=timezone.now() if status_value == RouteRun.Status.READY_TO_CLOSE else None,
+        )
+
+    def create_transfer(self, reference, source_branch, destination_branch, status_value):
+        return InterBranchTransfer.objects.create(
+            reference=reference,
+            source_branch=source_branch,
+            destination_branch=destination_branch,
+            status=status_value,
+        )
+
+    def create_discrepancy(self, reference, source_branch, destination_branch, status_value):
+        transfer = self.create_transfer(
+            f"IBT-{reference}",
+            source_branch,
+            destination_branch,
+            InterBranchTransfer.Status.CLOSED_WITH_DISCREPANCY,
+        )
+        pallet = TransferPallet.objects.create(
+            transfer=transfer,
+            scan_code=f"PAL-{reference}",
+            status=TransferPallet.Status.CLOSED_WITH_DISCREPANCY,
+        )
+        return TransferDiscrepancy.objects.create(
+            reference=f"DISC-{reference}",
+            transfer=transfer,
+            pallet=pallet,
+            status=status_value,
+        )
+
+    def create_transit_investigation(self):
+        discrepancy = self.create_discrepancy(
+            "TRANSIT",
+            self.other_branch,
+            self.branch,
+            TransferDiscrepancy.Status.CONFIRMED_SHORTAGE,
+        )
+        source_review = TransferDiscrepancySourceReview.objects.create(
+            discrepancy=discrepancy,
+            source_branch=self.other_branch,
+            status=TransferDiscrepancySourceReview.Status.COMPLETED,
+            finding=TransferDiscrepancySourceReview.Finding.DISPATCH_EVIDENCE_MATCHES,
+        )
+        reconciliation = TransferDiscrepancyReconciliation.objects.create(
+            discrepancy=discrepancy,
+            source_review=source_review,
+            route=TransferDiscrepancyReconciliation.Route.TRANSIT_INVESTIGATION,
+            status=TransferDiscrepancyReconciliation.Status.IN_PROGRESS,
+        )
+        return TransferDiscrepancyTransitInvestigation.objects.create(
+            reconciliation=reconciliation,
+            status=TransferDiscrepancyTransitInvestigation.Status.PENDING_INVESTIGATION,
+        )
+
+    def create_transport_records(self):
+        self.create_route_run(RouteRun.Status.OPEN, run_number=1)
+        self.create_route_run(RouteRun.Status.PICKING, run_number=2)
+        self.create_route_run(RouteRun.Status.READY_TO_CLOSE, run_number=3)
+        self.create_route_run(RouteRun.Status.CLOSED, run_number=4)
+        self.create_route_run(RouteRun.Status.OPEN, route=self.other_route, run_number=1)
+        transfer = self.create_transfer(
+            "IBT-ACTIVE",
+            self.branch,
+            self.other_branch,
+            InterBranchTransfer.Status.IN_TRANSIT,
+        )
+        TransferPallet.objects.create(
+            transfer=transfer,
+            scan_code="PAL-ACTIVE",
+            status=TransferPallet.Status.IN_TRANSIT,
+        )
+        completed_transfer = self.create_transfer(
+            "IBT-DONE",
+            self.branch,
+            self.other_branch,
+            InterBranchTransfer.Status.RECEIVED,
+        )
+        TransferPallet.objects.create(
+            transfer=completed_transfer,
+            scan_code="PAL-DONE",
+            status=TransferPallet.Status.RECEIVED,
+        )
+        self.create_discrepancy(
+            "OPEN",
+            self.other_branch,
+            self.branch,
+            TransferDiscrepancy.Status.OPEN,
+        )
+        self.create_discrepancy(
+            "RESOLVED",
+            self.other_branch,
+            self.branch,
+            TransferDiscrepancy.Status.RESOLVED,
+        )
+        self.create_transit_investigation()
+
+    def test_transport_overview_requires_authentication(self):
+        response = self.client.get("/api/transport-overview/", {"branch": "GDY"})
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_transport_overview_counts_branch_scoped_transport_statuses(self):
+        self.create_transport_records()
+        self.client.force_authenticate(self.worker)
+
+        response = self.client.get("/api/transport-overview/", {"branch": "GDY"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        summary = response.data["summary"]
+        self.assertEqual(summary["active_route_runs"], 3)
+        self.assertEqual(summary["preparing_route_runs"], 2)
+        self.assertEqual(summary["ready_to_close_route_runs"], 1)
+        self.assertEqual(summary["transfers_in_transit"], 1)
+        self.assertEqual(summary["pallets_awaiting_receipt"], 1)
+        self.assertEqual(summary["unresolved_discrepancy_transfers"], 2)
+        self.assertEqual(summary["transit_investigations"], 1)
+        self.assertEqual([row["status"] for row in response.data["active_routes"]][:1], [RouteRun.Status.READY_TO_CLOSE])
+        self.assertTrue(any(item["item_type"] == "route_ready_to_close" for item in response.data["attention_items"]))
+        self.assertTrue(any(item["item_type"] == "transit_investigation" for item in response.data["attention_items"]))
+
+    def test_transport_overview_rejects_other_branch_filter(self):
+        self.create_transport_records()
+        self.client.force_authenticate(self.worker)
+
+        response = self.client.get("/api/transport-overview/", {"branch": "GDA"})
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_transport_overview_empty_branch_returns_zero_summary(self):
+        self.client.force_authenticate(self.worker)
+
+        response = self.client.get("/api/transport-overview/", {"branch": "GDY"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["summary"]["active_route_runs"], 0)
+        self.assertEqual(response.data["summary"]["transfers_in_transit"], 0)
+        self.assertEqual(response.data["active_routes"], [])
+        self.assertEqual(response.data["attention_items"], [])
+
+
 class StockTransferHistoryApiTests(APITestCase):
     def setUp(self):
         self.branch = Branch.objects.create(code="STH", name="Stock History", city="Gdynia", country="Poland")

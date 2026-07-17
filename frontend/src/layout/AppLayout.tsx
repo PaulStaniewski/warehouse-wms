@@ -15,6 +15,7 @@ import {
   PackageSearch,
   Route,
   ScanLine,
+  Truck,
   Warehouse,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -65,6 +66,11 @@ const wmsNavSections: NavSection[] = [
     id: "transport-routes",
     label: "Transport & Routes",
     items: [
+      {
+        to: "/wms/transport-overview",
+        label: "Transport Overview",
+        icon: Truck,
+      },
       {
         to: "/wms/routes-monitor",
         label: "Routes Monitor",
@@ -145,6 +151,7 @@ const scannerPageTitles: Array<[string, string]> = [
 ];
 
 const wmsPageTitles: Array<[string, string]> = [
+  ["/wms/transport-overview", "Transport Overview"],
   ["/wms/inventory-exceptions", "Inventory Exceptions"],
   ["/wms/source-stock-verifications", "Source Stock"],
   ["/wms/discrepancy-reconciliations", "Reconciliations"],

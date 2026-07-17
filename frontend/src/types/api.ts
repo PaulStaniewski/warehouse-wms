@@ -1538,6 +1538,54 @@ export type InventoryExceptionSummary = {
   immediate_attention: InventoryExceptionTopItem[];
 };
 
+export type TransportOverviewSummary = {
+  active_route_runs: number;
+  preparing_route_runs: number;
+  ready_to_close_route_runs: number;
+  transfers_in_transit: number;
+  pallets_awaiting_receipt: number;
+  unresolved_discrepancy_transfers: number;
+  transit_investigations: number;
+};
+
+export type TransportOverviewRoute = {
+  id: number;
+  route_code: string;
+  route_name: string;
+  branch_code: string;
+  service_date: string;
+  run_number: number;
+  status: string;
+  order_count: number;
+  line_count: number;
+  picked_line_count: number;
+  pending_line_count: number;
+  progress_percent: number;
+  departure_time: string;
+  ready_at: string | null;
+  documents_printed_at: string | null;
+  destination: string;
+};
+
+export type TransportAttentionItem = {
+  key: string;
+  item_type: string;
+  label: string;
+  reference: string;
+  source_branch_code: string;
+  destination_branch_code: string;
+  status: string;
+  waiting_since: string | null;
+  destination: string;
+  priority: number;
+};
+
+export type TransportOverview = {
+  summary: TransportOverviewSummary;
+  active_routes: TransportOverviewRoute[];
+  attention_items: TransportAttentionItem[];
+};
+
 export type ScannerProformasResponse = {
   results: ScannerProforma[];
 };

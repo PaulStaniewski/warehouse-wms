@@ -43,6 +43,7 @@ import type {
   ScannerSessionResponse,
   ScannerTaskStartResponse,
   StockMovement,
+  TransportOverview,
   TransferDiscrepancy,
   TransferDiscrepancyAction,
   TransferDiscrepancyConfirmShortageResponse,
@@ -1884,6 +1885,19 @@ export function useInventoryExceptionSummary(branch?: string) {
       const params = new URLSearchParams();
       if (branch) params.set("branch", branch);
       const response = await apiClient.get<InventoryExceptionSummary>(`/inventory-exceptions/summary/?${params.toString()}`);
+      return response.data;
+    },
+  });
+}
+
+export function useTransportOverview(branch?: string) {
+  return useQuery({
+    enabled: Boolean(branch),
+    queryKey: ["transport-overview", branch],
+    queryFn: async () => {
+      const params = new URLSearchParams();
+      if (branch) params.set("branch", branch);
+      const response = await apiClient.get<TransportOverview>(`/transport-overview/?${params.toString()}`);
       return response.data;
     },
   });

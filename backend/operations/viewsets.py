@@ -69,6 +69,7 @@ from operations.serializers import (
     ReturnLineSerializer,
     RouteRunSerializer,
     StockMovementSerializer,
+    TransportOverviewSerializer,
     TransferDiscrepancyActionSerializer,
     TransferDiscrepancyReconciliationSerializer,
     TransferDiscrepancySerializer,
@@ -2182,6 +2183,248 @@ class InventoryExceptionSummaryViewSet(ViewSet):
 
     @action(detail=False, methods=["get"])
     def summary(self, request):
+        return self._summary_response(request)
+
+
+class TransportOverviewViewSet(ViewSet):
+    serializer_class = TransportOverviewSerializer
+    permission_classes = [IsAuthenticated]
+
+    ACTIVE_ROUTE_STATUSES = [
+        RouteRun.Status.OPEN,
+        RouteRun.Status.SYNCING,
+        RouteRun.Status.PICKING,
+        RouteRun.Status.READY_TO_CLOSE,
+    ]
+    PREPARING_ROUTE_STATUSES = [
+        RouteRun.Status.OPEN,
+        RouteRun.Status.SYNCING,
+        RouteRun.Status.PICKING,
+    ]
+    ACTIVE_TRANSFER_STATUSES = [
+        InterBranchTransfer.Status.RELEASED,
+        InterBranchTransfer.Status.IN_TRANSIT,
+        InterBranchTransfer.Status.RECEIVING,
+    ]
+    PALLET_AWAITING_RECEIPT_STATUSES = [
+        TransferPallet.Status.IN_TRANSIT,
+        TransferPallet.Status.RECEIVING,
+    ]
+    UNRESOLVED_DISCREPANCY_STATUSES = [
+        TransferDiscrepancy.Status.OPEN,
+        TransferDiscrepancy.Status.INVESTIGATING,
+        TransferDiscrepancy.Status.CONFIRMED_SHORTAGE,
+    ]
+    ACTIVE_TRANSIT_INVESTIGATION_STATUSES = [
+        TransferDiscrepancyTransitInvestigation.Status.PENDING_INVESTIGATION,
+        TransferDiscrepancyTransitInvestigation.Status.INVESTIGATING,
+    ]
+
+    def _branch_codes(self, request):
+        requested = request.query_params.get("branch", "").strip()
+        return branch_codes_filter(request.user, requested), requested
+
+    def _route_queryset(self, branch_codes):
+        return RouteRun.objects.select_related("route", "route__branch").filter(
+            route__branch__code__in=branch_codes,
+        )
+
+    def _dual_branch_query(self, branch_codes, source_field, destination_field):
+        return models.Q(**{f"{source_field}__code__in": branch_codes}) | models.Q(
+            **{f"{destination_field}__code__in": branch_codes}
+        )
+
+    def _route_progress(self, run):
+        line_count = run.line_count or 0
+        if not line_count:
+            return 0
+        return round((run.picked_line_count / line_count) * 100, 1)
+
+    def _active_route_row(self, run):
+        return {
+            "id": run.id,
+            "route_code": run.route.code,
+            "route_name": run.route.name,
+            "branch_code": run.route.branch.code,
+            "service_date": run.service_date,
+            "run_number": run.run_number,
+            "status": run.status,
+            "order_count": run.order_count,
+            "line_count": run.line_count,
+            "picked_line_count": run.picked_line_count,
+            "pending_line_count": run.pending_line_count,
+            "progress_percent": self._route_progress(run),
+            "departure_time": run.departure_time,
+            "ready_at": run.ready_at,
+            "documents_printed_at": run.documents_printed_at,
+            "destination": f"/wms/routes-monitor",
+        }
+
+    def _attention_item(self, *, key, item_type, label, reference, status_value, waiting_since, destination, priority, source="", destination_branch=""):
+        return {
+            "key": key,
+            "item_type": item_type,
+            "label": label,
+            "reference": reference,
+            "source_branch_code": source,
+            "destination_branch_code": destination_branch,
+            "status": status_value,
+            "waiting_since": waiting_since,
+            "destination": destination,
+            "priority": priority,
+        }
+
+    def _active_routes(self, route_queryset):
+        return (
+            route_queryset.filter(status__in=self.ACTIVE_ROUTE_STATUSES)
+            .annotate(
+                order_count=models.Count("orders", distinct=True),
+                line_count=models.Count("orders__lines", distinct=True),
+                picked_line_count=models.Count(
+                    "orders__lines",
+                    filter=models.Q(orders__lines__quantity_picked__gte=models.F("orders__lines__quantity_ordered")),
+                    distinct=True,
+                ),
+                pending_line_count=models.Count(
+                    "orders__lines",
+                    filter=models.Q(orders__lines__quantity_picked__lt=models.F("orders__lines__quantity_ordered")),
+                    distinct=True,
+                ),
+            )
+            .order_by(
+                models.Case(
+                    models.When(status=RouteRun.Status.READY_TO_CLOSE, then=0),
+                    default=1,
+                    output_field=models.IntegerField(),
+                ),
+                "service_date",
+                "departure_time",
+                "route__code",
+                "run_number",
+            )
+        )
+
+    def _attention_items(self, branch_codes, active_routes):
+        items = []
+        for run in active_routes.filter(status=RouteRun.Status.READY_TO_CLOSE).order_by("service_date", "departure_time")[:5]:
+            items.append(self._attention_item(
+                key=f"route-ready-{run.id}",
+                item_type="route_ready_to_close",
+                label="Route ready to close",
+                reference=f"{run.route.code} / run {run.run_number}",
+                source=run.route.branch.code,
+                status_value=run.status,
+                waiting_since=run.ready_at or run.updated_at,
+                destination="/wms/routes-monitor",
+                priority=30,
+            ))
+
+        investigations = (
+            TransferDiscrepancyTransitInvestigation.objects.select_related(
+                "reconciliation__discrepancy__transfer",
+                "reconciliation__discrepancy__transfer__source_branch",
+                "reconciliation__discrepancy__transfer__destination_branch",
+            )
+            .filter(status__in=self.ACTIVE_TRANSIT_INVESTIGATION_STATUSES)
+            .filter(self._dual_branch_query(
+                branch_codes,
+                "reconciliation__discrepancy__transfer__source_branch",
+                "reconciliation__discrepancy__transfer__destination_branch",
+            ))
+            .order_by("created_at")
+        )
+        for investigation in investigations[:5]:
+            transfer = investigation.reconciliation.discrepancy.transfer
+            items.append(self._attention_item(
+                key=f"transit-investigation-{investigation.id}",
+                item_type="transit_investigation",
+                label="Transit investigation",
+                reference=investigation.reference,
+                source=transfer.source_branch.code,
+                destination_branch=transfer.destination_branch.code,
+                status_value=investigation.status,
+                waiting_since=investigation.started_at or investigation.created_at,
+                destination=f"/wms/transit-investigations/{investigation.id}",
+                priority=10 if investigation.status == TransferDiscrepancyTransitInvestigation.Status.PENDING_INVESTIGATION else 15,
+            ))
+
+        discrepancies = (
+            TransferDiscrepancy.objects.select_related(
+                "pallet",
+                "transfer",
+                "transfer__source_branch",
+                "transfer__destination_branch",
+            )
+            .filter(status__in=self.UNRESOLVED_DISCREPANCY_STATUSES)
+            .filter(self._dual_branch_query(branch_codes, "transfer__source_branch", "transfer__destination_branch"))
+            .order_by("created_at")
+        )
+        for discrepancy in discrepancies[:5]:
+            items.append(self._attention_item(
+                key=f"transport-discrepancy-{discrepancy.id}",
+                item_type="transport_discrepancy",
+                label="Unresolved transport discrepancy",
+                reference=discrepancy.reference,
+                source=discrepancy.transfer.source_branch.code,
+                destination_branch=discrepancy.transfer.destination_branch.code,
+                status_value=discrepancy.status,
+                waiting_since=discrepancy.updated_at or discrepancy.created_at,
+                destination=f"/wms/discrepancies/{discrepancy.id}",
+                priority=20,
+            ))
+
+        return sorted(items, key=lambda item: (item["priority"], item["waiting_since"] or timezone.now()))[:8]
+
+    def _summary_response(self, request):
+        branch_codes, _requested = self._branch_codes(request)
+        route_queryset = self._route_queryset(branch_codes)
+        active_routes = self._active_routes(route_queryset)
+        transfer_branch_query = self._dual_branch_query(branch_codes, "source_branch", "destination_branch")
+        discrepancy_branch_query = self._dual_branch_query(branch_codes, "transfer__source_branch", "transfer__destination_branch")
+        transit_branch_query = self._dual_branch_query(
+            branch_codes,
+            "reconciliation__discrepancy__transfer__source_branch",
+            "reconciliation__discrepancy__transfer__destination_branch",
+        )
+
+        transfers_in_transit = InterBranchTransfer.objects.filter(
+            transfer_branch_query,
+            status__in=self.ACTIVE_TRANSFER_STATUSES,
+        )
+        pallets_awaiting_receipt = TransferPallet.objects.filter(
+            transfer__source_branch__code__in=branch_codes,
+            status__in=self.PALLET_AWAITING_RECEIPT_STATUSES,
+        ) | TransferPallet.objects.filter(
+            transfer__destination_branch__code__in=branch_codes,
+            status__in=self.PALLET_AWAITING_RECEIPT_STATUSES,
+        )
+        unresolved_discrepancies = TransferDiscrepancy.objects.filter(
+            discrepancy_branch_query,
+            status__in=self.UNRESOLVED_DISCREPANCY_STATUSES,
+        )
+        transit_investigations = TransferDiscrepancyTransitInvestigation.objects.filter(
+            transit_branch_query,
+            status__in=self.ACTIVE_TRANSIT_INVESTIGATION_STATUSES,
+        )
+
+        route_rows = [self._active_route_row(run) for run in active_routes[:10]]
+        data = {
+            "summary": {
+                "active_route_runs": route_queryset.filter(status__in=self.ACTIVE_ROUTE_STATUSES).count(),
+                "preparing_route_runs": route_queryset.filter(status__in=self.PREPARING_ROUTE_STATUSES).count(),
+                "ready_to_close_route_runs": route_queryset.filter(status=RouteRun.Status.READY_TO_CLOSE).count(),
+                "transfers_in_transit": transfers_in_transit.distinct().count(),
+                "pallets_awaiting_receipt": pallets_awaiting_receipt.distinct().count(),
+                "unresolved_discrepancy_transfers": unresolved_discrepancies.values("transfer_id").distinct().count(),
+                "transit_investigations": transit_investigations.distinct().count(),
+            },
+            "active_routes": route_rows,
+            "attention_items": self._attention_items(branch_codes, active_routes),
+        }
+        serializer = self.serializer_class(data)
+        return Response(serializer.data)
+
+    def list(self, request):
         return self._summary_response(request)
 
 

@@ -17,7 +17,13 @@ import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 
 import { useActiveBranch } from "../api/ActiveBranchContext";
-import { useCurrentAuditLogs, useDashboardResourceCount, useHealth, useInventoryExceptionSummary } from "../api/queries";
+import {
+  useCurrentAuditLogs,
+  useDashboardResourceCount,
+  useHealth,
+  useInventoryExceptionSummary,
+  useTransportOverview,
+} from "../api/queries";
 import { PageHeader } from "../components/PageHeader";
 import { StatusBadge } from "../components/StatusBadge";
 
@@ -266,6 +272,7 @@ export function DashboardPage() {
     statuses: ["pending_investigation", "investigating"],
   });
   const inventoryExceptions = useInventoryExceptionSummary(activeBranchCode);
+  const transportOverview = useTransportOverview(activeBranchCode);
   const inventoryExceptionCount: DashboardCountQuery = {
     count: inventoryExceptions.data?.total_actionable ?? 0,
     error: inventoryExceptions.error,
@@ -273,6 +280,19 @@ export function DashboardPage() {
     isLoading: inventoryExceptions.isLoading,
     isSuccess: inventoryExceptions.isSuccess,
     refetch: inventoryExceptions.refetch,
+  };
+  const transportOverviewCount: DashboardCountQuery = {
+    count:
+      (transportOverview.data?.summary.active_route_runs ?? 0) +
+      (transportOverview.data?.summary.transfers_in_transit ?? 0) +
+      (transportOverview.data?.summary.pallets_awaiting_receipt ?? 0) +
+      (transportOverview.data?.summary.unresolved_discrepancy_transfers ?? 0) +
+      (transportOverview.data?.summary.transit_investigations ?? 0),
+    error: transportOverview.error,
+    isError: transportOverview.isError,
+    isLoading: transportOverview.isLoading,
+    isSuccess: transportOverview.isSuccess,
+    refetch: transportOverview.refetch,
   };
 
   const backendTone = health.isLoading ? "loading" : health.data?.status === "ok" ? "ok" : "error";
@@ -366,6 +386,14 @@ export function DashboardPage() {
   ];
 
   const transportMetrics: Metric[] = [
+    {
+      countQuery: transportOverviewCount,
+      description: "Routes, transfers, pallets and transit attention",
+      icon: <Truck size={22} />,
+      label: "Transport overview",
+      to: "/wms/transport-overview",
+      tone: "attention",
+    },
     {
       countQuery: activeRoutes,
       description: `Statuses: ${formatStatusList(["open", "syncing", "picking", "ready_to_close"])}`,

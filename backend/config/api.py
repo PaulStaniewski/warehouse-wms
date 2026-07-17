@@ -17,6 +17,7 @@ from operations.viewsets import (
     RouteRunViewSet,
     StockAdjustmentViewSet,
     StockMovementViewSet,
+    TransportOverviewViewSet,
     TransferDiscrepancyActionViewSet,
     TransferDiscrepancyReconciliationViewSet,
     TransferDiscrepancySourceStockVerificationViewSet,
@@ -35,6 +36,7 @@ router.register("inventory-items", InventoryItemViewSet, basename="inventory-ite
 router.register("cycle-counts", CycleCountSessionViewSet, basename="cycle-count")
 router.register("cycle-count-review-queue", CycleCountReviewQueueViewSet, basename="cycle-count-review-queue")
 router.register("inventory-exceptions", InventoryExceptionSummaryViewSet, basename="inventory-exception")
+router.register("transport-overview", TransportOverviewViewSet, basename="transport-overview")
 router.register("delivery-routes", DeliveryRouteViewSet, basename="delivery-route")
 router.register("route-runs", RouteRunViewSet, basename="route-run")
 router.register("orders", OrderViewSet, basename="order")
