@@ -1502,6 +1502,42 @@ export type ReplenishmentRequest = {
   note: string;
 };
 
+export type InventoryExceptionUrgency = "normal" | "high" | "critical";
+
+export type InventoryExceptionCategory = {
+  key: string;
+  label: string;
+  description: string;
+  count: number;
+  urgent_count: number;
+  oldest_waiting_since: string | null;
+  available: boolean;
+  owner: string;
+  urgency: InventoryExceptionUrgency;
+  included_statuses: string[];
+};
+
+export type InventoryExceptionTopItem = {
+  key: string;
+  category_key: string;
+  category_label: string;
+  reference: string;
+  reason: string;
+  status: string;
+  waiting_since: string | null;
+  destination: string;
+  priority: number;
+};
+
+export type InventoryExceptionSummary = {
+  total_actionable: number;
+  active_categories: number;
+  leader_only_count: number;
+  oldest_waiting_since: string | null;
+  categories: InventoryExceptionCategory[];
+  immediate_attention: InventoryExceptionTopItem[];
+};
+
 export type ScannerProformasResponse = {
   results: ScannerProforma[];
 };

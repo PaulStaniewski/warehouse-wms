@@ -2137,3 +2137,37 @@ class TransferDiscrepancyTransitInvestigationSerializer(serializers.ModelSeriali
             "destination_investigation_outcome",
             "final_accounting_lines",
         ]
+
+
+class InventoryExceptionCategorySerializer(serializers.Serializer):
+    key = serializers.CharField()
+    label = serializers.CharField()
+    description = serializers.CharField()
+    count = serializers.IntegerField()
+    urgent_count = serializers.IntegerField()
+    oldest_waiting_since = serializers.DateTimeField(allow_null=True)
+    available = serializers.BooleanField()
+    owner = serializers.CharField()
+    urgency = serializers.CharField()
+    included_statuses = serializers.ListField(child=serializers.CharField())
+
+
+class InventoryExceptionTopItemSerializer(serializers.Serializer):
+    key = serializers.CharField()
+    category_key = serializers.CharField()
+    category_label = serializers.CharField()
+    reference = serializers.CharField()
+    reason = serializers.CharField()
+    status = serializers.CharField()
+    waiting_since = serializers.DateTimeField(allow_null=True)
+    destination = serializers.CharField()
+    priority = serializers.IntegerField()
+
+
+class InventoryExceptionSummarySerializer(serializers.Serializer):
+    total_actionable = serializers.IntegerField()
+    active_categories = serializers.IntegerField()
+    leader_only_count = serializers.IntegerField()
+    oldest_waiting_since = serializers.DateTimeField(allow_null=True)
+    categories = InventoryExceptionCategorySerializer(many=True)
+    immediate_attention = InventoryExceptionTopItemSerializer(many=True)

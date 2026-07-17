@@ -17,11 +17,18 @@ import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 
 import { useActiveBranch } from "../api/ActiveBranchContext";
-import { useCurrentAuditLogs, useDashboardResourceCount, useHealth } from "../api/queries";
+import { useCurrentAuditLogs, useDashboardResourceCount, useHealth, useInventoryExceptionSummary } from "../api/queries";
 import { PageHeader } from "../components/PageHeader";
 import { StatusBadge } from "../components/StatusBadge";
 
-type DashboardCountQuery = ReturnType<typeof useDashboardResourceCount>;
+type DashboardCountQuery = {
+  count: number;
+  error: Error | null;
+  isError: boolean;
+  isLoading: boolean;
+  isSuccess: boolean;
+  refetch: () => Promise<unknown>;
+};
 
 type Metric = {
   countQuery: DashboardCountQuery;
@@ -258,6 +265,15 @@ export function DashboardPage() {
     key: "transit-investigations-active",
     statuses: ["pending_investigation", "investigating"],
   });
+  const inventoryExceptions = useInventoryExceptionSummary(activeBranchCode);
+  const inventoryExceptionCount: DashboardCountQuery = {
+    count: inventoryExceptions.data?.total_actionable ?? 0,
+    error: inventoryExceptions.error,
+    isError: inventoryExceptions.isError,
+    isLoading: inventoryExceptions.isLoading,
+    isSuccess: inventoryExceptions.isSuccess,
+    refetch: inventoryExceptions.refetch,
+  };
 
   const backendTone = health.isLoading ? "loading" : health.data?.status === "ok" ? "ok" : "error";
   const backendLabel = health.isLoading ? "Backend: checking" : `Backend: ${health.data?.status ?? "error"}`;
@@ -275,6 +291,14 @@ export function DashboardPage() {
   }
 
   const attentionMetrics: Metric[] = [
+    {
+      countQuery: inventoryExceptionCount,
+      description: "Unified branch exception overview",
+      icon: <ListChecks size={22} />,
+      label: "Inventory exceptions",
+      to: "/wms/inventory-exceptions",
+      tone: "attention",
+    },
     {
       countQuery: openPickingShortages,
       description: `Status: ${formatStatusList(["open"])}`,

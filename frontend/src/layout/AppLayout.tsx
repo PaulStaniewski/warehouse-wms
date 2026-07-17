@@ -1,6 +1,7 @@
 import {
   Archive,
   ArchiveRestore,
+  AlertTriangle,
   Barcode,
   Boxes,
   ChevronDown,
@@ -96,6 +97,7 @@ const wmsNavSections: NavSection[] = [
     id: "exceptions-investigations",
     label: "Exceptions & Investigations",
     items: [
+      { to: "/wms/inventory-exceptions", label: "Inventory Exceptions", icon: AlertTriangle },
       { to: "/wms/picking-shortages", label: "Picking Shortages", icon: PackageSearch },
       { to: "/wms/discrepancies", label: "Discrepancies", icon: ClipboardCheck },
       { to: "/wms/source-discrepancy-reviews", label: "Source Reviews", icon: ClipboardList },
@@ -143,6 +145,7 @@ const scannerPageTitles: Array<[string, string]> = [
 ];
 
 const wmsPageTitles: Array<[string, string]> = [
+  ["/wms/inventory-exceptions", "Inventory Exceptions"],
   ["/wms/source-stock-verifications", "Source Stock"],
   ["/wms/discrepancy-reconciliations", "Reconciliations"],
   ["/wms/source-discrepancy-reviews", "Source Reviews"],

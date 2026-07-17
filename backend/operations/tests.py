@@ -203,6 +203,269 @@ class BranchMembershipAuthorizationTests(APITestCase):
         self.assertEqual(audit_log.actor, self.gdy_leader)
 
 
+class InventoryExceptionSummaryApiTests(APITestCase):
+    def setUp(self):
+        self.branch = Branch.objects.create(code="GDY", name="Gdynia", city="Gdynia", country="Poland")
+        self.other_branch = Branch.objects.create(code="GDA", name="Gdansk", city="Gdansk", country="Poland")
+        self.worker = User.objects.create_user(username="GDY_EXCEPTION_WORKER", password="demo12345")
+        self.leader = User.objects.create_user(username="GDY_EXCEPTION_LEADER", password="demo12345")
+        self.other_worker = User.objects.create_user(username="GDA_EXCEPTION_WORKER", password="demo12345")
+        UserBranchMembership.objects.create(user=self.worker, branch=self.branch, role=UserBranchMembership.Role.WORKER)
+        UserBranchMembership.objects.create(user=self.leader, branch=self.branch, role=UserBranchMembership.Role.LEADER)
+        UserBranchMembership.objects.create(user=self.other_worker, branch=self.other_branch, role=UserBranchMembership.Role.WORKER)
+        self.location = Location.objects.create(
+            branch=self.branch,
+            code="EX-01",
+            name="Exception shelf",
+            location_type=Location.LocationType.STORAGE,
+        )
+        self.unconfirmed = Location.objects.create(
+            branch=self.branch,
+            code="UNCONFIRMED",
+            name="Unconfirmed",
+            location_type=Location.LocationType.STORAGE,
+        )
+        self.other_location = Location.objects.create(
+            branch=self.other_branch,
+            code="OT-01",
+            name="Other shelf",
+            location_type=Location.LocationType.STORAGE,
+        )
+        self.product = Product.objects.create(sku="EX-P1", name="Exception product", barcode="880000000001")
+        self.other_product = Product.objects.create(sku="EX-P2", name="Other exception product", barcode="880000000002")
+
+    def create_route_order_task(self, reference="EX-ORDER-1"):
+        route = DeliveryRoute.objects.create(branch=self.branch, code=f"R-{reference}", name="Exception route")
+        run = RouteRun.objects.create(
+            route=route,
+            service_date=timezone.localdate(),
+            run_number=1,
+            order_cutoff_time=time(8, 0),
+            sync_time=time(8, 30),
+            departure_time=time(10, 0),
+        )
+        order = Order.objects.create(branch=self.branch, route_run=run, external_reference=reference)
+        line = OrderLine.objects.create(order=order, product=self.product, line_number=1, quantity_ordered=Decimal("2"))
+        task = PickingTask.objects.create(
+            branch=self.branch,
+            order_line=line,
+            source_location=self.location,
+            quantity_to_pick=Decimal("2"),
+        )
+        return order, line, task
+
+    def create_transfer_discrepancy(self, reference, source_branch, destination_branch, status_value):
+        transfer = InterBranchTransfer.objects.create(
+            reference=f"IBT-{reference}",
+            source_branch=source_branch,
+            destination_branch=destination_branch,
+            status=InterBranchTransfer.Status.CLOSED_WITH_DISCREPANCY,
+        )
+        pallet = TransferPallet.objects.create(
+            transfer=transfer,
+            scan_code=f"PAL-{reference}",
+            status=TransferPallet.Status.CLOSED_WITH_DISCREPANCY,
+        )
+        return TransferDiscrepancy.objects.create(
+            reference=f"DISC-{reference}",
+            pallet=pallet,
+            transfer=transfer,
+            status=status_value,
+        )
+
+    def create_cycle_count_review_item(self):
+        session = CycleCountSession.objects.create(
+            branch=self.branch,
+            reference="CC-EX-001",
+            status=CycleCountSession.Status.AWAITING_REVIEW,
+            snapshot_at=timezone.now(),
+        )
+        cycle_location = CycleCountLocation.objects.create(
+            session=session,
+            branch=self.branch,
+            location=self.location,
+            status=CycleCountLocation.Status.SUBMITTED,
+            submitted_at=timezone.now(),
+        )
+        return CycleCountLine.objects.create(
+            session=session,
+            cycle_count_location=cycle_location,
+            branch=self.branch,
+            location=self.location,
+            product=self.product,
+            expected_quantity=Decimal("5"),
+            counted_quantity=Decimal("4"),
+            counted_at=timezone.now(),
+            reconciliation_status=CycleCountLine.ReconciliationStatus.PENDING_REVIEW,
+        )
+
+    def create_exception_records(self):
+        order, _, task = self.create_route_order_task()
+        PickingShortage.objects.create(
+            picking_task=task,
+            order=order,
+            branch=self.branch,
+            product=self.product,
+            reported_location=self.location,
+            unconfirmed_location=self.unconfirmed,
+            quantity=Decimal("1"),
+            confirmation_nonce="shortage-open",
+            status=PickingShortage.Status.OPEN,
+        )
+        closed_shortage = PickingShortage.objects.create(
+            picking_task=task,
+            order=order,
+            branch=self.branch,
+            product=self.product,
+            reported_location=self.location,
+            unconfirmed_location=self.unconfirmed,
+            quantity=Decimal("1"),
+            confirmation_nonce="shortage-found",
+            status=PickingShortage.Status.FOUND,
+        )
+        ReplenishmentRequest.objects.create(
+            picking_shortage=closed_shortage,
+            picking_task=task,
+            branch=self.branch,
+            customer_alias="EX-CUSTOMER",
+            order_reference=order.external_reference,
+            product=self.product,
+            quantity=Decimal("1"),
+            status=ReplenishmentRequest.Status.ORDERED_MANUALLY,
+        )
+        ReplenishmentRequest.objects.create(
+            picking_task=task,
+            branch=self.branch,
+            customer_alias="EX-CUSTOMER",
+            order_reference=order.external_reference,
+            product=self.product,
+            quantity=Decimal("1"),
+            status=ReplenishmentRequest.Status.PENDING_ORDER,
+        )
+        self.create_transfer_discrepancy(
+            "OPEN",
+            source_branch=self.other_branch,
+            destination_branch=self.branch,
+            status_value=TransferDiscrepancy.Status.OPEN,
+        )
+        self.create_transfer_discrepancy(
+            "RESOLVED",
+            source_branch=self.other_branch,
+            destination_branch=self.branch,
+            status_value=TransferDiscrepancy.Status.RESOLVED,
+        )
+        source_review_discrepancy = self.create_transfer_discrepancy(
+            "SOURCE",
+            source_branch=self.branch,
+            destination_branch=self.other_branch,
+            status_value=TransferDiscrepancy.Status.CONFIRMED_SHORTAGE,
+        )
+        TransferDiscrepancySourceReview.objects.create(
+            discrepancy=source_review_discrepancy,
+            source_branch=self.branch,
+            status=TransferDiscrepancySourceReview.Status.PENDING_REVIEW,
+        )
+        reconciliation_discrepancy = self.create_transfer_discrepancy(
+            "RECON",
+            source_branch=self.other_branch,
+            destination_branch=self.branch,
+            status_value=TransferDiscrepancy.Status.CONFIRMED_SHORTAGE,
+        )
+        reconciliation_review = TransferDiscrepancySourceReview.objects.create(
+            discrepancy=reconciliation_discrepancy,
+            source_branch=self.other_branch,
+            status=TransferDiscrepancySourceReview.Status.COMPLETED,
+            finding=TransferDiscrepancySourceReview.Finding.INCONCLUSIVE,
+        )
+        TransferDiscrepancyReconciliation.objects.create(
+            discrepancy=reconciliation_discrepancy,
+            source_review=reconciliation_review,
+            route=TransferDiscrepancyReconciliation.Route.MANUAL_RECONCILIATION,
+            status=TransferDiscrepancyReconciliation.Status.MANUAL_ACTION_REQUIRED,
+        )
+        source_stock_discrepancy = self.create_transfer_discrepancy(
+            "SSTOCK",
+            source_branch=self.branch,
+            destination_branch=self.other_branch,
+            status_value=TransferDiscrepancy.Status.CONFIRMED_SHORTAGE,
+        )
+        source_stock_review = TransferDiscrepancySourceReview.objects.create(
+            discrepancy=source_stock_discrepancy,
+            source_branch=self.branch,
+            status=TransferDiscrepancySourceReview.Status.COMPLETED,
+            finding=TransferDiscrepancySourceReview.Finding.SOURCE_SHORTAGE_FOUND,
+        )
+        source_stock_reconciliation = TransferDiscrepancyReconciliation.objects.create(
+            discrepancy=source_stock_discrepancy,
+            source_review=source_stock_review,
+            route=TransferDiscrepancyReconciliation.Route.SOURCE_STOCK_VERIFICATION,
+            status=TransferDiscrepancyReconciliation.Status.IN_PROGRESS,
+        )
+        TransferDiscrepancySourceStockVerification.objects.create(
+            reconciliation=source_stock_reconciliation,
+            status=TransferDiscrepancySourceStockVerification.Status.PENDING_VERIFICATION,
+        )
+        self.create_cycle_count_review_item()
+
+    def categories(self, response):
+        return {category["key"]: category for category in response.data["categories"]}
+
+    def test_inventory_exception_summary_requires_authentication(self):
+        response = self.client.get("/api/inventory-exceptions/summary/", {"branch": "GDY"})
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_inventory_exception_summary_counts_actionable_statuses_for_leader(self):
+        self.create_exception_records()
+        self.client.force_authenticate(self.leader)
+
+        response = self.client.get("/api/inventory-exceptions/summary/", {"branch": "GDY"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        categories = self.categories(response)
+        self.assertEqual(categories["picking_shortages"]["count"], 1)
+        self.assertEqual(categories["replenishment"]["count"], 1)
+        self.assertEqual(categories["transfer_discrepancies"]["count"], 1)
+        self.assertEqual(categories["source_reviews"]["count"], 1)
+        self.assertEqual(categories["reconciliations"]["count"], 2)
+        self.assertEqual(categories["source_stock"]["count"], 1)
+        self.assertEqual(categories["cycle_count_review"]["count"], 1)
+        self.assertEqual(categories["reconciliations"]["urgent_count"], 1)
+        self.assertEqual(response.data["leader_only_count"], 1)
+        self.assertGreaterEqual(response.data["total_actionable"], 8)
+        self.assertTrue(response.data["immediate_attention"])
+
+    def test_worker_does_not_receive_leader_only_cycle_count_category(self):
+        self.create_exception_records()
+        self.client.force_authenticate(self.worker)
+
+        response = self.client.get("/api/inventory-exceptions/summary/", {"branch": "GDY"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        categories = self.categories(response)
+        self.assertNotIn("cycle_count_review", categories)
+        self.assertEqual(response.data["leader_only_count"], 0)
+        self.assertEqual(categories["action_queue"]["urgent_count"], 0)
+
+    def test_inventory_exception_summary_rejects_other_branch_filter(self):
+        self.create_exception_records()
+        self.client.force_authenticate(self.worker)
+
+        response = self.client.get("/api/inventory-exceptions/summary/", {"branch": "GDA"})
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_inventory_exception_summary_empty_branch_returns_zero_summary(self):
+        self.client.force_authenticate(self.leader)
+
+        response = self.client.get("/api/inventory-exceptions/summary/", {"branch": "GDY"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["total_actionable"], 0)
+        self.assertEqual(response.data["active_categories"], 0)
+        self.assertIsNone(response.data["oldest_waiting_since"])
+
+
 class StockTransferHistoryApiTests(APITestCase):
     def setUp(self):
         self.branch = Branch.objects.create(code="STH", name="Stock History", city="Gdynia", country="Poland")

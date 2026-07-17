@@ -20,6 +20,7 @@ import { DiscrepancyDetailPage } from "./pages/DiscrepancyDetailPage";
 import { DiscrepancyReconciliationDetailPage } from "./pages/DiscrepancyReconciliationDetailPage";
 import { DiscrepancyReconciliationsPage } from "./pages/DiscrepancyReconciliationsPage";
 import { DiscrepancyReportPage } from "./pages/DiscrepancyReportPage";
+import { InventoryExceptionsPage } from "./pages/InventoryExceptionsPage";
 import { InventoryPage } from "./pages/InventoryPage";
 import { LocationsPage } from "./pages/LocationsPage";
 import { LocationDetailPage } from "./pages/LocationDetailPage";
@@ -225,6 +226,7 @@ function App() {
             <Route path="wms/routes/archive" element={<RouteArchivePage />} />
             <Route path="wms/discrepancy-actions" element={<DiscrepancyActionQueuePage />} />
             <Route path="wms/replenishment-requests" element={<ReplenishmentRequestsPage />} />
+            <Route path="wms/inventory-exceptions" element={<InventoryExceptionsPage />} />
             <Route path="wms/picking-shortages" element={<PickingShortagesPage />} />
             <Route path="wms/discrepancies" element={<DiscrepanciesPage />} />
             <Route path="wms/discrepancies/:id" element={<DiscrepancyDetailPage />} />

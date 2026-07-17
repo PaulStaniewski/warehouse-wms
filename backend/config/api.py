@@ -6,6 +6,7 @@ from operations.viewsets import (
     CycleCountReviewQueueViewSet,
     CycleCountSessionViewSet,
     DeliveryRouteViewSet,
+    InventoryExceptionSummaryViewSet,
     OrderLineViewSet,
     OrderViewSet,
     PickingShortageViewSet,
@@ -33,6 +34,7 @@ router.register("products", ProductViewSet, basename="product")
 router.register("inventory-items", InventoryItemViewSet, basename="inventory-item")
 router.register("cycle-counts", CycleCountSessionViewSet, basename="cycle-count")
 router.register("cycle-count-review-queue", CycleCountReviewQueueViewSet, basename="cycle-count-review-queue")
+router.register("inventory-exceptions", InventoryExceptionSummaryViewSet, basename="inventory-exception")
 router.register("delivery-routes", DeliveryRouteViewSet, basename="delivery-route")
 router.register("route-runs", RouteRunViewSet, basename="route-run")
 router.register("orders", OrderViewSet, basename="order")

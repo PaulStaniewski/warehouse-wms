@@ -59,6 +59,7 @@ from operations.serializers import (
     CycleCountReviewQueueItemSerializer,
     CycleCountSessionSerializer,
     DeliveryRouteSerializer,
+    InventoryExceptionSummarySerializer,
     OrderLineSerializer,
     OrderSerializer,
     PickingTaskSerializer,
@@ -1914,6 +1915,274 @@ class TransferDiscrepancyActionViewSet(ViewSet):
         page = paginator.paginate_queryset(rows, request)
         serializer = self.serializer_class(page, many=True)
         return paginator.get_paginated_response(serializer.data)
+
+
+class InventoryExceptionSummaryViewSet(ViewSet):
+    serializer_class = InventoryExceptionSummarySerializer
+    permission_classes = [IsAuthenticated]
+
+    def _leader_branch_codes(self, request, branch_codes):
+        if request.user.is_superuser:
+            return set(branch_codes)
+        return set(
+            UserBranchMembership.objects.filter(
+                user=request.user,
+                branch__code__in=branch_codes,
+                role=UserBranchMembership.Role.LEADER,
+            ).values_list("branch__code", flat=True)
+        )
+
+    def _aggregate(self, queryset, waiting_field="created_at"):
+        return queryset.aggregate(
+            count=models.Count("id"),
+            oldest=models.Min(waiting_field),
+        )
+
+    def _category(self, *, key, label, description, queryset, statuses, owner, urgent_count=0, urgency="normal"):
+        aggregate = self._aggregate(queryset)
+        return {
+            "key": key,
+            "label": label,
+            "description": description,
+            "count": aggregate["count"] or 0,
+            "urgent_count": urgent_count,
+            "oldest_waiting_since": aggregate["oldest"],
+            "available": True,
+            "owner": owner,
+            "urgency": urgency if urgent_count else "normal",
+            "included_statuses": list(statuses),
+        }
+
+    def _top_item(self, *, key, category_key, category_label, reference, reason, status_value, waiting_since, destination, priority):
+        return {
+            "key": key,
+            "category_key": category_key,
+            "category_label": category_label,
+            "reference": reference,
+            "reason": reason,
+            "status": status_value,
+            "waiting_since": waiting_since,
+            "destination": destination,
+            "priority": priority,
+        }
+
+    def _cycle_count_rows(self, request, branch_codes):
+        leader_codes = self._leader_branch_codes(request, branch_codes)
+        if not leader_codes:
+            return [], leader_codes
+        builder = CycleCountReviewQueueViewSet()
+        return builder._build_rows(leader_codes), leader_codes
+
+    def _summary_response(self, request):
+        requested_branch = request.query_params.get("branch", "").strip()
+        branch_codes = branch_codes_filter(request.user, requested_branch)
+
+        picking_shortage_statuses = [PickingShortage.Status.OPEN]
+        transfer_discrepancy_statuses = [TransferDiscrepancy.Status.OPEN, TransferDiscrepancy.Status.INVESTIGATING]
+        source_review_statuses = [
+            TransferDiscrepancySourceReview.Status.PENDING_REVIEW,
+            TransferDiscrepancySourceReview.Status.INVESTIGATING,
+        ]
+        reconciliation_statuses = [
+            TransferDiscrepancyReconciliation.Status.PENDING_ACTION,
+            TransferDiscrepancyReconciliation.Status.IN_PROGRESS,
+            TransferDiscrepancyReconciliation.Status.MANUAL_ACTION_REQUIRED,
+        ]
+        source_stock_statuses = [
+            TransferDiscrepancySourceStockVerification.Status.PENDING_VERIFICATION,
+            TransferDiscrepancySourceStockVerification.Status.INVESTIGATING,
+        ]
+        replenishment_statuses = [ReplenishmentRequest.Status.PENDING_ORDER]
+
+        picking_shortages = PickingShortage.objects.filter(
+            branch__code__in=branch_codes,
+            status__in=picking_shortage_statuses,
+        )
+        discrepancies = TransferDiscrepancy.objects.filter(
+            transfer__destination_branch__code__in=branch_codes,
+            status__in=transfer_discrepancy_statuses,
+        )
+        source_reviews = TransferDiscrepancySourceReview.objects.filter(
+            source_branch__code__in=branch_codes,
+            status__in=source_review_statuses,
+        )
+        reconciliations = TransferDiscrepancyReconciliation.objects.filter(
+            discrepancy__transfer__destination_branch__code__in=branch_codes,
+            status__in=reconciliation_statuses,
+        ) | TransferDiscrepancyReconciliation.objects.filter(
+            discrepancy__transfer__source_branch__code__in=branch_codes,
+            status__in=reconciliation_statuses,
+        )
+        source_stock = TransferDiscrepancySourceStockVerification.objects.filter(
+            reconciliation__discrepancy__transfer__source_branch__code__in=branch_codes,
+            status__in=source_stock_statuses,
+        )
+        replenishment = ReplenishmentRequest.objects.filter(
+            branch__code__in=branch_codes,
+            status__in=replenishment_statuses,
+        )
+
+        manual_reconciliation_count = reconciliations.filter(
+            status=TransferDiscrepancyReconciliation.Status.MANUAL_ACTION_REQUIRED,
+        ).count()
+
+        action_rows = filter_rows_for_user(build_transfer_discrepancy_action_queue(), request.user, requested_branch)
+        action_waiting = [row.get("waiting_since") or row.get("created_at") for row in action_rows]
+        action_category = {
+            "key": "action_queue",
+            "label": "Action Queue",
+            "description": "Next transfer-discrepancy actions generated by the existing workflow queue.",
+            "count": len(action_rows),
+            "urgent_count": sum(1 for row in action_rows if row.get("action_type") == "record_final_reconciliation_outcome"),
+            "oldest_waiting_since": min(action_waiting) if action_waiting else None,
+            "available": True,
+            "owner": "Transfer discrepancy workflow",
+            "urgency": "high" if any(row.get("action_type") == "record_final_reconciliation_outcome" for row in action_rows) else "normal",
+            "included_statuses": ["derived_open_actions"],
+        }
+
+        cycle_rows, leader_codes = self._cycle_count_rows(request, branch_codes)
+        cycle_waiting = [row.get("waiting_since") for row in cycle_rows if row.get("waiting_since")]
+        cycle_urgent = sum(
+            1
+            for row in cycle_rows
+            if row.get("item_type") in ["stale_variance", "recount_waiting_review", "accepted_recount_pending_reconciliation"]
+        )
+
+        categories = [
+            self._category(
+                key="picking_shortages",
+                label="Picking Shortages",
+                description="Open scanner-reported picking shortages waiting for stock search or confirmation.",
+                queryset=picking_shortages,
+                statuses=picking_shortage_statuses,
+                owner="Picking workflow",
+            ),
+            self._category(
+                key="transfer_discrepancies",
+                label="Transfer Discrepancies",
+                description="Destination transfer discrepancies still being reviewed before source ownership is decided.",
+                queryset=discrepancies,
+                statuses=transfer_discrepancy_statuses,
+                owner="Transfer receiving workflow",
+            ),
+            self._category(
+                key="source_reviews",
+                label="Source Reviews",
+                description="Source-branch reviews for confirmed transfer shortages.",
+                queryset=source_reviews,
+                statuses=source_review_statuses,
+                owner="Source investigation workflow",
+            ),
+            self._category(
+                key="reconciliations",
+                label="Reconciliations",
+                description="Transfer discrepancy reconciliations waiting for acknowledgment, investigation or final action.",
+                queryset=reconciliations.distinct(),
+                statuses=reconciliation_statuses,
+                owner="Reconciliation workflow",
+                urgent_count=manual_reconciliation_count,
+                urgency="high",
+            ),
+            self._category(
+                key="source_stock",
+                label="Source Stock",
+                description="Source stock verifications still pending or under investigation.",
+                queryset=source_stock,
+                statuses=source_stock_statuses,
+                owner="Source stock verification workflow",
+            ),
+            self._category(
+                key="replenishment",
+                label="Replenishment",
+                description="Customer replenishment requests still waiting for an external order.",
+                queryset=replenishment,
+                statuses=replenishment_statuses,
+                owner="Replenishment workflow",
+            ),
+            action_category,
+        ]
+
+        if leader_codes:
+            categories.append({
+                "key": "cycle_count_review",
+                "label": "Cycle Count Review",
+                "description": "Leader review items from the dedicated Cycle Count Review Queue.",
+                "count": len(cycle_rows),
+                "urgent_count": cycle_urgent,
+                "oldest_waiting_since": min(cycle_waiting) if cycle_waiting else None,
+                "available": True,
+                "owner": "Cycle Count review workflow",
+                "urgency": "high" if cycle_urgent else "normal",
+                "included_statuses": ["review_queue_items"],
+            })
+
+        top_items = []
+        for shortage in picking_shortages.select_related("product").order_by("reported_at")[:3]:
+            top_items.append(self._top_item(
+                key=f"picking-shortage-{shortage.id}",
+                category_key="picking_shortages",
+                category_label="Picking Shortages",
+                reference=shortage.reference or f"Picking shortage {shortage.id}",
+                reason=f"{shortage.product.sku} shortage remains open",
+                status_value=shortage.status,
+                waiting_since=shortage.reported_at,
+                destination="/wms/picking-shortages",
+                priority=40,
+            ))
+
+        for reconciliation in reconciliations.select_related("discrepancy").filter(
+            status=TransferDiscrepancyReconciliation.Status.MANUAL_ACTION_REQUIRED,
+        ).order_by("updated_at")[:3]:
+            top_items.append(self._top_item(
+                key=f"reconciliation-{reconciliation.id}",
+                category_key="reconciliations",
+                category_label="Reconciliations",
+                reference=reconciliation.reference or f"Reconciliation {reconciliation.id}",
+                reason="Manual reconciliation action required",
+                status_value=reconciliation.status,
+                waiting_since=reconciliation.updated_at,
+                destination=f"/wms/discrepancy-reconciliations/{reconciliation.id}",
+                priority=20,
+            ))
+
+        for row in sorted(cycle_rows, key=lambda item: (item["priority"], item.get("waiting_since") or timezone.now()))[:4]:
+            if row["item_type"] in ["stale_variance", "recount_waiting_review", "accepted_recount_pending_reconciliation"]:
+                top_items.append(self._top_item(
+                    key=f"cycle-count-{row['key']}",
+                    category_key="cycle_count_review",
+                    category_label="Cycle Count Review",
+                    reference=row["session_reference"],
+                    reason=row["item_type_label"],
+                    status_value=row["item_type"],
+                    waiting_since=row.get("waiting_since"),
+                    destination=row["detail_url"],
+                    priority=row["priority"],
+                ))
+
+        top_items = sorted(
+            top_items,
+            key=lambda item: (item["priority"], item["waiting_since"] or timezone.now()),
+        )[:8]
+        visible_categories = [category for category in categories if category["available"]]
+        oldest_values = [category["oldest_waiting_since"] for category in visible_categories if category["oldest_waiting_since"]]
+        data = {
+            "total_actionable": sum(category["count"] for category in visible_categories),
+            "active_categories": sum(1 for category in visible_categories if category["count"] > 0),
+            "leader_only_count": len(cycle_rows),
+            "oldest_waiting_since": min(oldest_values) if oldest_values else None,
+            "categories": visible_categories,
+            "immediate_attention": top_items,
+        }
+        serializer = self.serializer_class(data)
+        return Response(serializer.data)
+
+    def list(self, request):
+        return self._summary_response(request)
+
+    @action(detail=False, methods=["get"])
+    def summary(self, request):
+        return self._summary_response(request)
 
 
 class CycleCountReviewQueueViewSet(ViewSet):

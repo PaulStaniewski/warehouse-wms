@@ -8,6 +8,7 @@ import type {
   AuditLog,
   CycleCountSession,
   CycleCountReviewQueueResponse,
+  InventoryExceptionSummary,
   InventoryItem,
   InterBranchArrivalResponse,
   InterBranchMMTask,
@@ -1871,6 +1872,19 @@ export function useReplenishmentRequests(branch?: string, filters: Replenishment
       if (filters.order) params.set("order", filters.order);
       const query = params.toString();
       return getList<ReplenishmentRequest>(`/replenishment-requests/${query ? `?${query}` : ""}`);
+    },
+  });
+}
+
+export function useInventoryExceptionSummary(branch?: string) {
+  return useQuery({
+    enabled: Boolean(branch),
+    queryKey: ["inventory-exceptions", "summary", branch],
+    queryFn: async () => {
+      const params = new URLSearchParams();
+      if (branch) params.set("branch", branch);
+      const response = await apiClient.get<InventoryExceptionSummary>(`/inventory-exceptions/summary/?${params.toString()}`);
+      return response.data;
     },
   });
 }
