@@ -143,6 +143,19 @@ class BranchMembershipAuthorizationTests(APITestCase):
         self.assertEqual(response.data[0]["branch_code"], "GDY")
         self.assertEqual(response.data[0]["role"], "worker")
 
+    def test_authenticated_operational_api_endpoints_reject_anonymous_access(self):
+        for path in [
+            "/api/stock-movements/",
+            "/api/cycle-counts/",
+            "/api/inventory-exceptions/",
+            "/api/transport-overview/",
+            "/api/cycle-count-review-queue/",
+            "/api/scanner/cycle-counts/",
+        ]:
+            with self.subTest(path=path):
+                response = self.client.get(path)
+                self.assertIn(response.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
     def test_branch_scoped_locations_reject_unrelated_authenticated_branch(self):
         self.client.force_authenticate(self.gdy_worker)
 
@@ -6765,13 +6778,26 @@ class SeedDemoDataCommandTests(APITestCase):
         call_command("seed_demo_data", stdout=output)
         return output.getvalue()
 
-    def available_route_ids(self):
+    def available_routes(self):
         response = self.client.get("/api/scanner/proformas/")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        return [row["id"] for row in response.data["results"] if row["is_selectable"]]
+        return [row for row in response.data["results"] if row["is_selectable"]]
+
+    def available_route_ids(self):
+        return [row["id"] for row in self.available_routes()]
+
+    def available_route_ids_for_same_branch(self, count=2):
+        routes_by_branch = {}
+        for route in self.available_routes():
+            routes_by_branch.setdefault(route["branch_code"], []).append(route["id"])
+        for route_ids in routes_by_branch.values():
+            if len(route_ids) >= count:
+                return route_ids[:count]
+        return []
 
     def start_demo_job(self):
-        route_ids = self.available_route_ids()[:2]
+        route_ids = self.available_route_ids_for_same_branch()
+        self.assertGreaterEqual(len(route_ids), 2)
         response = self.client.post(
             "/api/scanner/proformas/create-jobs/",
             {"route_run_ids": route_ids, "mode": "merged", "worker_code": "DEMO"},

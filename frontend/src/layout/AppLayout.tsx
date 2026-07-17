@@ -98,7 +98,7 @@ const wmsNavSections: NavSection[] = [
       { to: "/wms/stock-transfers", label: "Stock Transfers", icon: Boxes },
       { to: "/wms/stock-adjustments", label: "Stock Adjustments", icon: ClipboardList },
       { to: "/wms/cycle-counts", label: "Cycle Counts", icon: ClipboardCheck },
-      { to: "/wms/cycle-count-review-queue", label: "Review Queue", icon: ListChecks },
+      { to: "/wms/cycle-count-review-queue", label: "Review Queue", icon: ListChecks, minimumRole: "leader" },
     ],
   },
   {

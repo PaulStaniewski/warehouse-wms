@@ -109,6 +109,17 @@ describe("application routing and layouts", () => {
     expect(within(nav).getByRole("link", { name: /Open Scanner/i })).toBeInTheDocument();
   });
 
+  it("hides Leader-only WMS navigation items from Workers", async () => {
+    setViewport(false);
+    mockApiDefaults({ memberships: [branchMembership("worker")] });
+
+    renderWithProviders(<App />, { route: "/wms/dashboard" });
+
+    const nav = await screen.findByRole("navigation", { name: "WMS navigation" });
+    expect(within(nav).queryByRole("link", { name: /Review Queue/i })).not.toBeInTheDocument();
+    expect(within(nav).getByRole("button", { name: /Inventory Operations/i })).toBeInTheDocument();
+  });
+
   it("uses persisted active branch in WMS and Scanner shells", async () => {
     localStorage.setItem("warehouse-wms-active-branch", "GDA");
     setViewport(false);
