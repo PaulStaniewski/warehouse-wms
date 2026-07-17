@@ -6,7 +6,7 @@ from unittest.mock import patch
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, models, transaction
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -5214,6 +5214,365 @@ class ScannerLookupAndQuickTransferTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
         self.assertFalse(StockMovement.objects.exists())
+
+
+class CriticalQuickTransferIntegrationTests(APITestCase):
+    def setUp(self):
+        self.branch = Branch.objects.create(code="QTI", name="Quick Transfer Integration", city="Gdynia", country="Poland")
+        self.other_branch = Branch.objects.create(code="QTO", name="Other Transfer Branch", city="Gdansk", country="Poland")
+        self.worker = create_branch_user("QTI_WORKER", self.branch)
+        self.other_worker = create_branch_user("QTO_WORKER", self.other_branch)
+        self.source_location = Location.objects.create(
+            branch=self.branch,
+            code="QT-SRC",
+            name="Quick transfer source",
+            location_type=Location.LocationType.STORAGE,
+        )
+        self.target_location = Location.objects.create(
+            branch=self.branch,
+            code="QT-DST",
+            name="Quick transfer destination",
+            location_type=Location.LocationType.PICKING,
+        )
+        self.cross_branch_location = Location.objects.create(
+            branch=self.other_branch,
+            code="QTO-DST",
+            name="Other branch destination",
+            location_type=Location.LocationType.PICKING,
+        )
+        self.product = Product.objects.create(
+            sku="QT-001",
+            name="Quick Transfer Product",
+            barcode="881000000001",
+            unit_of_measure="pcs",
+        )
+        self.source_item = InventoryItem.objects.create(
+            branch=self.branch,
+            location=self.source_location,
+            product=self.product,
+            quantity_on_hand=Decimal("10"),
+            quantity_reserved=Decimal("0"),
+        )
+
+    def quick_transfer_payload(self, **overrides):
+        payload = {
+            "source_location_code": self.source_location.code,
+            "target_location_code": self.target_location.code,
+            "product_code": self.product.barcode,
+            "quantity": "3",
+            "client_operation_id": "qt-integration-001",
+        }
+        payload.update(overrides)
+        return payload
+
+    def post_quick_transfer(self, **overrides):
+        return self.client.post("/api/scanner/quick-transfer/", self.quick_transfer_payload(**overrides), format="json")
+
+    def test_quick_transfer_updates_inventory_history_events_and_is_idempotent(self):
+        unauthenticated = self.post_quick_transfer()
+        self.client.force_authenticate(self.worker)
+        first = self.post_quick_transfer()
+        duplicate = self.post_quick_transfer()
+
+        self.assertEqual(unauthenticated.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(duplicate.status_code, status.HTTP_200_OK)
+        self.assertEqual(first.data["movement_id"], duplicate.data["movement_id"])
+
+        self.source_item.refresh_from_db()
+        target_item = InventoryItem.objects.get(branch=self.branch, location=self.target_location, product=self.product)
+        self.assertEqual(self.source_item.quantity_on_hand, Decimal("7.000"))
+        self.assertEqual(target_item.quantity_on_hand, Decimal("3.000"))
+        self.assertEqual(
+            InventoryItem.objects.filter(branch=self.branch, product=self.product).aggregate(total=models.Sum("quantity_on_hand"))["total"],
+            Decimal("10.000"),
+        )
+
+        movement = StockMovement.objects.get(pk=first.data["movement_id"])
+        self.assertEqual(movement.movement_type, StockMovement.MovementType.TRANSFER)
+        self.assertEqual(movement.reference, "SCANNER-TRANSFER-qt-integration-001")
+        self.assertEqual(movement.performed_by, self.worker)
+        self.assertEqual(movement.quantity_before, Decimal("10.000"))
+        self.assertEqual(movement.quantity_after, Decimal("7.000"))
+        self.assertEqual(StockMovement.objects.count(), 1)
+
+        history = self.client.get("/api/stock-movements/", {"branch": "QTI", "movement_type": StockMovement.MovementType.TRANSFER})
+        detail = self.client.get(f"/api/stock-movements/{movement.id}/")
+        events = self.client.get("/api/current-events/", {"branch": "QTI", "search": "quick transfer"})
+
+        self.assertEqual(history.status_code, status.HTTP_200_OK)
+        self.assertEqual(history.data["results"][0]["id"], movement.id)
+        self.assertEqual(history.data["results"][0]["origin"], "Scanner Quick Transfer")
+        self.assertEqual(detail.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail.data["source_location_code"], self.source_location.code)
+        self.assertEqual(detail.data["destination_location_code"], self.target_location.code)
+        self.assertEqual(events.status_code, status.HTTP_200_OK)
+        self.assertTrue(any(event["event_type"] == "scanner_quick_transfer" for event in events.data["results"]))
+
+        self.client.force_authenticate(self.other_worker)
+        forbidden_detail = self.client.get(f"/api/stock-movements/{movement.id}/")
+        self.assertEqual(forbidden_detail.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_quick_transfer_validation_rolls_back_without_history_or_success_event(self):
+        self.client.force_authenticate(self.worker)
+
+        same_location = self.post_quick_transfer(target_location_code=self.source_location.code, client_operation_id="qt-bad-same")
+        cross_branch = self.post_quick_transfer(target_location_code=self.cross_branch_location.code, client_operation_id="qt-bad-branch")
+        insufficient = self.post_quick_transfer(quantity="99", client_operation_id="qt-bad-stock")
+
+        self.assertEqual(same_location.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(cross_branch.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(insufficient.status_code, status.HTTP_400_BAD_REQUEST)
+        self.source_item.refresh_from_db()
+        self.assertEqual(self.source_item.quantity_on_hand, Decimal("10.000"))
+        self.assertFalse(InventoryItem.objects.filter(location=self.target_location, product=self.product).exists())
+        self.assertFalse(StockMovement.objects.exists())
+        self.assertFalse(AuditLog.objects.filter(event_type="scanner_quick_transfer").exists())
+
+        self.client.force_authenticate(self.other_worker)
+        forbidden = self.post_quick_transfer(client_operation_id="qt-bad-auth")
+        self.assertEqual(forbidden.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class CriticalCycleCountIntegrationTests(APITestCase):
+    def setUp(self):
+        self.branch = Branch.objects.create(code="CCI", name="Cycle Count Integration", city="Gdynia", country="Poland")
+        self.other_branch = Branch.objects.create(code="CCX", name="Other Count Branch", city="Gdansk", country="Poland")
+        self.leader = create_branch_user("CCI_LEADER", self.branch, UserBranchMembership.Role.LEADER)
+        self.worker = create_branch_user("CCI_WORKER", self.branch)
+        self.other_leader = create_branch_user("CCX_LEADER", self.other_branch, UserBranchMembership.Role.LEADER)
+        self.location = Location.objects.create(
+            branch=self.branch,
+            code="CCI-01",
+            name="Integration count location",
+            location_type=Location.LocationType.STORAGE,
+        )
+        self.other_location = Location.objects.create(
+            branch=self.other_branch,
+            code="CCX-01",
+            name="Other count location",
+            location_type=Location.LocationType.STORAGE,
+        )
+        self.product = Product.objects.create(sku="CCI-001", name="Cycle Count Product", barcode="882000000001")
+        self.inventory = InventoryItem.objects.create(
+            branch=self.branch,
+            location=self.location,
+            product=self.product,
+            quantity_on_hand=Decimal("5"),
+            quantity_reserved=Decimal("0"),
+        )
+
+    def create_and_open_session(self):
+        self.client.force_authenticate(self.leader)
+        created = self.client.post(
+            "/api/cycle-counts/",
+            {
+                "branch": self.branch.code,
+                "location_ids": [self.location.id],
+                "name": "Critical workflow count",
+                "note": "Integration scenario.",
+            },
+            format="json",
+        )
+        self.assertEqual(created.status_code, status.HTTP_201_CREATED)
+        opened = self.client.post(f"/api/cycle-counts/{created.data['id']}/open/", {}, format="json")
+        self.assertEqual(opened.status_code, status.HTTP_200_OK)
+        return CycleCountSession.objects.get(pk=created.data["id"])
+
+    def scanner_count_and_submit(self, session, quantity):
+        self.client.force_authenticate(self.worker)
+        detail = self.client.get(f"/api/scanner/cycle-counts/{session.id}/")
+        self.assertEqual(detail.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail.data["locations"][0]["lines"], [])
+        self.assertNotIn("expected_quantity", str(detail.data))
+        counted = self.client.post(
+            f"/api/scanner/cycle-counts/{session.id}/locations/{self.location.id}/count/",
+            {"product_code": self.product.sku, "quantity": str(quantity)},
+            format="json",
+        )
+        submitted = self.client.post(
+            f"/api/scanner/cycle-counts/{session.id}/locations/{self.location.id}/submit/",
+            {"confirm_zeroes": False},
+            format="json",
+        )
+        self.assertEqual(counted.status_code, status.HTTP_200_OK)
+        self.assertEqual(submitted.status_code, status.HTTP_200_OK)
+        return CycleCountLine.objects.get(session=session, product=self.product)
+
+    def test_cycle_count_safe_variance_flows_from_scanner_to_review_adjustment_and_events(self):
+        anonymous_create = self.client.post(
+            "/api/cycle-counts/",
+            {"branch": self.branch.code, "location_ids": [self.location.id]},
+            format="json",
+        )
+        self.client.force_authenticate(self.worker)
+        worker_create = self.client.post(
+            "/api/cycle-counts/",
+            {"branch": self.branch.code, "location_ids": [self.location.id]},
+            format="json",
+        )
+        session = self.create_and_open_session()
+        line = self.scanner_count_and_submit(session, "7")
+        snapshot_expected = line.expected_quantity
+
+        self.assertEqual(anonymous_create.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(worker_create.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(snapshot_expected, Decimal("5.000"))
+        self.assertEqual(line.counted_quantity, Decimal("7.000"))
+        self.assertEqual(line.reconciliation_status, CycleCountLine.ReconciliationStatus.PENDING_REVIEW)
+
+        self.client.force_authenticate(self.worker)
+        worker_adjust = self.client.post(f"/api/cycle-counts/{session.id}/lines/{line.id}/apply-adjustment/", {}, format="json")
+        self.client.force_authenticate(self.other_leader)
+        other_detail = self.client.get(f"/api/cycle-counts/{session.id}/")
+        self.client.force_authenticate(self.leader)
+        review_queue = self.client.get("/api/cycle-count-review-queue/", {"branch": self.branch.code})
+        close_before_reconcile = self.client.post(f"/api/cycle-counts/{session.id}/close/", {}, format="json")
+        adjusted = self.client.post(
+            f"/api/cycle-counts/{session.id}/lines/{line.id}/apply-adjustment/",
+            {"note": "Integration count confirmed surplus."},
+            format="json",
+        )
+        duplicate_adjust = self.client.post(f"/api/cycle-counts/{session.id}/lines/{line.id}/apply-adjustment/", {}, format="json")
+        movement_count = StockMovement.objects.count()
+        closed = self.client.post(f"/api/cycle-counts/{session.id}/close/", {}, format="json")
+
+        self.assertEqual(worker_adjust.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(other_detail.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(review_queue.status_code, status.HTTP_200_OK)
+        self.assertTrue(any(row["line"] == line.id for row in review_queue.data["results"]))
+        self.assertEqual(close_before_reconcile.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(adjusted.status_code, status.HTTP_200_OK)
+        self.assertEqual(duplicate_adjust.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(closed.status_code, status.HTTP_200_OK)
+        self.assertEqual(StockMovement.objects.count(), movement_count)
+
+        self.inventory.refresh_from_db()
+        line.refresh_from_db()
+        movement = StockMovement.objects.get(cycle_count_line=line)
+        self.assertEqual(self.inventory.quantity_on_hand, Decimal("7.000"))
+        self.assertEqual(line.expected_quantity, snapshot_expected)
+        self.assertEqual(line.reconciliation_status, CycleCountLine.ReconciliationStatus.ADJUSTMENT_APPLIED)
+        self.assertEqual(movement.quantity_before, Decimal("5.000"))
+        self.assertEqual(movement.quantity_after, Decimal("7.000"))
+        self.assertEqual(movement.adjustment_reason, StockMovement.AdjustmentReason.COUNT_CORRECTION)
+
+        stock_adjustments = self.client.get("/api/stock-adjustments/", {"branch": self.branch.code})
+        cycle_detail = self.client.get(f"/api/cycle-counts/{session.id}/")
+        review_queue_after = self.client.get("/api/cycle-count-review-queue/", {"branch": self.branch.code})
+        events = self.client.get("/api/current-events/", {"branch": self.branch.code, "search": session.reference})
+
+        self.assertEqual(stock_adjustments.status_code, status.HTTP_200_OK)
+        self.assertEqual(stock_adjustments.data["results"][0]["id"], movement.id)
+        self.assertEqual(cycle_detail.data["status"], CycleCountSession.Status.CLOSED)
+        self.assertFalse(any(row["line"] == line.id for row in review_queue_after.data["results"]))
+        event_types = {event["event_type"] for event in events.data["results"]}
+        self.assertTrue(
+            {
+                "cycle_count_created",
+                "cycle_count_opened",
+                "cycle_count_location_submitted",
+                "cycle_count_variance_adjustment_applied",
+                "cycle_count_closed",
+            }.issubset(event_types)
+        )
+
+    def test_cycle_count_recount_uses_new_blind_evidence_and_blocks_stale_recount(self):
+        session = self.create_and_open_session()
+        line = self.scanner_count_and_submit(session, "7")
+        StockMovement.objects.create(
+            branch=self.branch,
+            product=self.product,
+            inventory_item=self.inventory,
+            source_location=self.location,
+            movement_type=StockMovement.MovementType.PICK,
+            quantity=Decimal("1"),
+            reference="CCI-POST-SNAPSHOT",
+        )
+
+        self.client.force_authenticate(self.leader)
+        stale_original = self.client.post(f"/api/cycle-counts/{session.id}/lines/{line.id}/apply-adjustment/", {}, format="json")
+        requested = self.client.post(
+            f"/api/cycle-counts/{session.id}/lines/{line.id}/request-recount/",
+            {"reason": "Movement occurred after the original count snapshot."},
+            format="json",
+        )
+        recount = CycleCountRecount.objects.get(original_line=line)
+        blocked_original = self.client.post(f"/api/cycle-counts/{session.id}/lines/{line.id}/apply-adjustment/", {}, format="json")
+
+        self.assertEqual(stale_original.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(requested.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(blocked_original.status_code, status.HTTP_409_CONFLICT)
+
+        self.client.force_authenticate(self.worker)
+        recount_detail = self.client.get(f"/api/scanner/cycle-count-recounts/{recount.id}/")
+        self.assertEqual(recount_detail.status_code, status.HTTP_200_OK)
+        self.assertNotIn("baseline_quantity", recount_detail.data)
+        self.assertIsNone(recount_detail.data["counted_quantity"])
+        submitted = self.client.post(
+            f"/api/scanner/cycle-count-recounts/{recount.id}/submit/",
+            {"location_code": self.location.code, "product_code": self.product.sku, "quantity": "6"},
+            format="json",
+        )
+        self.assertEqual(submitted.status_code, status.HTTP_200_OK)
+
+        self.client.force_authenticate(self.leader)
+        accepted = self.client.post(
+            f"/api/cycle-counts/{session.id}/recounts/{recount.id}/accept/",
+            {"note": "Accepted integration recount evidence."},
+            format="json",
+        )
+        adjusted = self.client.post(f"/api/cycle-counts/{session.id}/lines/{line.id}/apply-adjustment/", {}, format="json")
+        duplicate_adjust = self.client.post(f"/api/cycle-counts/{session.id}/lines/{line.id}/apply-adjustment/", {}, format="json")
+        closed = self.client.post(f"/api/cycle-counts/{session.id}/close/", {}, format="json")
+
+        self.assertEqual(accepted.status_code, status.HTTP_200_OK)
+        self.assertEqual(adjusted.status_code, status.HTTP_200_OK)
+        self.assertEqual(duplicate_adjust.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(closed.status_code, status.HTTP_200_OK)
+        self.inventory.refresh_from_db()
+        recount.refresh_from_db()
+        line.refresh_from_db()
+        movement = StockMovement.objects.get(cycle_count_line=line)
+        self.assertEqual(self.inventory.quantity_on_hand, Decimal("6.000"))
+        self.assertEqual(recount.status, CycleCountRecount.Status.ACCEPTED)
+        self.assertEqual(movement.cycle_count_recount, recount)
+        self.assertEqual(StockMovement.objects.filter(cycle_count_line=line, movement_type=StockMovement.MovementType.ADJUSTMENT).count(), 1)
+
+        events = self.client.get("/api/current-events/", {"branch": self.branch.code, "search": recount.reference})
+        event_types = {event["event_type"] for event in events.data["results"]}
+        self.assertTrue({"cycle_count_recount_requested", "cycle_count_recount_submitted", "cycle_count_recount_accepted"}.issubset(event_types))
+
+        stale_session = self.create_and_open_session()
+        stale_line = self.scanner_count_and_submit(stale_session, "7")
+        self.client.force_authenticate(self.leader)
+        self.client.post(
+            f"/api/cycle-counts/{stale_session.id}/lines/{stale_line.id}/request-recount/",
+            {"reason": "Create a stale recount baseline."},
+            format="json",
+        )
+        stale_recount = CycleCountRecount.objects.get(original_line=stale_line)
+        StockMovement.objects.create(
+            branch=self.branch,
+            product=self.product,
+            inventory_item=self.inventory,
+            destination_location=self.location,
+            movement_type=StockMovement.MovementType.RECEIPT,
+            quantity=Decimal("1"),
+            reference="CCI-POST-RECOUNT-BASELINE",
+        )
+        self.client.force_authenticate(self.worker)
+        self.client.post(
+            f"/api/scanner/cycle-count-recounts/{stale_recount.id}/submit/",
+            {"location_code": self.location.code, "product_code": self.product.sku, "quantity": "8"},
+            format="json",
+        )
+        self.client.force_authenticate(self.leader)
+        stale_accept = self.client.post(f"/api/cycle-counts/{stale_session.id}/recounts/{stale_recount.id}/accept/", {}, format="json")
+
+        self.assertEqual(stale_accept.status_code, status.HTTP_409_CONFLICT)
+        stale_recount.refresh_from_db()
+        self.assertTrue(stale_recount.movement_after_baseline)
 
 
 class ScannerPickingJobWorkflowTests(APITestCase):

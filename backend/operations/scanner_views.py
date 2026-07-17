@@ -3470,6 +3470,7 @@ class ScannerQuickTransferView(APIView):
         product_code = str(request.data.get("product_code", "")).strip()
         target_location_code = str(request.data.get("target_location_code", "")).strip()
         quantity_value = request.data.get("quantity", 1)
+        client_operation_id = str(request.data.get("client_operation_id", "")).strip()
 
         if not source_location_code:
             return Response({"detail": "source_location_code is required."}, status=status.HTTP_400_BAD_REQUEST)
@@ -3514,6 +3515,45 @@ class ScannerQuickTransferView(APIView):
             if product is None:
                 return Response({"detail": "Product not found."}, status=status.HTTP_404_NOT_FOUND)
 
+            reference = (
+                f"SCANNER-TRANSFER-{client_operation_id}"
+                if client_operation_id
+                else f"SCANNER-TRANSFER-{source_location.code}-{target_location.code}"
+            )
+            if client_operation_id:
+                existing_movement = (
+                    StockMovement.objects.select_related("source_location", "destination_location", "product")
+                    .filter(
+                        branch=source_location.branch,
+                        product=product,
+                        source_location=source_location,
+                        destination_location=target_location,
+                        movement_type=StockMovement.MovementType.TRANSFER,
+                        reference=reference,
+                    )
+                    .first()
+                )
+                if existing_movement is not None:
+                    source_item = (
+                        InventoryItem.objects.select_for_update()
+                        .filter(branch=source_location.branch, location=source_location, product=product)
+                        .first()
+                    )
+                    target_item = (
+                        InventoryItem.objects.select_for_update()
+                        .filter(branch=target_location.branch, location=target_location, product=product)
+                        .first()
+                    )
+                    return Response(
+                        {
+                            "message": "Quick transfer already completed.",
+                            "movement_id": existing_movement.id,
+                            "source_inventory": _inventory_position_data(source_item) if source_item else None,
+                            "target_inventory": _inventory_position_data(target_item) if target_item else None,
+                        },
+                        status=status.HTTP_200_OK,
+                    )
+
             source_item = (
                 InventoryItem.objects.select_for_update()
                 .filter(branch=source_location.branch, location=source_location, product=product)
@@ -3535,6 +3575,8 @@ class ScannerQuickTransferView(APIView):
                 defaults={"quantity_on_hand": Decimal("0"), "quantity_reserved": Decimal("0")},
             )
 
+            source_before = source_item.quantity_on_hand
+            source_after = source_before - quantity
             source_item.quantity_on_hand = F("quantity_on_hand") - quantity
             source_item.save(update_fields=["quantity_on_hand", "updated_at"])
 
@@ -3549,7 +3591,9 @@ class ScannerQuickTransferView(APIView):
                 destination_location=target_location,
                 movement_type=StockMovement.MovementType.TRANSFER,
                 quantity=quantity,
-                reference=f"SCANNER-TRANSFER-{source_location.code}-{target_location.code}",
+                quantity_before=source_before,
+                quantity_after=source_after,
+                reference=reference,
                 performed_by=request.user if request.user.is_authenticated else None,
             )
             AuditLog.objects.create(
