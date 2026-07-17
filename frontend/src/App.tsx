@@ -33,6 +33,8 @@ import { RouteDocumentsPage } from "./pages/RouteDocumentsPage";
 import { ScannerContentsPage } from "./pages/ScannerContentsPage";
 import { ScannerControlPage } from "./pages/ScannerControlPage";
 import { ScannerCycleCountDetailPage } from "./pages/ScannerCycleCountDetailPage";
+import { ScannerCycleCountRecountDetailPage } from "./pages/ScannerCycleCountRecountDetailPage";
+import { ScannerCycleCountRecountsPage } from "./pages/ScannerCycleCountRecountsPage";
 import { ScannerCycleCountsPage } from "./pages/ScannerCycleCountsPage";
 import { ScannerHomePage } from "./pages/ScannerHomePage";
 import { ScannerLocationLookupPage } from "./pages/ScannerLocationLookupPage";
@@ -261,6 +263,8 @@ function App() {
             <Route path="scanner/inter-branch-arrivals" element={<ScannerInterBranchArrivalsPage />} />
             <Route path="scanner/cycle-counts" element={<ScannerCycleCountsPage />} />
             <Route path="scanner/cycle-counts/:id" element={<ScannerCycleCountDetailPage />} />
+            <Route path="scanner/cycle-count-recounts" element={<ScannerCycleCountRecountsPage />} />
+            <Route path="scanner/cycle-count-recounts/:id" element={<ScannerCycleCountRecountDetailPage />} />
             <Route path="scanner/routes" element={<Navigate to="/scanner/proformas" replace />} />
             <Route path="scanner/route-runs/:id/picking" element={<Navigate to="/scanner/picking" replace />} />
             <Route path="scanner/route-runs/:id/control" element={<Navigate to="/scanner/control" replace />} />

@@ -22,6 +22,7 @@ from operations.models import (
     CartWorkSession,
     CycleCountLine,
     CycleCountLocation,
+    CycleCountRecount,
     CycleCountSession,
     DeliveryRoute,
     InterBranchTransfer,
@@ -885,6 +886,155 @@ class CycleCountWorkflowTests(APITestCase):
         self.assertEqual(closed.status_code, status.HTTP_200_OK)
         self.assertEqual(closed.data["status"], CycleCountSession.Status.CLOSED)
         self.assertEqual(StockMovement.objects.count(), movement_count)
+
+    def test_recount_request_requires_leader_reason_and_blocks_original_reconciliation(self):
+        session, line = self.submit_counted_session("7")
+        url = f"/api/cycle-counts/{session.id}/lines/{line.id}/request-recount/"
+
+        missing_reason = self.client.post(url, {"reason": ""}, format="json")
+        self.client.force_authenticate(self.worker)
+        worker = self.client.post(url, {"reason": "Worker cannot request this."}, format="json")
+        self.client.force_authenticate(self.other_leader)
+        other_leader = self.client.post(url, {"reason": "Other branch cannot request this."}, format="json")
+        self.client.force_authenticate(self.leader)
+        created = self.client.post(url, {"reason": "Movement conflict requires second physical count."}, format="json")
+        duplicate = self.client.post(url, {"reason": "Duplicate request."}, format="json")
+        apply_blocked = self.client.post(f"/api/cycle-counts/{session.id}/lines/{line.id}/apply-adjustment/", {}, format="json")
+
+        self.assertEqual(missing_reason.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(worker.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(other_leader.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(created.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(duplicate.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(apply_blocked.status_code, status.HTTP_409_CONFLICT)
+        recount = CycleCountRecount.objects.get(original_line=line)
+        self.assertEqual(recount.baseline_quantity, Decimal("5.000"))
+        self.assertTrue(AuditLog.objects.filter(event_type="cycle_count_recount_requested").exists())
+
+    def test_scanner_recount_is_blind_and_submission_is_immutable_without_inventory_mutation(self):
+        session, line = self.submit_counted_session("7")
+        self.client.post(
+            f"/api/cycle-counts/{session.id}/lines/{line.id}/request-recount/",
+            {"reason": "Verify the shelf result."},
+            format="json",
+        )
+        recount = CycleCountRecount.objects.get(original_line=line)
+        self.client.force_authenticate(self.worker)
+
+        listing = self.client.get("/api/scanner/cycle-count-recounts/", {"branch": "CCB"})
+        detail = self.client.get(f"/api/scanner/cycle-count-recounts/{recount.id}/")
+        wrong_location = self.client.post(
+            f"/api/scanner/cycle-count-recounts/{recount.id}/submit/",
+            {"location_code": "BAD", "product_code": self.product.sku, "quantity": "6"},
+            format="json",
+        )
+        wrong_product = self.client.post(
+            f"/api/scanner/cycle-count-recounts/{recount.id}/submit/",
+            {"location_code": self.location.code, "product_code": self.unexpected_product.sku, "quantity": "6"},
+            format="json",
+        )
+        negative = self.client.post(
+            f"/api/scanner/cycle-count-recounts/{recount.id}/submit/",
+            {"location_code": self.location.code, "product_code": self.product.sku, "quantity": "-1"},
+            format="json",
+        )
+        submitted = self.client.post(
+            f"/api/scanner/cycle-count-recounts/{recount.id}/submit/",
+            {"location_code": self.location.code, "product_code": self.product.barcode, "quantity": "6"},
+            format="json",
+        )
+        duplicate = self.client.post(
+            f"/api/scanner/cycle-count-recounts/{recount.id}/submit/",
+            {"location_code": self.location.code, "product_code": self.product.sku, "quantity": "4"},
+            format="json",
+        )
+
+        self.assertEqual(listing.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(listing.data["results"]), 1)
+        self.assertEqual(detail.status_code, status.HTTP_200_OK)
+        self.assertNotIn("original_counted_quantity", detail.data)
+        self.assertNotIn("baseline_quantity", detail.data)
+        self.assertEqual(wrong_location.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(wrong_product.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(negative.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(submitted.status_code, status.HTTP_200_OK)
+        self.assertEqual(duplicate.status_code, status.HTTP_200_OK)
+        recount.refresh_from_db()
+        self.assertEqual(recount.counted_quantity, Decimal("6.000"))
+        self.inventory.refresh_from_db()
+        self.assertEqual(self.inventory.quantity_on_hand, Decimal("5.000"))
+        self.assertTrue(AuditLog.objects.filter(event_type="cycle_count_recount_submitted").exists())
+
+    def test_leader_accepts_recount_then_adjustment_uses_recount_baseline(self):
+        session, line = self.submit_counted_session("7")
+        self.client.post(
+            f"/api/cycle-counts/{session.id}/lines/{line.id}/request-recount/",
+            {"reason": "Original count needs physical verification."},
+            format="json",
+        )
+        recount = CycleCountRecount.objects.get(original_line=line)
+        self.client.force_authenticate(self.worker)
+        self.client.post(
+            f"/api/scanner/cycle-count-recounts/{recount.id}/submit/",
+            {"location_code": self.location.code, "product_code": self.product.sku, "quantity": "6"},
+            format="json",
+        )
+        self.client.force_authenticate(self.leader)
+
+        accepted = self.client.post(f"/api/cycle-counts/{session.id}/recounts/{recount.id}/accept/", {"note": "Recount accepted."}, format="json")
+        movement_count = StockMovement.objects.count()
+        applied = self.client.post(f"/api/cycle-counts/{session.id}/lines/{line.id}/apply-adjustment/", {}, format="json")
+
+        self.assertEqual(accepted.status_code, status.HTTP_200_OK)
+        self.inventory.refresh_from_db()
+        self.assertEqual(self.inventory.quantity_on_hand, Decimal("6.000"))
+        self.assertEqual(StockMovement.objects.count(), movement_count + 1)
+        self.assertEqual(applied.status_code, status.HTTP_200_OK)
+        movement = StockMovement.objects.get(cycle_count_line=line)
+        self.assertEqual(movement.cycle_count_recount_id, recount.id)
+        self.assertEqual(movement.quantity_before, Decimal("5.000"))
+        self.assertEqual(movement.quantity_after, Decimal("6.000"))
+        line.refresh_from_db()
+        self.assertEqual(line.counted_quantity, Decimal("7.000"))
+        self.assertEqual(line.reconciliation_status, CycleCountLine.ReconciliationStatus.ADJUSTMENT_APPLIED)
+
+    def test_stale_recount_acceptance_and_close_are_blocked_until_cancelled_or_resolved(self):
+        session, line = self.submit_counted_session("7")
+        self.client.post(
+            f"/api/cycle-counts/{session.id}/lines/{line.id}/request-recount/",
+            {"reason": "Check stale variance."},
+            format="json",
+        )
+        recount = CycleCountRecount.objects.get(original_line=line)
+        StockMovement.objects.create(
+            branch=self.branch,
+            product=self.product,
+            inventory_item=self.inventory,
+            source_location=self.location,
+            movement_type=StockMovement.MovementType.PICK,
+            quantity=Decimal("1"),
+            reference="RECOUNT-WINDOW",
+        )
+        self.client.force_authenticate(self.worker)
+        self.client.post(
+            f"/api/scanner/cycle-count-recounts/{recount.id}/submit/",
+            {"location_code": self.location.code, "product_code": self.product.sku, "quantity": "6"},
+            format="json",
+        )
+        self.client.force_authenticate(self.leader)
+
+        close_blocked = self.client.post(f"/api/cycle-counts/{session.id}/close/", {}, format="json")
+        accept_blocked = self.client.post(f"/api/cycle-counts/{session.id}/recounts/{recount.id}/accept/", {}, format="json")
+        cancelled = self.client.post(f"/api/cycle-counts/{session.id}/recounts/{recount.id}/cancel/", {"note": "Movement occurred."}, format="json")
+
+        self.assertEqual(close_blocked.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(accept_blocked.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(cancelled.status_code, status.HTTP_200_OK)
+        recount.refresh_from_db()
+        self.assertEqual(recount.status, CycleCountRecount.Status.CANCELLED)
+        self.assertTrue(recount.movement_after_baseline)
+        self.inventory.refresh_from_db()
+        self.assertEqual(self.inventory.quantity_on_hand, Decimal("5.000"))
 
     def test_other_branch_user_cannot_view_or_count(self):
         self.client.force_authenticate(self.leader)

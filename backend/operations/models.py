@@ -1181,6 +1181,13 @@ class StockMovement(TimestampedModel):
         blank=True,
         null=True,
     )
+    cycle_count_recount = models.OneToOneField(
+        "CycleCountRecount",
+        on_delete=models.PROTECT,
+        related_name="reconciliation_stock_movement",
+        blank=True,
+        null=True,
+    )
     performed_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -1371,6 +1378,98 @@ class CycleCountLine(TimestampedModel):
 
     def __str__(self) -> str:
         return f"{self.session.reference} / {self.location.code} / {self.product.sku}"
+
+
+class CycleCountRecount(TimestampedModel):
+    class Status(models.TextChoices):
+        REQUESTED = "requested", "Requested"
+        IN_PROGRESS = "in_progress", "In progress"
+        SUBMITTED = "submitted", "Submitted"
+        ACCEPTED = "accepted", "Accepted"
+        CANCELLED = "cancelled", "Cancelled"
+
+    original_line = models.ForeignKey(CycleCountLine, on_delete=models.PROTECT, related_name="recounts")
+    session = models.ForeignKey(CycleCountSession, on_delete=models.PROTECT, related_name="recounts")
+    branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="cycle_count_recounts")
+    location = models.ForeignKey(Location, on_delete=models.PROTECT, related_name="cycle_count_recounts")
+    product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name="cycle_count_recounts")
+    reference = models.CharField(max_length=64, unique=True, blank=True)
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.REQUESTED)
+    reason = models.TextField()
+    requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="requested_cycle_count_recounts",
+        blank=True,
+        null=True,
+    )
+    requested_at = models.DateTimeField(default=timezone.now)
+    started_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="started_cycle_count_recounts",
+        blank=True,
+        null=True,
+    )
+    started_at = models.DateTimeField(blank=True, null=True)
+    baseline_quantity = models.DecimalField(max_digits=12, decimal_places=3, default=0)
+    baseline_at = models.DateTimeField(default=timezone.now)
+    counted_quantity = models.DecimalField(max_digits=12, decimal_places=3, blank=True, null=True)
+    counted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="counted_cycle_count_recounts",
+        blank=True,
+        null=True,
+    )
+    counted_at = models.DateTimeField(blank=True, null=True)
+    movement_after_baseline = models.BooleanField(default=False)
+    accepted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="accepted_cycle_count_recounts",
+        blank=True,
+        null=True,
+    )
+    accepted_at = models.DateTimeField(blank=True, null=True)
+    cancelled_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="cancelled_cycle_count_recounts",
+        blank=True,
+        null=True,
+    )
+    cancelled_at = models.DateTimeField(blank=True, null=True)
+    review_note = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["-requested_at"]
+        indexes = [
+            models.Index(fields=["branch", "status"]),
+            models.Index(fields=["session", "status"]),
+            models.Index(fields=["original_line", "status"]),
+            models.Index(fields=["reference"]),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                check=models.Q(counted_quantity__gte=0) | models.Q(counted_quantity__isnull=True),
+                name="cycle_count_recount_counted_non_negative",
+            ),
+            models.UniqueConstraint(
+                fields=["original_line"],
+                condition=models.Q(status__in=["requested", "in_progress", "submitted"]),
+                name="unique_active_cycle_count_recount_per_line",
+            ),
+        ]
+
+    @property
+    def variance_quantity(self):
+        if self.counted_quantity is None:
+            return None
+        return self.counted_quantity - self.baseline_quantity
+
+    def __str__(self) -> str:
+        return self.reference or f"Cycle count recount {self.id}"
 
 
 class TransferDiscrepancyRecovery(TimestampedModel):

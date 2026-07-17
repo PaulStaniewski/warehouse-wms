@@ -7,15 +7,18 @@ import { useActiveBranch } from "../api/ActiveBranchContext";
 import { canManageCycleCounts } from "../api/permissions";
 import {
   useApplyCycleCountAdjustment,
+  useAcceptCycleCountRecount,
   useCancelCycleCount,
+  useCancelCycleCountRecount,
   useCloseCycleCount,
   useCycleCount,
   useOpenCycleCount,
+  useRequestCycleCountRecount,
   useResolveCycleCountWithoutAdjustment,
 } from "../api/queries";
 import { DataState } from "../components/DataState";
 import { PageHeader } from "../components/PageHeader";
-import type { CycleCountLine } from "../types/api";
+import type { CycleCountLine, CycleCountRecount } from "../types/api";
 
 function formatDateTime(value: string | null) {
   return value ? new Intl.DateTimeFormat("en-GB", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value)) : "-";
@@ -53,13 +56,17 @@ export function CycleCountDetailPage() {
   const cancelCount = useCancelCycleCount();
   const applyAdjustment = useApplyCycleCountAdjustment();
   const resolveWithoutAdjustment = useResolveCycleCountWithoutAdjustment();
+  const requestRecount = useRequestCycleCountRecount();
+  const acceptRecount = useAcceptCycleCountRecount();
+  const cancelRecount = useCancelCycleCountRecount();
   const [decision, setDecision] = useState<{ mode: "apply" | "resolve"; line: CycleCountLine } | null>(null);
+  const [recountDecision, setRecountDecision] = useState<{ mode: "request"; line: CycleCountLine } | { mode: "accept" | "cancel"; recount: CycleCountRecount } | null>(null);
   const [decisionNote, setDecisionNote] = useState("");
   const canManage = canManageCycleCounts(activeMembership);
   const session = count.data;
   const allLines = useMemo(() => session?.locations.flatMap((location) => location.lines) ?? [], [session]);
   const pendingLines = allLines.filter((line) => line.reconciliation_status === "pending_review");
-  const isDecisionPending = applyAdjustment.isPending || resolveWithoutAdjustment.isPending;
+  const isDecisionPending = applyAdjustment.isPending || resolveWithoutAdjustment.isPending || requestRecount.isPending || acceptRecount.isPending || cancelRecount.isPending;
 
   async function runAction(action: "open" | "close" | "cancel") {
     if (!session) return;
@@ -121,6 +128,29 @@ export function CycleCountDetailPage() {
     setDecisionNote("");
   }
 
+  async function submitRecountDecision() {
+    if (!session || !recountDecision) return;
+    try {
+      if (recountDecision.mode === "request") {
+        await requestRecount.mutateAsync({ sessionId: session.id, lineId: recountDecision.line.id, reason: decisionNote });
+      } else if (recountDecision.mode === "accept") {
+        await acceptRecount.mutateAsync({ sessionId: session.id, recountId: recountDecision.recount.id, note: decisionNote });
+      } else {
+        await cancelRecount.mutateAsync({ sessionId: session.id, recountId: recountDecision.recount.id, note: decisionNote });
+      }
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["cycle-count", id] }),
+        queryClient.invalidateQueries({ queryKey: ["cycle-counts"] }),
+        queryClient.invalidateQueries({ queryKey: ["scanner-cycle-count-recounts"] }),
+        queryClient.invalidateQueries({ queryKey: ["audit-logs", "current"] }),
+      ]);
+      setRecountDecision(null);
+      setDecisionNote("");
+    } catch (error) {
+      window.alert(formatError(error));
+    }
+  }
+
   return (
     <>
       <PageHeader
@@ -143,6 +173,9 @@ export function CycleCountDetailPage() {
               <article className="detail-card"><span>Pending review</span><strong>{session.pending_variance_count}</strong></article>
               <article className="detail-card"><span>Adjustments applied</span><strong>{session.applied_adjustment_count}</strong></article>
               <article className="detail-card"><span>No adjustment required</span><strong>{session.no_adjustment_resolution_count}</strong></article>
+              <article className="detail-card"><span>Active recounts</span><strong>{session.active_recount_count}</strong></article>
+              <article className="detail-card"><span>Submitted recounts</span><strong>{session.submitted_recount_count}</strong></article>
+              <article className="detail-card"><span>Accepted recounts</span><strong>{session.accepted_recount_count}</strong></article>
             </section>
 
             {canManage && (
@@ -191,6 +224,8 @@ export function CycleCountDetailPage() {
                               <span className={reconciliationClass(line.reconciliation_status)}>{line.reconciliation_status_label}</span>
                               {line.movement_after_snapshot && <p className="muted">Movement after snapshot</p>}
                               {line.adjustment_conflict_reason && <p className="muted">{line.adjustment_conflict_reason}</p>}
+                              {line.active_recount && <p className="muted">Recount pending: {line.active_recount.reference}</p>}
+                              {line.accepted_recount && <p className="muted">Effective result: accepted recount {line.accepted_recount.reference}</p>}
                             </td>
                             <td>
                               {line.adjustment_id ? (
@@ -210,6 +245,13 @@ export function CycleCountDetailPage() {
                                   <button disabled={resolveWithoutAdjustment.isPending} onClick={() => openDecision("resolve", line)} type="button">
                                     Resolve Without Adjustment
                                   </button>
+                                  <button
+                                    disabled={Boolean(line.active_recount) || line.reconciliation_status !== "pending_review" || requestRecount.isPending}
+                                    onClick={() => { setRecountDecision({ mode: "request", line }); setDecisionNote(""); }}
+                                    type="button"
+                                  >
+                                    Request Recount
+                                  </button>
                                 </div>
                               ) : (
                                 <>
@@ -224,6 +266,76 @@ export function CycleCountDetailPage() {
                       })}
                     {pendingLines.length === 0 && allLines.every((line) => line.variance_status === "zero" || line.variance_quantity === null) && (
                       <tr><td colSpan={8}>No non-zero variances require reconciliation.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            <section className="table-card">
+              <h2>Recount History</h2>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Recount</th>
+                      <th>Product</th>
+                      <th>Location</th>
+                      <th>Status</th>
+                      <th>Original result</th>
+                      <th>Recount result</th>
+                      <th>Baseline</th>
+                      <th>Review</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {allLines.flatMap((line) => line.recounts.map((recount) => (
+                      <tr key={recount.id}>
+                        <td>
+                          <span className="mono">{recount.reference}</span>
+                          <p className="muted">{recount.reason}</p>
+                        </td>
+                        <td><span className="mono">{recount.product_sku}</span> / {recount.product_name}</td>
+                        <td className="mono">{recount.location_code}</td>
+                        <td>
+                          <span className="status-pill">{recount.status_label}</span>
+                          {recount.movement_after_baseline && <p className="muted">Movement after recount baseline</p>}
+                        </td>
+                        <td>
+                          Expected {line.expected_quantity}<br />
+                          Counted {line.counted_quantity ?? "-"}<br />
+                          Variance {line.variance_quantity ?? "-"}
+                        </td>
+                        <td>
+                          Counted {recount.counted_quantity ?? "-"}<br />
+                          Variance {recount.variance_quantity ?? "-"}<br />
+                          By {recount.counted_by_username ?? "-"}
+                        </td>
+                        <td>
+                          {recount.baseline_quantity}<br />
+                          <span className="muted">{formatDateTime(recount.baseline_at)}</span>
+                        </td>
+                        <td>
+                          {canManage && session.status === "awaiting_review" && recount.status === "submitted" ? (
+                            <div className="row-actions">
+                              <button disabled={!recount.is_acceptable || acceptRecount.isPending} onClick={() => { setRecountDecision({ mode: "accept", recount }); setDecisionNote(""); }} type="button">
+                                Accept Recount
+                              </button>
+                              <button disabled={cancelRecount.isPending} onClick={() => { setRecountDecision({ mode: "cancel", recount }); setDecisionNote(""); }} type="button">
+                                Cancel Recount
+                              </button>
+                            </div>
+                          ) : (
+                            <>
+                              <span>{recount.accepted_by_username ?? recount.cancelled_by_username ?? "-"}</span>
+                              {recount.review_note && <p className="muted">{recount.review_note}</p>}
+                            </>
+                          )}
+                        </td>
+                      </tr>
+                    )))}
+                    {allLines.every((line) => line.recounts.length === 0) && (
+                      <tr><td colSpan={8}>No recounts have been requested.</td></tr>
                     )}
                   </tbody>
                 </table>
@@ -307,6 +419,72 @@ export function CycleCountDetailPage() {
                       type="button"
                     >
                       {isDecisionPending ? "Saving..." : decision.mode === "apply" ? "Apply adjustment" : "Resolve variance"}
+                    </button>
+                  </div>
+                </div>
+              </section>
+            )}
+
+            {recountDecision && (
+              <section aria-modal="true" className="adjustment-confirmation" role="dialog">
+                <div className="adjustment-confirmation-panel">
+                  <h2>
+                    {recountDecision.mode === "request"
+                      ? "Request physical recount"
+                      : recountDecision.mode === "accept"
+                        ? "Accept recount result"
+                        : "Cancel recount"}
+                  </h2>
+                  {recountDecision.mode === "request" ? (
+                    <dl>
+                      <div><dt>Cycle Count</dt><dd>{session.reference}</dd></div>
+                      <div><dt>Product</dt><dd>{recountDecision.line.product_sku} / {recountDecision.line.product_name}</dd></div>
+                      <div><dt>Location</dt><dd>{recountDecision.line.location_code}</dd></div>
+                      <div><dt>Original counted</dt><dd>{recountDecision.line.counted_quantity}</dd></div>
+                      <div><dt>Original variance</dt><dd>{recountDecision.line.variance_quantity}</dd></div>
+                    </dl>
+                  ) : (
+                    <dl>
+                      <div><dt>Recount</dt><dd>{recountDecision.recount.reference}</dd></div>
+                      <div><dt>Product</dt><dd>{recountDecision.recount.product_sku} / {recountDecision.recount.product_name}</dd></div>
+                      <div><dt>Location</dt><dd>{recountDecision.recount.location_code}</dd></div>
+                      <div><dt>Baseline</dt><dd>{recountDecision.recount.baseline_quantity}</dd></div>
+                      <div><dt>Recounted</dt><dd>{recountDecision.recount.counted_quantity ?? "-"}</dd></div>
+                    </dl>
+                  )}
+                  <label className="adjustment-note-field">
+                    <span>{recountDecision.mode === "request" ? "Recount reason" : recountDecision.mode === "cancel" ? "Cancellation note" : "Review note"}</span>
+                    <textarea
+                      onChange={(event) => setDecisionNote(event.target.value)}
+                      placeholder={
+                        recountDecision.mode === "request"
+                          ? "Explain why a second physical count is required."
+                          : recountDecision.mode === "cancel"
+                            ? "Explain why this recount is being cancelled."
+                            : "Optional leader note for the accepted recount."
+                      }
+                      value={decisionNote}
+                    />
+                  </label>
+                  <p>
+                    {recountDecision.mode === "accept"
+                      ? "Accepting a recount does not change inventory. It becomes the effective evidence for later reconciliation."
+                      : "This decision is recorded in operational history and does not change inventory."}
+                  </p>
+                  <div className="form-actions">
+                    <button disabled={isDecisionPending} onClick={() => { setRecountDecision(null); setDecisionNote(""); }} type="button">Cancel</button>
+                    <button
+                      disabled={isDecisionPending || (recountDecision.mode !== "accept" && decisionNote.trim().length < 5)}
+                      onClick={() => void submitRecountDecision()}
+                      type="button"
+                    >
+                      {isDecisionPending
+                        ? "Saving..."
+                        : recountDecision.mode === "request"
+                          ? "Request recount"
+                          : recountDecision.mode === "accept"
+                            ? "Accept recount"
+                            : "Cancel recount"}
                     </button>
                   </div>
                 </div>

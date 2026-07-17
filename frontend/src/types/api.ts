@@ -241,6 +241,8 @@ export type StockMovement = {
   cycle_count_line_id: number | null;
   cycle_count_session_id: number | null;
   cycle_count_session_reference: string | null;
+  cycle_count_recount_id: number | null;
+  cycle_count_recount_reference: string | null;
   quantity: string;
   quantity_before: string | null;
   quantity_after: string | null;
@@ -249,6 +251,51 @@ export type StockMovement = {
   performed_by_username: string | null;
   status: "completed";
   origin: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CycleCountRecount = {
+  id: number;
+  reference: string;
+  original_line: number;
+  session: number;
+  session_reference: string;
+  branch: number;
+  branch_code: string;
+  location: number;
+  location_code: string;
+  location_name: string;
+  product: number;
+  product_sku: string;
+  product_name: string;
+  status: "requested" | "in_progress" | "submitted" | "accepted" | "cancelled";
+  status_label: string;
+  reason: string;
+  requested_by: number | null;
+  requested_by_username: string | null;
+  requested_at: string;
+  started_by: number | null;
+  started_by_username: string | null;
+  started_at: string | null;
+  baseline_quantity: string;
+  baseline_at: string;
+  counted_quantity: string | null;
+  counted_by: number | null;
+  counted_by_username: string | null;
+  counted_at: string | null;
+  variance_quantity: string | null;
+  movement_after_baseline: boolean;
+  accepted_by: number | null;
+  accepted_by_username: string | null;
+  accepted_at: string | null;
+  cancelled_by: number | null;
+  cancelled_by_username: string | null;
+  cancelled_at: string | null;
+  review_note: string;
+  is_executable: boolean;
+  is_acceptable: boolean;
+  is_cancellable: boolean;
   created_at: string;
   updated_at: string;
 };
@@ -277,6 +324,12 @@ export type CycleCountLine = {
   adjustment_reference: string | null;
   can_apply_adjustment: boolean;
   adjustment_conflict_reason: string | null;
+  recounts: CycleCountRecount[];
+  active_recount: CycleCountRecount | null;
+  accepted_recount: CycleCountRecount | null;
+  effective_counted_quantity: string | null;
+  effective_variance_quantity: string | null;
+  effective_result_source: "original_count" | "accepted_recount";
   counted_by: number | null;
   counted_by_username: string | null;
   counted_at: string | null;
@@ -343,6 +396,9 @@ export type CycleCountSession = {
   zero_variance_count: number;
   reconciliation_complete: boolean;
   can_close: boolean;
+  active_recount_count: number;
+  submitted_recount_count: number;
+  accepted_recount_count: number;
   locations: CycleCountLocation[];
   created_at: string;
   updated_at: string;
@@ -388,6 +444,32 @@ export type ScannerCycleCountLocation = {
 export type ScannerCycleCountResponse = {
   session: ScannerCycleCountSession;
   locations: ScannerCycleCountLocation[];
+};
+
+export type ScannerCycleCountRecount = {
+  id: number;
+  reference: string;
+  session: number;
+  session_reference: string;
+  branch: number;
+  branch_code: string;
+  location: number;
+  location_code: string;
+  location_name: string;
+  product: number;
+  product_sku: string;
+  product_name: string;
+  status: string;
+  status_label: string;
+  reason: string;
+  requested_by_username: string | null;
+  requested_at: string | null;
+  started_at: string | null;
+  movement_after_baseline: boolean;
+  is_executable: boolean;
+  counted_quantity?: string | null;
+  counted_by_username?: string | null;
+  counted_at?: string | null;
 };
 
 export type TransferDiscrepancyAction = {

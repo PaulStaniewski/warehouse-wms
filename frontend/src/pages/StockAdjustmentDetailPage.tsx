@@ -101,6 +101,9 @@ export function StockAdjustmentDetailPage() {
                   </Link>
                 </p>
               )}
+              {adjustment.data.cycle_count_recount_reference && (
+                <p className="muted">Recount evidence: {adjustment.data.cycle_count_recount_reference}</p>
+              )}
             </article>
             <article className="detail-card">
               <span>Reference</span>

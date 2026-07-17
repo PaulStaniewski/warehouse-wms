@@ -127,6 +127,7 @@ const wmsNavSections: NavSection[] = [
 
 const scannerPageTitles: Array<[string, string]> = [
   ["/scanner/inter-branch-arrivals", "Inter-branch pallet arrivals"],
+  ["/scanner/cycle-count-recounts", "Cycle Count Recounts"],
   ["/scanner/cycle-counts", "Cycle Counts"],
   ["/scanner/quick-transfer", "Quick Transfer"],
   ["/scanner/proformas", "Proformas"],

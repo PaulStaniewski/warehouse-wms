@@ -24,6 +24,7 @@ from operations.models import (
     AuditLog,
     CycleCountLine,
     CycleCountLocation,
+    CycleCountRecount,
     CycleCountSession,
     DeliveryRoute,
     InterBranchTransfer,
@@ -52,6 +53,7 @@ from operations.models import (
 from operations.serializers import (
     AuditLogSerializer,
     CycleCountLocationSerializer,
+    CycleCountRecountSerializer,
     CycleCountSessionSerializer,
     DeliveryRouteSerializer,
     OrderLineSerializer,
@@ -872,6 +874,7 @@ class StockMovementViewSet(ReadOnlyModelViewSet):
         "performed_by",
         "cycle_count_line",
         "cycle_count_line__session",
+        "cycle_count_recount",
     )
     serializer_class = StockMovementSerializer
     permission_classes = [IsAuthenticated]
@@ -1067,12 +1070,29 @@ class CycleCountSessionViewSet(ReadOnlyModelViewSet):
             "locations__lines__counted_by",
             "locations__lines__reconciled_by",
             "locations__lines__reconciliation_stock_movement",
+            "locations__lines__recounts",
+            "locations__lines__recounts__requested_by",
+            "locations__lines__recounts__started_by",
+            "locations__lines__recounts__counted_by",
+            "locations__lines__recounts__accepted_by",
+            "locations__lines__recounts__cancelled_by",
             "lines",
             "lines__product",
             "lines__location",
             "lines__counted_by",
             "lines__reconciled_by",
             "lines__reconciliation_stock_movement",
+            "lines__recounts",
+            "lines__recounts__requested_by",
+            "lines__recounts__started_by",
+            "lines__recounts__counted_by",
+            "lines__recounts__accepted_by",
+            "lines__recounts__cancelled_by",
+            "recounts",
+            "recounts__requested_by",
+            "recounts__counted_by",
+            "recounts__accepted_by",
+            "recounts__cancelled_by",
         )
     )
     serializer_class = CycleCountSessionSerializer
@@ -1106,7 +1126,42 @@ class CycleCountSessionViewSet(ReadOnlyModelViewSet):
             return None, Response({"detail": "Line has no variance to reconcile."}, status=status.HTTP_400_BAD_REQUEST)
         if line.reconciliation_status != CycleCountLine.ReconciliationStatus.PENDING_REVIEW:
             return None, Response({"detail": "Cycle count line has already been reconciled."}, status=status.HTTP_409_CONFLICT)
+        if CycleCountRecount.objects.filter(
+            original_line=line,
+            status__in=[
+                CycleCountRecount.Status.REQUESTED,
+                CycleCountRecount.Status.IN_PROGRESS,
+                CycleCountRecount.Status.SUBMITTED,
+            ],
+        ).exists():
+            return None, Response({"detail": "Active recount must be completed or cancelled before reconciling this line."}, status=status.HTTP_409_CONFLICT)
         return line, None
+
+    def _accepted_recount(self, line):
+        return (
+            CycleCountRecount.objects.select_for_update(of=("self",))
+            .filter(original_line=line, status=CycleCountRecount.Status.ACCEPTED)
+            .order_by("-accepted_at", "-updated_at")
+            .first()
+        )
+
+    def _effective_values(self, line):
+        recount = self._accepted_recount(line)
+        if recount is not None:
+            return {
+                "baseline_quantity": recount.baseline_quantity,
+                "baseline_at": recount.baseline_at,
+                "counted_quantity": recount.counted_quantity,
+                "variance": recount.variance_quantity,
+                "recount": recount,
+            }
+        return {
+            "baseline_quantity": line.expected_quantity,
+            "baseline_at": line.session.snapshot_at,
+            "counted_quantity": line.counted_quantity,
+            "variance": line.variance_quantity,
+            "recount": None,
+        }
 
     def _movement_after_snapshot_exists(self, line):
         if not line.session.snapshot_at:
@@ -1125,6 +1180,15 @@ class CycleCountSessionViewSet(ReadOnlyModelViewSet):
             line.movement_after_snapshot = True
             line.save(update_fields=["movement_after_snapshot", "updated_at"])
         return has_movement
+
+    def _movement_after_recount_baseline_exists(self, recount):
+        return StockMovement.objects.filter(
+            branch=recount.branch,
+            product=recount.product,
+            created_at__gt=recount.baseline_at,
+        ).filter(
+            models.Q(source_location=recount.location) | models.Q(destination_location=recount.location)
+        ).exclude(cycle_count_recount=recount).exists()
 
     def create(self, request):
         branch_code = str(request.data.get("branch", "")).strip()
@@ -1243,6 +1307,19 @@ class CycleCountSessionViewSet(ReadOnlyModelViewSet):
                     {"detail": "All variance lines must be reconciled before closing.", "pending_variance_count": pending_lines},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
+            active_recounts = CycleCountRecount.objects.filter(
+                session=session,
+                status__in=[
+                    CycleCountRecount.Status.REQUESTED,
+                    CycleCountRecount.Status.IN_PROGRESS,
+                    CycleCountRecount.Status.SUBMITTED,
+                ],
+            ).count()
+            if active_recounts:
+                return Response(
+                    {"detail": "All recounts must be accepted or cancelled before closing.", "active_recount_count": active_recounts},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             session.status = CycleCountSession.Status.CLOSED
             session.reviewed_at = timezone.now()
             session.reviewed_by = request.user
@@ -1270,19 +1347,31 @@ class CycleCountSessionViewSet(ReadOnlyModelViewSet):
             line, error_response = self._line_for_reconciliation(session, line_id)
             if error_response is not None:
                 return error_response
-            variance = line.variance_quantity
-            if self._refresh_movement_warning(line):
+            effective = self._effective_values(line)
+            variance = effective["variance"]
+            recount = effective["recount"]
+            if variance is None or variance == 0:
+                return Response({"detail": "Effective result has no variance to adjust."}, status=status.HTTP_400_BAD_REQUEST)
+            if recount is None and self._refresh_movement_warning(line):
                 return Response(
                     {"detail": "Inventory moved after the cycle count snapshot. Resolve this variance without automatic adjustment or recount later."},
                     status=status.HTTP_409_CONFLICT,
                 )
+            if recount is not None:
+                if self._movement_after_recount_baseline_exists(recount):
+                    recount.movement_after_baseline = True
+                    recount.save(update_fields=["movement_after_baseline", "updated_at"])
+                    return Response(
+                        {"detail": "Inventory moved after the accepted recount baseline. Request another recount or resolve without adjustment."},
+                        status=status.HTTP_409_CONFLICT,
+                    )
             inventory_item = (
                 InventoryItem.objects.select_for_update()
                 .filter(branch=session.branch, location=line.location, product=line.product)
                 .first()
             )
             if inventory_item is None:
-                if line.expected_quantity != 0:
+                if effective["baseline_quantity"] != 0:
                     return Response({"detail": "Current inventory no longer matches the cycle count snapshot."}, status=status.HTTP_409_CONFLICT)
                 if variance < 0:
                     return Response({"detail": "Decrease would make stock negative."}, status=status.HTTP_400_BAD_REQUEST)
@@ -1294,10 +1383,16 @@ class CycleCountSessionViewSet(ReadOnlyModelViewSet):
                     quantity_reserved=Decimal("0"),
                 )
             quantity_before = inventory_item.quantity_on_hand
-            if quantity_before != line.expected_quantity:
-                line.movement_after_snapshot = True
-                line.save(update_fields=["movement_after_snapshot", "updated_at"])
-                return Response({"detail": "Current inventory no longer matches the cycle count snapshot."}, status=status.HTTP_409_CONFLICT)
+            if quantity_before != effective["baseline_quantity"]:
+                if recount is not None:
+                    recount.movement_after_baseline = True
+                    recount.save(update_fields=["movement_after_baseline", "updated_at"])
+                    detail = "Current inventory no longer matches the accepted recount baseline."
+                else:
+                    line.movement_after_snapshot = True
+                    line.save(update_fields=["movement_after_snapshot", "updated_at"])
+                    detail = "Current inventory no longer matches the cycle count snapshot."
+                return Response({"detail": detail}, status=status.HTTP_409_CONFLICT)
             direction = (
                 StockMovement.AdjustmentDirection.INCREASE
                 if variance > 0
@@ -1311,8 +1406,11 @@ class CycleCountSessionViewSet(ReadOnlyModelViewSet):
             inventory_item.save(update_fields=["quantity_on_hand", "updated_at"])
             adjustment_note = (
                 f"Cycle Count {session.reference}; location {line.location.code}; product {line.product.sku}; "
-                f"expected {line.expected_quantity}; counted {line.counted_quantity}; variance {variance}."
+                f"{'recount baseline' if recount else 'expected'} {effective['baseline_quantity']}; "
+                f"counted {effective['counted_quantity']}; variance {variance}."
             )
+            if recount:
+                adjustment_note = f"{adjustment_note} Recount {recount.reference} was accepted as effective evidence."
             if note:
                 adjustment_note = f"{adjustment_note} Leader note: {note}"
             movement = StockMovement.objects.create(
@@ -1329,6 +1427,7 @@ class CycleCountSessionViewSet(ReadOnlyModelViewSet):
                 adjustment_reason=StockMovement.AdjustmentReason.COUNT_CORRECTION,
                 adjustment_note=adjustment_note,
                 cycle_count_line=line,
+                cycle_count_recount=recount,
                 performed_by=request.user,
             )
             movement.reference = f"ADJ-CC-{session.branch.code}-{movement.id:06d}"
@@ -1361,7 +1460,8 @@ class CycleCountSessionViewSet(ReadOnlyModelViewSet):
                 entity_id=str(line.id),
                 message=(
                     f"Worker {request.user.username} applied cycle count variance adjustment {movement.reference} "
-                    f"for {session.reference}: {direction} {quantity} {line.product.sku} at {line.location.code} "
+                    f"for {session.reference}{f' using recount {recount.reference}' if recount else ''}: "
+                    f"{direction} {quantity} {line.product.sku} at {line.location.code} "
                     f"from {quantity_before} to {quantity_after}."
                 ),
             )
@@ -1411,6 +1511,168 @@ class CycleCountSessionViewSet(ReadOnlyModelViewSet):
                     f"Worker {request.user.username} resolved cycle count variance for {session.reference} "
                     f"without stock adjustment: {line.product.sku} at {line.location.code}, variance {variance}."
                 ),
+            )
+        return Response(self.get_serializer(self.get_queryset().get(pk=session.pk)).data)
+
+    @action(detail=True, methods=["post"], url_path=r"lines/(?P<line_id>[^/.]+)/request-recount")
+    def request_recount(self, request, pk=None, line_id=None):
+        reason = str(request.data.get("reason", "")).strip()
+        if len(reason) < 5:
+            return Response({"reason": ["A meaningful recount reason is required."]}, status=status.HTTP_400_BAD_REQUEST)
+        with transaction.atomic():
+            session = CycleCountSession.objects.select_for_update().select_related("branch").get(pk=pk)
+            require_branch_access(request.user, session.branch, leader_required=True)
+            if session.status in [CycleCountSession.Status.CLOSED, CycleCountSession.Status.CANCELLED]:
+                return Response({"detail": "Closed or cancelled sessions cannot be recounted."}, status=status.HTTP_400_BAD_REQUEST)
+            if session.status != CycleCountSession.Status.AWAITING_REVIEW:
+                return Response({"detail": "Cycle count session must be awaiting review."}, status=status.HTTP_400_BAD_REQUEST)
+            line = (
+                CycleCountLine.objects.select_for_update(of=("self",))
+                .select_related("cycle_count_location", "branch", "location", "product")
+                .filter(pk=line_id, session=session, branch=session.branch)
+                .first()
+            )
+            if line is None:
+                return Response({"detail": "Cycle count line was not found in this session."}, status=status.HTTP_404_NOT_FOUND)
+            if line.cycle_count_location.status != CycleCountLocation.Status.SUBMITTED:
+                return Response({"detail": "Only submitted cycle count locations can be recounted."}, status=status.HTTP_400_BAD_REQUEST)
+            if line.reconciliation_status in [
+                CycleCountLine.ReconciliationStatus.ADJUSTMENT_APPLIED,
+                CycleCountLine.ReconciliationStatus.NO_ADJUSTMENT_REQUIRED,
+            ]:
+                return Response({"detail": "Final reconciled lines cannot be recounted."}, status=status.HTTP_409_CONFLICT)
+            if line.variance_quantity == 0:
+                return Response({"detail": "Zero variance lines do not require recount."}, status=status.HTTP_400_BAD_REQUEST)
+            if CycleCountRecount.objects.filter(
+                original_line=line,
+                status__in=[
+                    CycleCountRecount.Status.REQUESTED,
+                    CycleCountRecount.Status.IN_PROGRESS,
+                    CycleCountRecount.Status.SUBMITTED,
+                ],
+            ).exists():
+                return Response({"detail": "An active recount already exists for this line."}, status=status.HTTP_409_CONFLICT)
+            now = timezone.now()
+            inventory_item = (
+                InventoryItem.objects.select_for_update()
+                .filter(branch=session.branch, location=line.location, product=line.product)
+                .first()
+            )
+            baseline_quantity = inventory_item.quantity_on_hand if inventory_item else Decimal("0")
+            recount = CycleCountRecount.objects.create(
+                original_line=line,
+                session=session,
+                branch=session.branch,
+                location=line.location,
+                product=line.product,
+                reason=reason,
+                requested_by=request.user,
+                requested_at=now,
+                baseline_quantity=baseline_quantity,
+                baseline_at=now,
+                movement_after_baseline=False,
+            )
+            recount.reference = f"CCR-{session.branch.code}-{recount.id:06d}"
+            recount.save(update_fields=["reference", "updated_at"])
+            AuditLog.objects.create(
+                actor=request.user,
+                action_type=AuditLog.ActionType.CREATE,
+                event_type="cycle_count_recount_requested",
+                branch=session.branch,
+                product=line.product,
+                source_location=line.location,
+                source_label=line.location.code,
+                reference=recount.reference,
+                entity_name="CycleCountRecount",
+                entity_id=str(recount.id),
+                message=f"Worker {request.user.username} requested recount {recount.reference} for {session.reference} at {line.location.code}.",
+            )
+        return Response(self.get_serializer(self.get_queryset().get(pk=session.pk)).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"], url_path=r"recounts/(?P<recount_id>[^/.]+)/accept")
+    def accept_recount(self, request, pk=None, recount_id=None):
+        note = str(request.data.get("note", "")).strip()
+        with transaction.atomic():
+            session = CycleCountSession.objects.select_for_update().select_related("branch").get(pk=pk)
+            require_branch_access(request.user, session.branch, leader_required=True)
+            if session.status != CycleCountSession.Status.AWAITING_REVIEW:
+                return Response({"detail": "Cycle count session must be awaiting review."}, status=status.HTTP_400_BAD_REQUEST)
+            recount = (
+                CycleCountRecount.objects.select_for_update(of=("self",))
+                .select_related("original_line", "product", "location")
+                .filter(pk=recount_id, session=session, branch=session.branch)
+                .first()
+            )
+            if recount is None:
+                return Response({"detail": "Recount was not found in this session."}, status=status.HTTP_404_NOT_FOUND)
+            if recount.status != CycleCountRecount.Status.SUBMITTED:
+                return Response({"detail": "Only submitted recounts can be accepted."}, status=status.HTTP_400_BAD_REQUEST)
+            if self._movement_after_recount_baseline_exists(recount):
+                recount.movement_after_baseline = True
+                recount.save(update_fields=["movement_after_baseline", "updated_at"])
+                return Response(
+                    {"detail": "Inventory moved after the recount baseline. Request another recount or resolve without adjustment."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            recount.status = CycleCountRecount.Status.ACCEPTED
+            recount.accepted_by = request.user
+            recount.accepted_at = timezone.now()
+            recount.review_note = note
+            recount.save(update_fields=["status", "accepted_by", "accepted_at", "review_note", "updated_at"])
+            AuditLog.objects.create(
+                actor=request.user,
+                action_type=AuditLog.ActionType.UPDATE,
+                event_type="cycle_count_recount_accepted",
+                branch=session.branch,
+                product=recount.product,
+                source_location=recount.location,
+                source_label=recount.location.code,
+                reference=recount.reference,
+                entity_name="CycleCountRecount",
+                entity_id=str(recount.id),
+                message=f"Worker {request.user.username} accepted recount {recount.reference} for {session.reference}.",
+            )
+        return Response(self.get_serializer(self.get_queryset().get(pk=session.pk)).data)
+
+    @action(detail=True, methods=["post"], url_path=r"recounts/(?P<recount_id>[^/.]+)/cancel")
+    def cancel_recount(self, request, pk=None, recount_id=None):
+        note = str(request.data.get("note", "")).strip()
+        if len(note) < 5:
+            return Response({"note": ["A meaningful cancellation note is required."]}, status=status.HTTP_400_BAD_REQUEST)
+        with transaction.atomic():
+            session = CycleCountSession.objects.select_for_update().select_related("branch").get(pk=pk)
+            require_branch_access(request.user, session.branch, leader_required=True)
+            recount = (
+                CycleCountRecount.objects.select_for_update(of=("self",))
+                .select_related("product", "location")
+                .filter(pk=recount_id, session=session, branch=session.branch)
+                .first()
+            )
+            if recount is None:
+                return Response({"detail": "Recount was not found in this session."}, status=status.HTTP_404_NOT_FOUND)
+            if recount.status not in [
+                CycleCountRecount.Status.REQUESTED,
+                CycleCountRecount.Status.IN_PROGRESS,
+                CycleCountRecount.Status.SUBMITTED,
+            ]:
+                return Response({"detail": "Only active or submitted recounts can be cancelled."}, status=status.HTTP_400_BAD_REQUEST)
+            recount.status = CycleCountRecount.Status.CANCELLED
+            recount.cancelled_by = request.user
+            recount.cancelled_at = timezone.now()
+            recount.review_note = note
+            recount.save(update_fields=["status", "cancelled_by", "cancelled_at", "review_note", "updated_at"])
+            AuditLog.objects.create(
+                actor=request.user,
+                action_type=AuditLog.ActionType.UPDATE,
+                event_type="cycle_count_recount_cancelled",
+                branch=session.branch,
+                product=recount.product,
+                source_location=recount.location,
+                source_label=recount.location.code,
+                reference=recount.reference,
+                entity_name="CycleCountRecount",
+                entity_id=str(recount.id),
+                message=f"Worker {request.user.username} cancelled recount {recount.reference} for {session.reference}.",
             )
         return Response(self.get_serializer(self.get_queryset().get(pk=session.pk)).data)
 

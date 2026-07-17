@@ -22,6 +22,7 @@ from operations.models import (
     CartWorkSession,
     CycleCountLine,
     CycleCountLocation,
+    CycleCountRecount,
     CycleCountSession,
     InterBranchTransfer,
     Order,
@@ -3658,6 +3659,46 @@ def _cycle_count_response(session: CycleCountSession) -> dict:
     }
 
 
+def _movement_after_recount_baseline(recount: CycleCountRecount) -> bool:
+    return StockMovement.objects.filter(
+        branch=recount.branch,
+        product=recount.product,
+        created_at__gt=recount.baseline_at,
+    ).filter(Q(source_location=recount.location) | Q(destination_location=recount.location)).exclude(cycle_count_recount=recount).exists()
+
+
+def _scanner_recount_summary(recount: CycleCountRecount, include_result: bool = False) -> dict:
+    data = {
+        "id": recount.id,
+        "reference": recount.reference,
+        "session": recount.session_id,
+        "session_reference": recount.session.reference,
+        "branch": recount.branch_id,
+        "branch_code": recount.branch.code,
+        "location": recount.location_id,
+        "location_code": recount.location.code,
+        "location_name": recount.location.name,
+        "product": recount.product_id,
+        "product_sku": recount.product.sku,
+        "product_name": recount.product.name,
+        "status": recount.status,
+        "status_label": recount.get_status_display(),
+        "reason": recount.reason,
+        "requested_by_username": recount.requested_by.username if recount.requested_by_id and recount.requested_by else None,
+        "requested_at": recount.requested_at.isoformat() if recount.requested_at else None,
+        "started_at": recount.started_at.isoformat() if recount.started_at else None,
+        "movement_after_baseline": recount.movement_after_baseline,
+        "is_executable": recount.status in [CycleCountRecount.Status.REQUESTED, CycleCountRecount.Status.IN_PROGRESS],
+    }
+    if include_result or recount.status in [CycleCountRecount.Status.SUBMITTED, CycleCountRecount.Status.ACCEPTED, CycleCountRecount.Status.CANCELLED]:
+        data.update({
+            "counted_quantity": str(recount.counted_quantity) if recount.counted_quantity is not None else None,
+            "counted_by_username": recount.counted_by.username if recount.counted_by_id and recount.counted_by else None,
+            "counted_at": recount.counted_at.isoformat() if recount.counted_at else None,
+        })
+    return data
+
+
 class ScannerCycleCountSessionsView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -3862,3 +3903,140 @@ class ScannerCycleCountSubmitLocationView(APIView):
                     message=f"Cycle count session {session.reference} is awaiting review.",
                 )
         return Response(_cycle_count_response(session))
+
+
+class ScannerCycleCountRecountsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        branch = str(request.query_params.get("branch", "")).strip()
+        if branch:
+            allowed_codes = branch_codes_filter(request.user, branch)
+        else:
+            allowed_codes = branch_codes_filter(request.user)
+        recounts = (
+            CycleCountRecount.objects.select_related(
+                "session",
+                "branch",
+                "location",
+                "product",
+                "requested_by",
+                "counted_by",
+            )
+            .filter(
+                branch__code__in=allowed_codes,
+                status__in=[CycleCountRecount.Status.REQUESTED, CycleCountRecount.Status.IN_PROGRESS],
+            )
+            .order_by("requested_at")
+        )
+        return Response({"results": [_scanner_recount_summary(recount) for recount in recounts]})
+
+
+class ScannerCycleCountRecountDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, recount_id):
+        recount = (
+            CycleCountRecount.objects.select_related("session", "branch", "location", "product", "requested_by", "counted_by")
+            .filter(pk=recount_id)
+            .first()
+        )
+        if recount is None:
+            return Response({"detail": "Recount task not found."}, status=status.HTTP_404_NOT_FOUND)
+        require_branch_access(request.user, recount.branch)
+        if recount.status not in [
+            CycleCountRecount.Status.REQUESTED,
+            CycleCountRecount.Status.IN_PROGRESS,
+            CycleCountRecount.Status.SUBMITTED,
+        ]:
+            return Response({"detail": "Recount task is not executable."}, status=status.HTTP_400_BAD_REQUEST)
+        if recount.status == CycleCountRecount.Status.REQUESTED:
+            recount.status = CycleCountRecount.Status.IN_PROGRESS
+            recount.started_by = request.user
+            recount.started_at = timezone.now()
+            recount.save(update_fields=["status", "started_by", "started_at", "updated_at"])
+            AuditLog.objects.create(
+                actor=request.user,
+                action_type=AuditLog.ActionType.UPDATE,
+                event_type="cycle_count_recount_started",
+                branch=recount.branch,
+                product=recount.product,
+                source_location=recount.location,
+                source_label=recount.location.code,
+                reference=recount.reference,
+                entity_name="CycleCountRecount",
+                entity_id=str(recount.id),
+                message=f"Worker {_scanner_actor_code(request)} started recount {recount.reference}.",
+            )
+        return Response(_scanner_recount_summary(recount, include_result=True))
+
+
+class ScannerCycleCountRecountSubmitView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, recount_id):
+        location_code = str(request.data.get("location_code", "")).strip()
+        product_code = str(request.data.get("product_code", "")).strip()
+        quantity_value = request.data.get("quantity", "")
+        if not location_code:
+            return Response({"location_code": ["Location code is required."]}, status=status.HTTP_400_BAD_REQUEST)
+        if not product_code:
+            return Response({"product_code": ["Product code is required."]}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            quantity = Decimal(str(quantity_value))
+        except Exception:
+            return Response({"quantity": ["Quantity must be a valid number."]}, status=status.HTTP_400_BAD_REQUEST)
+        if quantity < 0:
+            return Response({"quantity": ["Quantity cannot be negative."]}, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            recount = (
+                CycleCountRecount.objects.select_for_update(of=("self",))
+                .select_related("session", "branch", "location", "product", "requested_by", "counted_by")
+                .filter(pk=recount_id)
+                .first()
+            )
+            if recount is None:
+                return Response({"detail": "Recount task not found."}, status=status.HTTP_404_NOT_FOUND)
+            require_branch_access(request.user, recount.branch)
+            if recount.status == CycleCountRecount.Status.SUBMITTED:
+                return Response(_scanner_recount_summary(recount, include_result=True))
+            if recount.status not in [CycleCountRecount.Status.REQUESTED, CycleCountRecount.Status.IN_PROGRESS]:
+                return Response({"detail": "Recount task cannot be submitted."}, status=status.HTTP_400_BAD_REQUEST)
+            if location_code.upper() != recount.location.code.upper():
+                return Response({"detail": "Scanned location does not match the recount location."}, status=status.HTTP_400_BAD_REQUEST)
+            if product_code.upper() not in {recount.product.sku.upper(), recount.product.barcode.upper()}:
+                return Response({"detail": "Scanned product does not match the recount product."}, status=status.HTTP_400_BAD_REQUEST)
+            recount.counted_quantity = quantity
+            recount.counted_by = request.user
+            recount.counted_at = timezone.now()
+            recount.movement_after_baseline = _movement_after_recount_baseline(recount)
+            recount.status = CycleCountRecount.Status.SUBMITTED
+            if not recount.started_at:
+                recount.started_at = recount.counted_at
+                recount.started_by = request.user
+            recount.save(update_fields=[
+                "counted_quantity",
+                "counted_by",
+                "counted_at",
+                "movement_after_baseline",
+                "status",
+                "started_at",
+                "started_by",
+                "updated_at",
+            ])
+            AuditLog.objects.create(
+                actor=request.user,
+                action_type=AuditLog.ActionType.UPDATE,
+                event_type="cycle_count_recount_submitted",
+                branch=recount.branch,
+                product=recount.product,
+                quantity=quantity,
+                source_location=recount.location,
+                source_label=recount.location.code,
+                reference=recount.reference,
+                entity_name="CycleCountRecount",
+                entity_id=str(recount.id),
+                message=f"Worker {_scanner_actor_code(request)} submitted recount {recount.reference}.",
+            )
+        return Response(_scanner_recount_summary(recount, include_result=True))

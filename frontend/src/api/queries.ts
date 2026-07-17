@@ -21,6 +21,7 @@ import type {
   ReplenishmentRequest,
   RouteRun,
   ScannerContentsResponse,
+  ScannerCycleCountRecount,
   ScannerCycleCountResponse,
   ScannerCycleCountSession,
   ScannerLocationContentsResponse,
@@ -346,6 +347,42 @@ export function useResolveCycleCountWithoutAdjustment() {
     mutationFn: async (payload: { sessionId: number; lineId: number; note: string }) => {
       const response = await apiClient.post<CycleCountSession>(
         `/cycle-counts/${payload.sessionId}/lines/${payload.lineId}/resolve-without-adjustment/`,
+        { note: payload.note },
+      );
+      return response.data;
+    },
+  });
+}
+
+export function useRequestCycleCountRecount() {
+  return useMutation({
+    mutationFn: async (payload: { sessionId: number; lineId: number; reason: string }) => {
+      const response = await apiClient.post<CycleCountSession>(
+        `/cycle-counts/${payload.sessionId}/lines/${payload.lineId}/request-recount/`,
+        { reason: payload.reason },
+      );
+      return response.data;
+    },
+  });
+}
+
+export function useAcceptCycleCountRecount() {
+  return useMutation({
+    mutationFn: async (payload: { sessionId: number; recountId: number; note?: string }) => {
+      const response = await apiClient.post<CycleCountSession>(
+        `/cycle-counts/${payload.sessionId}/recounts/${payload.recountId}/accept/`,
+        { note: payload.note ?? "" },
+      );
+      return response.data;
+    },
+  });
+}
+
+export function useCancelCycleCountRecount() {
+  return useMutation({
+    mutationFn: async (payload: { sessionId: number; recountId: number; note: string }) => {
+      const response = await apiClient.post<CycleCountSession>(
+        `/cycle-counts/${payload.sessionId}/recounts/${payload.recountId}/cancel/`,
         { note: payload.note },
       );
       return response.data;
@@ -1044,6 +1081,56 @@ export function useScannerCycleCountSubmitLocation() {
       const response = await apiClient.post<ScannerCycleCountResponse>(
         `/scanner/cycle-counts/${sessionId}/locations/${locationId}/submit/`,
         { confirm_zeroes: confirmZeroes },
+      );
+      return response.data;
+    },
+  });
+}
+
+export function useScannerCycleCountRecounts(branch?: string) {
+  return useQuery({
+    enabled: Boolean(branch),
+    queryKey: ["scanner-cycle-count-recounts", branch],
+    queryFn: async () => {
+      const params = new URLSearchParams();
+      if (branch) params.set("branch", branch);
+      const response = await apiClient.get<{ results: ScannerCycleCountRecount[] }>(`/scanner/cycle-count-recounts/?${params.toString()}`);
+      return response.data.results;
+    },
+  });
+}
+
+export function useScannerCycleCountRecount(recountId?: string | number) {
+  return useQuery({
+    enabled: Boolean(recountId),
+    queryKey: ["scanner-cycle-count-recount", recountId],
+    queryFn: async () => {
+      const response = await apiClient.get<ScannerCycleCountRecount>(`/scanner/cycle-count-recounts/${recountId}/`);
+      return response.data;
+    },
+  });
+}
+
+export function useScannerCycleCountRecountSubmit() {
+  return useMutation({
+    mutationFn: async ({
+      locationCode,
+      productCode,
+      quantity,
+      recountId,
+    }: {
+      locationCode: string;
+      productCode: string;
+      quantity: string;
+      recountId: number;
+    }) => {
+      const response = await apiClient.post<ScannerCycleCountRecount>(
+        `/scanner/cycle-count-recounts/${recountId}/submit/`,
+        {
+          location_code: locationCode,
+          product_code: productCode,
+          quantity,
+        },
       );
       return response.data;
     },

@@ -7,6 +7,7 @@ from operations.models import (
     AuditLog,
     CycleCountLine,
     CycleCountLocation,
+    CycleCountRecount,
     CycleCountSession,
     DeliveryRoute,
     Order,
@@ -606,6 +607,8 @@ class StockMovementSerializer(serializers.ModelSerializer):
     cycle_count_line_id = serializers.IntegerField(source="cycle_count_line.id", read_only=True)
     cycle_count_session_id = serializers.IntegerField(source="cycle_count_line.session_id", read_only=True)
     cycle_count_session_reference = serializers.CharField(source="cycle_count_line.session.reference", read_only=True)
+    cycle_count_recount_id = serializers.IntegerField(source="cycle_count_recount.id", read_only=True)
+    cycle_count_recount_reference = serializers.CharField(source="cycle_count_recount.reference", read_only=True)
     status = serializers.SerializerMethodField()
     origin = serializers.SerializerMethodField()
 
@@ -675,6 +678,8 @@ class StockMovementSerializer(serializers.ModelSerializer):
             "cycle_count_line_id",
             "cycle_count_session_id",
             "cycle_count_session_reference",
+            "cycle_count_recount_id",
+            "cycle_count_recount_reference",
             "quantity",
             "quantity_before",
             "quantity_after",
@@ -683,6 +688,85 @@ class StockMovementSerializer(serializers.ModelSerializer):
             "performed_by_username",
             "status",
             "origin",
+            "created_at",
+            "updated_at",
+        ]
+
+
+class CycleCountRecountSerializer(serializers.ModelSerializer):
+    session_reference = serializers.CharField(source="session.reference", read_only=True)
+    branch_code = serializers.CharField(source="branch.code", read_only=True)
+    location_code = serializers.CharField(source="location.code", read_only=True)
+    location_name = serializers.CharField(source="location.name", read_only=True)
+    product_sku = serializers.CharField(source="product.sku", read_only=True)
+    product_name = serializers.CharField(source="product.name", read_only=True)
+    status_label = serializers.CharField(source="get_status_display", read_only=True)
+    requested_by_username = serializers.CharField(source="requested_by.username", read_only=True)
+    started_by_username = serializers.CharField(source="started_by.username", read_only=True)
+    counted_by_username = serializers.CharField(source="counted_by.username", read_only=True)
+    accepted_by_username = serializers.CharField(source="accepted_by.username", read_only=True)
+    cancelled_by_username = serializers.CharField(source="cancelled_by.username", read_only=True)
+    variance_quantity = serializers.SerializerMethodField()
+    is_executable = serializers.SerializerMethodField()
+    is_acceptable = serializers.SerializerMethodField()
+    is_cancellable = serializers.SerializerMethodField()
+
+    def get_variance_quantity(self, obj) -> str | None:
+        variance = obj.variance_quantity
+        return str(variance) if variance is not None else None
+
+    def get_is_executable(self, obj) -> bool:
+        return obj.status in [CycleCountRecount.Status.REQUESTED, CycleCountRecount.Status.IN_PROGRESS]
+
+    def get_is_acceptable(self, obj) -> bool:
+        return obj.status == CycleCountRecount.Status.SUBMITTED and not obj.movement_after_baseline
+
+    def get_is_cancellable(self, obj) -> bool:
+        return obj.status in [CycleCountRecount.Status.REQUESTED, CycleCountRecount.Status.IN_PROGRESS, CycleCountRecount.Status.SUBMITTED]
+
+    class Meta:
+        model = CycleCountRecount
+        fields = [
+            "id",
+            "reference",
+            "original_line",
+            "session",
+            "session_reference",
+            "branch",
+            "branch_code",
+            "location",
+            "location_code",
+            "location_name",
+            "product",
+            "product_sku",
+            "product_name",
+            "status",
+            "status_label",
+            "reason",
+            "requested_by",
+            "requested_by_username",
+            "requested_at",
+            "started_by",
+            "started_by_username",
+            "started_at",
+            "baseline_quantity",
+            "baseline_at",
+            "counted_quantity",
+            "counted_by",
+            "counted_by_username",
+            "counted_at",
+            "variance_quantity",
+            "movement_after_baseline",
+            "accepted_by",
+            "accepted_by_username",
+            "accepted_at",
+            "cancelled_by",
+            "cancelled_by_username",
+            "cancelled_at",
+            "review_note",
+            "is_executable",
+            "is_acceptable",
+            "is_cancellable",
             "created_at",
             "updated_at",
         ]
@@ -701,6 +785,12 @@ class CycleCountLineSerializer(serializers.ModelSerializer):
     adjustment_reference = serializers.SerializerMethodField()
     can_apply_adjustment = serializers.SerializerMethodField()
     adjustment_conflict_reason = serializers.SerializerMethodField()
+    recounts = CycleCountRecountSerializer(many=True, read_only=True)
+    active_recount = serializers.SerializerMethodField()
+    accepted_recount = serializers.SerializerMethodField()
+    effective_counted_quantity = serializers.SerializerMethodField()
+    effective_variance_quantity = serializers.SerializerMethodField()
+    effective_result_source = serializers.SerializerMethodField()
 
     def get_variance_quantity(self, obj) -> str | None:
         variance = obj.variance_quantity
@@ -727,6 +817,50 @@ class CycleCountLineSerializer(serializers.ModelSerializer):
         movement = getattr(obj, "reconciliation_stock_movement", None)
         return movement.reference if movement else None
 
+    def _active_recounts(self, obj):
+        return [
+            recount for recount in obj.recounts.all()
+            if recount.status in [
+                CycleCountRecount.Status.REQUESTED,
+                CycleCountRecount.Status.IN_PROGRESS,
+                CycleCountRecount.Status.SUBMITTED,
+            ]
+        ]
+
+    def _accepted_recounts(self, obj):
+        return [recount for recount in obj.recounts.all() if recount.status == CycleCountRecount.Status.ACCEPTED]
+
+    def _effective_recount(self, obj):
+        accepted = self._accepted_recounts(obj)
+        return sorted(accepted, key=lambda recount: recount.accepted_at or recount.updated_at, reverse=True)[0] if accepted else None
+
+    def get_active_recount(self, obj) -> dict | None:
+        active = self._active_recounts(obj)
+        if not active:
+            return None
+        return CycleCountRecountSerializer(active[0]).data
+
+    def get_accepted_recount(self, obj) -> dict | None:
+        recount = self._effective_recount(obj)
+        return CycleCountRecountSerializer(recount).data if recount else None
+
+    def get_effective_counted_quantity(self, obj) -> str | None:
+        recount = self._effective_recount(obj)
+        if recount:
+            return str(recount.counted_quantity) if recount.counted_quantity is not None else None
+        return str(obj.counted_quantity) if obj.counted_quantity is not None else None
+
+    def get_effective_variance_quantity(self, obj) -> str | None:
+        recount = self._effective_recount(obj)
+        if recount:
+            variance = recount.variance_quantity
+            return str(variance) if variance is not None else None
+        variance = obj.variance_quantity
+        return str(variance) if variance is not None else None
+
+    def get_effective_result_source(self, obj) -> str:
+        return "accepted_recount" if self._effective_recount(obj) else "original_count"
+
     def get_can_apply_adjustment(self, obj) -> bool:
         return self.get_adjustment_conflict_reason(obj) is None
 
@@ -740,7 +874,12 @@ class CycleCountLineSerializer(serializers.ModelSerializer):
             return "Line has no variance."
         if obj.reconciliation_status != CycleCountLine.ReconciliationStatus.PENDING_REVIEW:
             return "Line has already been reconciled."
-        if obj.movement_after_snapshot:
+        if self._active_recounts(obj):
+            return "Active recount must be completed or cancelled first."
+        accepted = self._effective_recount(obj)
+        if accepted and accepted.movement_after_baseline:
+            return "Accepted recount has movement after its baseline."
+        if not accepted and obj.movement_after_snapshot:
             return "Inventory moved after the cycle count snapshot."
         return None
 
@@ -770,6 +909,12 @@ class CycleCountLineSerializer(serializers.ModelSerializer):
             "adjustment_reference",
             "can_apply_adjustment",
             "adjustment_conflict_reason",
+            "recounts",
+            "active_recount",
+            "accepted_recount",
+            "effective_counted_quantity",
+            "effective_variance_quantity",
+            "effective_result_source",
             "counted_by",
             "counted_by_username",
             "counted_at",
@@ -851,6 +996,9 @@ class CycleCountSessionSerializer(serializers.ModelSerializer):
     zero_variance_count = serializers.SerializerMethodField()
     reconciliation_complete = serializers.SerializerMethodField()
     can_close = serializers.SerializerMethodField()
+    active_recount_count = serializers.SerializerMethodField()
+    submitted_recount_count = serializers.SerializerMethodField()
+    accepted_recount_count = serializers.SerializerMethodField()
 
     def _lines(self, obj):
         return list(obj.lines.all())
@@ -906,7 +1054,22 @@ class CycleCountSessionSerializer(serializers.ModelSerializer):
             return False
         if obj.locations.exclude(status=CycleCountLocation.Status.SUBMITTED).exists():
             return False
+        if obj.recounts.filter(status__in=[
+            CycleCountRecount.Status.REQUESTED,
+            CycleCountRecount.Status.IN_PROGRESS,
+            CycleCountRecount.Status.SUBMITTED,
+        ]).exists():
+            return False
         return self.get_reconciliation_complete(obj)
+
+    def get_active_recount_count(self, obj) -> int:
+        return obj.recounts.filter(status__in=[CycleCountRecount.Status.REQUESTED, CycleCountRecount.Status.IN_PROGRESS]).count()
+
+    def get_submitted_recount_count(self, obj) -> int:
+        return obj.recounts.filter(status=CycleCountRecount.Status.SUBMITTED).count()
+
+    def get_accepted_recount_count(self, obj) -> int:
+        return obj.recounts.filter(status=CycleCountRecount.Status.ACCEPTED).count()
 
     class Meta:
         model = CycleCountSession
@@ -946,6 +1109,9 @@ class CycleCountSessionSerializer(serializers.ModelSerializer):
             "zero_variance_count",
             "reconciliation_complete",
             "can_close",
+            "active_recount_count",
+            "submitted_recount_count",
+            "accepted_recount_count",
             "locations",
             "created_at",
             "updated_at",
