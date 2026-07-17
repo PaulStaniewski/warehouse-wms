@@ -1,4 +1,4 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQueries, useQuery } from "@tanstack/react-query";
 import axios from "axios";
 
 import { apiClient, getHealth, getList } from "./client";
@@ -51,6 +51,45 @@ import type {
   TransferDiscrepancyTransitInvestigation,
   TransferDiscrepancyTransitInvestigationResponse,
 } from "../types/api";
+
+type DashboardCountParams = {
+  branch?: string;
+  branchParam?: string;
+  endpoint: string;
+  key: string;
+  statuses?: string[];
+};
+
+function buildCountPath(endpoint: string, branch?: string, status?: string, branchParam = "branch") {
+  const params = new URLSearchParams();
+  if (branch) params.set(branchParam, branch);
+  if (status) params.set("status", status);
+  const query = params.toString();
+  return `${endpoint}${query ? `?${query}` : ""}`;
+}
+
+export function useDashboardResourceCount({ branch, branchParam = "branch", endpoint, key, statuses = [] }: DashboardCountParams) {
+  const queryStatuses = statuses.length > 0 ? statuses : [""];
+  const queries = useQueries({
+    queries: queryStatuses.map((status) => ({
+      enabled: Boolean(branch),
+      queryKey: ["dashboard-count", key, branch, branchParam, status || "all"],
+      queryFn: async () => {
+        const response = await getList<unknown>(buildCountPath(endpoint, branch, status || undefined, branchParam));
+        return response.count;
+      },
+    })),
+  });
+
+  return {
+    count: queries.reduce((total, query) => total + (query.data ?? 0), 0),
+    error: queries.find((query) => query.error)?.error ?? null,
+    isError: queries.some((query) => query.isError),
+    isLoading: queries.some((query) => query.isLoading),
+    isSuccess: queries.every((query) => query.isSuccess),
+    refetch: () => Promise.all(queries.map((query) => query.refetch())),
+  };
+}
 
 
 export function useHealth() {

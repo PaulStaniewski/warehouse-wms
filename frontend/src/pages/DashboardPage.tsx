@@ -1,178 +1,380 @@
-import { DataState } from "../components/DataState";
-import { DataTable } from "../components/DataTable";
+import {
+  AlertTriangle,
+  ArrowRight,
+  Boxes,
+  ClipboardCheck,
+  ClipboardList,
+  ExternalLink,
+  History,
+  ListChecks,
+  PackageSearch,
+  RefreshCw,
+  Route,
+  ScanLine,
+  Truck,
+} from "lucide-react";
+import type { ReactNode } from "react";
+import { Link } from "react-router-dom";
+
+import { useActiveBranch } from "../api/ActiveBranchContext";
+import { useCurrentAuditLogs, useDashboardResourceCount, useHealth } from "../api/queries";
 import { PageHeader } from "../components/PageHeader";
 import { StatusBadge } from "../components/StatusBadge";
-import {
-  useHealth,
-  useInventoryItems,
-  useLocations,
-  useOrders,
-  usePickingTasks,
-  useProducts,
-  useReturnBatches,
-  useRouteRuns,
-} from "../api/queries";
-import { useActiveBranch } from "../api/ActiveBranchContext";
-import type { Order, ReturnBatch } from "../types/api";
 
+type DashboardCountQuery = ReturnType<typeof useDashboardResourceCount>;
 
-const orderStatuses = ["imported", "allocated", "picking", "completed", "cancelled"];
-const pickingStatuses = ["open", "assigned", "in_progress", "completed", "cancelled"];
+type Metric = {
+  countQuery: DashboardCountQuery;
+  description: string;
+  icon: ReactNode;
+  label: string;
+  to: string;
+  tone?: "attention" | "neutral";
+};
 
+type QuickLink = {
+  description: string;
+  external?: boolean;
+  icon: ReactNode;
+  label: string;
+  to: string;
+};
 
-function SummaryCard({ label, value }: { label: string; value: number | string }) {
-  return (
-    <article className="summary-card">
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </article>
-  );
+function formatStatusList(statuses: string[]) {
+  return statuses.map((status) => status.replaceAll("_", " ")).join(", ");
 }
 
-function countByStatus<T extends { status: string }>(items: T[], statuses: string[]) {
-  return statuses
-    .map((status) => ({
-      status,
-      count: items.filter((item) => item.status === status).length,
-    }))
-    .filter((item) => item.count > 0);
-}
-
-function formatStatus(status: string) {
-  return status.replaceAll("_", " ");
-}
-
-function formatDate(value: string | null) {
-  if (!value) {
-    return <span className="muted">Not set</span>;
-  }
-
+function formatDateTime(value: string) {
   return new Intl.DateTimeFormat("en-GB", {
-    year: "numeric",
-    month: "short",
     day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    month: "short",
   }).format(new Date(value));
 }
 
-function StatusOverview({ title, items }: { title: string; items: Array<{ status: string; count: number }> }) {
+function MetricCard({ metric }: { metric: Metric }) {
+  const { countQuery } = metric;
+  const isAttention = metric.tone === "attention" && countQuery.isSuccess && countQuery.count > 0;
+
   return (
-    <section className="panel overview-panel">
+    <Link className={isAttention ? "dashboard-metric dashboard-metric--attention" : "dashboard-metric"} to={metric.to}>
+      <div className="dashboard-metric-icon">{metric.icon}</div>
+      <div>
+        <span>{metric.label}</span>
+        {countQuery.isLoading ? (
+          <strong className="dashboard-metric-loading">Loading</strong>
+        ) : countQuery.isError ? (
+          <strong className="dashboard-metric-error">Error</strong>
+        ) : (
+          <strong>{countQuery.count}</strong>
+        )}
+        <p>{metric.description}</p>
+      </div>
+      {countQuery.isError ? (
+        <button
+          className="dashboard-metric-retry"
+          onClick={(event) => {
+            event.preventDefault();
+            void countQuery.refetch();
+          }}
+          type="button"
+        >
+          <RefreshCw size={14} />
+          Retry
+        </button>
+      ) : (
+        <ArrowRight className="dashboard-metric-arrow" size={18} />
+      )}
+    </Link>
+  );
+}
+
+function DashboardSection({ metrics, title }: { metrics: Metric[]; title: string }) {
+  if (metrics.length === 0) {
+    return null;
+  }
+
+  const hasLoadedAttention = metrics.some(
+    (metric) => metric.tone === "attention" && metric.countQuery.isSuccess && metric.countQuery.count > 0,
+  );
+  const allLoaded = metrics.every((metric) => metric.countQuery.isSuccess);
+
+  return (
+    <section className="dashboard-section">
       <div className="section-header">
         <h2>{title}</h2>
+        {allLoaded && title === "Requires Attention" && (
+          <span className={hasLoadedAttention ? "dashboard-section-note dashboard-section-note--warning" : "dashboard-section-note"}>
+            {hasLoadedAttention ? "Review required" : "No current attention items"}
+          </span>
+        )}
       </div>
-      {items.length === 0 ? (
-        <p className="empty-panel-text">No matching statuses yet.</p>
-      ) : (
-        <div className="status-overview-list">
-          {items.map((item) => (
-            <div className="status-overview-row" key={item.status}>
-              <span>{formatStatus(item.status)}</span>
-              <strong>{item.count}</strong>
-            </div>
-          ))}
-        </div>
-      )}
+      <div className="dashboard-operational-grid">
+        {metrics.map((metric) => (
+          <MetricCard key={metric.label} metric={metric} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function QuickAccess({ links }: { links: QuickLink[] }) {
+  return (
+    <section className="dashboard-section">
+      <div className="section-header">
+        <h2>Quick Access</h2>
+      </div>
+      <div className="dashboard-quick-grid">
+        {links.map((link) =>
+          link.external ? (
+            <a className="dashboard-quick-link" href={link.to} key={link.label} rel="noopener noreferrer" target="_blank">
+              {link.icon}
+              <span>
+                <strong>{link.label}</strong>
+                <small>{link.description}</small>
+              </span>
+              <ExternalLink size={15} />
+            </a>
+          ) : (
+            <Link className="dashboard-quick-link" key={link.label} to={link.to}>
+              {link.icon}
+              <span>
+                <strong>{link.label}</strong>
+                <small>{link.description}</small>
+              </span>
+              <ArrowRight size={15} />
+            </Link>
+          ),
+        )}
+      </div>
+    </section>
+  );
+}
+
+function RecentActivity({ branchCode }: { branchCode: string }) {
+  const events = useCurrentAuditLogs(branchCode);
+  const rows = events.data?.results.slice(0, 6) ?? [];
+
+  return (
+    <section className="dashboard-section">
+      <div className="section-header">
+        <h2>Recent Activity</h2>
+        <Link className="dashboard-section-link" to="/wms/events/current">
+          Current Events
+        </Link>
+      </div>
+      <div className="dashboard-activity-panel">
+        {events.isLoading ? (
+          <p className="empty-panel-text">Loading recent activity...</p>
+        ) : events.isError ? (
+          <div className="state-box state-box--error">Could not load recent activity.</div>
+        ) : rows.length === 0 ? (
+          <p className="empty-panel-text">No recent branch activity found.</p>
+        ) : (
+          rows.map((event) => (
+            <article className="dashboard-activity-row" key={event.id}>
+              <time>{formatDateTime(event.created_at)}</time>
+              <div>
+                <strong>{event.event_type.replaceAll("_", " ")}</strong>
+                <span>{event.message || event.reference || event.entity_name}</span>
+              </div>
+              <small>{event.actor_display || event.actor_username || "System"}</small>
+            </article>
+          ))
+        )}
+      </div>
     </section>
   );
 }
 
 export function DashboardPage() {
-  const { activeBranchCode } = useActiveBranch();
+  const { activeBranch, activeBranchCode, activeMembership, isLoading: branchLoading } = useActiveBranch();
   const health = useHealth();
-  const products = useProducts();
-  const inventory = useInventoryItems(activeBranchCode);
-  const orders = useOrders(activeBranchCode);
-  const locations = useLocations(activeBranchCode);
-  const pickingTasks = usePickingTasks();
-  const returnBatches = useReturnBatches();
-  const routeRuns = useRouteRuns();
+
+  const openPickingShortages = useDashboardResourceCount({
+    branch: activeBranchCode,
+    endpoint: "/picking-shortages/",
+    key: "picking-shortages-open",
+    statuses: ["open"],
+  });
+  const unresolvedDiscrepancies = useDashboardResourceCount({
+    branch: activeBranchCode,
+    endpoint: "/transfer-discrepancies/",
+    key: "transfer-discrepancies-unresolved",
+    statuses: ["open", "investigating"],
+  });
+  const sourceReviews = useDashboardResourceCount({
+    branch: activeBranchCode,
+    endpoint: "/transfer-discrepancy-source-reviews/",
+    key: "source-reviews-active",
+    statuses: ["pending_review", "investigating"],
+  });
+  const reconciliations = useDashboardResourceCount({
+    branch: activeBranchCode,
+    endpoint: "/transfer-discrepancy-reconciliations/",
+    key: "reconciliations-active",
+    statuses: ["pending_action", "in_progress", "manual_action_required"],
+  });
+  const actionQueue = useDashboardResourceCount({
+    branch: activeBranchCode,
+    endpoint: "/transfer-discrepancy-actions/",
+    key: "action-queue",
+  });
+  const activeOrders = useDashboardResourceCount({
+    branch: activeBranchCode,
+    endpoint: "/orders/",
+    key: "active-orders",
+    statuses: ["imported", "allocated", "picking"],
+  });
+  const openReplenishment = useDashboardResourceCount({
+    branch: activeBranchCode,
+    endpoint: "/replenishment-requests/",
+    key: "replenishment-open",
+    statuses: ["pending_order"],
+  });
+  const activeRoutes = useDashboardResourceCount({
+    branch: activeBranchCode,
+    branchParam: "branch_code",
+    endpoint: "/route-runs/",
+    key: "active-routes",
+    statuses: ["open", "syncing", "picking", "ready_to_close"],
+  });
+  const routesAwaitingClosure = useDashboardResourceCount({
+    branch: activeBranchCode,
+    branchParam: "branch_code",
+    endpoint: "/route-runs/",
+    key: "routes-awaiting-closure",
+    statuses: ["ready_to_close"],
+  });
+  const transitInvestigations = useDashboardResourceCount({
+    branch: activeBranchCode,
+    endpoint: "/transfer-discrepancy-transit-investigations/",
+    key: "transit-investigations-active",
+    statuses: ["pending_investigation", "investigating"],
+  });
 
   const backendTone = health.isLoading ? "loading" : health.data?.status === "ok" ? "ok" : "error";
   const backendLabel = health.isLoading ? "Backend: checking" : `Backend: ${health.data?.status ?? "error"}`;
-  const allQueries = [products, inventory, orders, locations, pickingTasks, returnBatches, routeRuns];
 
-  const orderRows = orders.data?.results ?? [];
-  const pickingRows = pickingTasks.data?.results ?? [];
-  const returnRows = returnBatches.data?.results ?? [];
-  const routeRunRows = routeRuns.data?.results ?? [];
-  const orderStatusOverview = countByStatus(orderRows, orderStatuses);
-  const pickingWorkload = countByStatus(pickingRows, pickingStatuses);
-  const verifiedReturnBatches = returnRows.filter((batch) => batch.status === "verified");
-  const recentOrders = orderRows.slice(0, 5);
+  if (branchLoading) {
+    return <div className="state-box">Loading branch context...</div>;
+  }
+
+  if (!activeBranchCode || !activeBranch || !activeMembership) {
+    return (
+      <div className="state-box state-box--error">
+        No active branch is available for this account.
+      </div>
+    );
+  }
+
+  const attentionMetrics: Metric[] = [
+    {
+      countQuery: openPickingShortages,
+      description: `Status: ${formatStatusList(["open"])}`,
+      icon: <AlertTriangle size={22} />,
+      label: "Open picking shortages",
+      to: "/wms/picking-shortages",
+      tone: "attention",
+    },
+    {
+      countQuery: unresolvedDiscrepancies,
+      description: `Statuses: ${formatStatusList(["open", "investigating"])}`,
+      icon: <ClipboardCheck size={22} />,
+      label: "Unresolved discrepancies",
+      to: "/wms/discrepancies",
+      tone: "attention",
+    },
+    {
+      countQuery: sourceReviews,
+      description: `Statuses: ${formatStatusList(["pending_review", "investigating"])}`,
+      icon: <PackageSearch size={22} />,
+      label: "Source reviews",
+      to: "/wms/source-discrepancy-reviews",
+      tone: "attention",
+    },
+    {
+      countQuery: reconciliations,
+      description: `Statuses: ${formatStatusList(["pending_action", "in_progress", "manual_action_required"])}`,
+      icon: <ClipboardList size={22} />,
+      label: "Reconciliations",
+      to: "/wms/discrepancy-reconciliations",
+      tone: "attention",
+    },
+  ];
+
+  const warehouseMetrics: Metric[] = [
+    {
+      countQuery: actionQueue,
+      description: "Currently actionable discrepancy work",
+      icon: <ListChecks size={22} />,
+      label: "Action queue",
+      to: "/wms/discrepancy-actions",
+    },
+    {
+      countQuery: activeOrders,
+      description: `Statuses: ${formatStatusList(["imported", "allocated", "picking"])}`,
+      icon: <ClipboardList size={22} />,
+      label: "Active orders",
+      to: "/wms/orders",
+    },
+    {
+      countQuery: openReplenishment,
+      description: `Status: ${formatStatusList(["pending_order"])}`,
+      icon: <Boxes size={22} />,
+      label: "Open replenishment",
+      to: "/wms/replenishment-requests",
+    },
+  ];
+
+  const transportMetrics: Metric[] = [
+    {
+      countQuery: activeRoutes,
+      description: `Statuses: ${formatStatusList(["open", "syncing", "picking", "ready_to_close"])}`,
+      icon: <Route size={22} />,
+      label: "Active route runs",
+      to: "/wms/routes-monitor",
+    },
+    {
+      countQuery: routesAwaitingClosure,
+      description: `Status: ${formatStatusList(["ready_to_close"])}`,
+      icon: <Truck size={22} />,
+      label: "Routes awaiting closure",
+      to: "/wms/routes-monitor",
+      tone: "attention",
+    },
+    {
+      countQuery: transitInvestigations,
+      description: `Statuses: ${formatStatusList(["pending_investigation", "investigating"])}`,
+      icon: <Truck size={22} />,
+      label: "Transit investigations",
+      to: "/wms/transit-investigations",
+      tone: "attention",
+    },
+  ];
+
+  const quickLinks: QuickLink[] = [
+    { description: "Unified discrepancy work", icon: <ListChecks size={20} />, label: "Action Queue", to: "/wms/discrepancy-actions" },
+    { description: "Route progress and close readiness", icon: <Route size={20} />, label: "Routes Monitor", to: "/wms/routes-monitor" },
+    { description: "Branch stock positions", icon: <Boxes size={20} />, label: "Inventory", to: "/wms/inventory" },
+    { description: "Open shortage follow-up", icon: <AlertTriangle size={20} />, label: "Picking Shortages", to: "/wms/picking-shortages" },
+    { description: "Open handheld scanner UI", external: true, icon: <ScanLine size={20} />, label: "Open Scanner", to: "/scanner" },
+  ];
 
   return (
     <>
       <PageHeader
         title="Warehouse overview"
-        description="Live read-only snapshot from the warehouse API."
+        description={`Operational snapshot for ${activeBranch.code} / ${activeBranch.name}.`}
         action={<StatusBadge tone={backendTone} label={backendLabel} />}
       />
 
-      <DataState
-        isLoading={allQueries.some((query) => query.isLoading)}
-        isError={allQueries.some((query) => query.isError)}
-        error={allQueries.find((query) => query.error)?.error ?? null}
-      >
-        <section className="summary-grid">
-          <SummaryCard label="Products" value={products.data?.count ?? 0} />
-          <SummaryCard label="Locations" value={locations.data?.count ?? 0} />
-          <SummaryCard label="Inventory items" value={inventory.data?.count ?? 0} />
-          <SummaryCard label="Orders" value={orders.data?.count ?? 0} />
-          <SummaryCard label="Open picking tasks" value={pickingRows.filter((task) => task.status === "open").length} />
-          <SummaryCard label="Verified returns" value={verifiedReturnBatches.length} />
-          <SummaryCard label="Urgent route runs" value={routeRunRows.filter((run) => run.is_urgent).length} />
-        </section>
-
-        <section className="dashboard-grid">
-          <StatusOverview title="Order status overview" items={orderStatusOverview} />
-          <StatusOverview title="Picking workload" items={pickingWorkload} />
-        </section>
-
-        <section className="dashboard-section">
-          <div className="section-header">
-            <h2>Recent orders</h2>
-          </div>
-          <DataTable<Order>
-            rows={recentOrders}
-            emptyMessage="No recent orders found."
-            columns={[
-              {
-                key: "reference",
-                header: "External reference",
-                render: (order) => <span className="mono">{order.external_reference}</span>,
-              },
-              { key: "branch", header: "Branch", render: (order) => order.branch_code },
-              {
-                key: "customer",
-                header: "Customer",
-                render: (order) => order.customer_name || <span className="muted">None</span>,
-              },
-              { key: "status", header: "Status", render: (order) => formatStatus(order.status) },
-              { key: "date", header: "Requested ship date", render: (order) => formatDate(order.requested_ship_date) },
-            ]}
-          />
-        </section>
-
-        <section className="dashboard-section">
-          <div className="section-header">
-            <h2>Returns waiting for put-away</h2>
-          </div>
-          <DataTable<ReturnBatch>
-            rows={verifiedReturnBatches}
-            emptyMessage="No verified return batches waiting for put-away."
-            columns={[
-              {
-                key: "reference",
-                header: "Reference",
-                render: (batch) => <span className="mono">{batch.reference}</span>,
-              },
-              { key: "branch", header: "Branch", render: (batch) => batch.branch_code },
-              { key: "status", header: "Status", render: (batch) => formatStatus(batch.status) },
-              { key: "received", header: "Received at", render: (batch) => formatDate(batch.received_at) },
-            ]}
-          />
-        </section>
-      </DataState>
+      <DashboardSection metrics={attentionMetrics} title="Requires Attention" />
+      <DashboardSection metrics={warehouseMetrics} title="Warehouse Operations" />
+      <DashboardSection metrics={transportMetrics} title="Transport & Routes" />
+      <QuickAccess links={quickLinks} />
+      <RecentActivity branchCode={activeBranchCode} />
     </>
   );
 }
