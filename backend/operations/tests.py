@@ -8049,6 +8049,7 @@ class ScannerPickingJobWorkflowTests(APITestCase):
             {"session_id": session_id, "order_reference": "JOB-ORDER-1", "printer_code": "ZEBRA-01"},
             format="json",
         )
+        UserBranchMembership.objects.create(user=self.gdy_worker, branch=self.branch, role=UserBranchMembership.Role.WORKER)
         self.client.force_authenticate(self.gdy_worker)
 
         response = self.client.post(
@@ -8141,6 +8142,505 @@ class ScannerPickingJobWorkflowTests(APITestCase):
         self.assertEqual(job.status, PickingJob.Status.COMPLETED)
         self.assertEqual(cart_work.status, CartWorkSession.Status.COMPLETED)
         self.assertEqual(cart_work.cart.status, ScannerCart.Status.AVAILABLE)
+
+
+class CriticalPickingControlFixtureMixin:
+    def setUp(self):
+        self.branch = Branch.objects.create(code="PCK", name="Critical Picking", city="Gdynia", country="Poland")
+        self.unrelated_branch = Branch.objects.create(code="OTH", name="Other Branch", city="Gdansk", country="Poland")
+        self.worker = create_branch_user("PCK_WORKER", self.branch, UserBranchMembership.Role.WORKER)
+        self.control_worker = create_branch_user("PCK_CONTROL", self.branch, UserBranchMembership.Role.WORKER)
+        self.leader = create_branch_user("PCK_LEADER", self.branch, UserBranchMembership.Role.LEADER)
+        self.unrelated_worker = create_branch_user("OTH_WORKER", self.unrelated_branch, UserBranchMembership.Role.WORKER)
+        self.unrelated_leader = create_branch_user("OTH_LEADER", self.unrelated_branch, UserBranchMembership.Role.LEADER)
+        self.location_a = Location.objects.create(
+            branch=self.branch,
+            code="PCK-A-01",
+            name="PCK-A-01",
+            location_type=Location.LocationType.PICKING,
+        )
+        self.location_b = Location.objects.create(
+            branch=self.branch,
+            code="PCK-B-01",
+            name="PCK-B-01",
+            location_type=Location.LocationType.PICKING,
+        )
+        self.wrong_location = Location.objects.create(
+            branch=self.branch,
+            code="PCK-Z-99",
+            name="PCK-Z-99",
+            location_type=Location.LocationType.PICKING,
+        )
+        self.unconfirmed_location = Location.objects.create(
+            branch=self.branch,
+            code="UNCONFIRMED",
+            name="UNCONFIRMED",
+            location_type=Location.LocationType.RECEIVING,
+        )
+        self.unrelated_location = Location.objects.create(
+            branch=self.unrelated_branch,
+            code="OTH-A-01",
+            name="OTH-A-01",
+            location_type=Location.LocationType.PICKING,
+        )
+        self.product_a = Product.objects.create(
+            sku="PCK-A",
+            name="Critical Pick Product A",
+            barcode="770000000001",
+            unit_of_measure="pcs",
+        )
+        self.product_b = Product.objects.create(
+            sku="PCK-B",
+            name="Critical Pick Product B",
+            barcode="770000000002",
+            unit_of_measure="pcs",
+        )
+        self.unrelated_product = Product.objects.create(
+            sku="OTH-P",
+            name="Other Branch Product",
+            barcode="779900000001",
+            unit_of_measure="pcs",
+        )
+        InventoryItem.objects.create(
+            branch=self.branch,
+            location=self.unconfirmed_location,
+            product=self.product_a,
+            quantity_on_hand=Decimal("0"),
+            quantity_reserved=Decimal("0"),
+        )
+        InventoryItem.objects.create(
+            branch=self.unrelated_branch,
+            location=self.unrelated_location,
+            product=self.unrelated_product,
+            quantity_on_hand=Decimal("9"),
+            quantity_reserved=Decimal("0"),
+        )
+
+    def create_route_work(self, *, reference, route_code, quantity_a, quantity_b, stock_a, stock_b):
+        route = DeliveryRoute.objects.create(branch=self.branch, code=route_code, name=f"{route_code} Route")
+        route_run = RouteRun.objects.create(
+            route=route,
+            service_date=timezone.localdate(),
+            run_number=1,
+            order_cutoff_time=time(8, 30),
+            sync_time=time(8, 45),
+            departure_time=time(12, 0),
+            status=RouteRun.Status.OPEN,
+        )
+        order = Order.objects.create(
+            branch=self.branch,
+            route_run=route_run,
+            external_reference=reference,
+            customer_name="Critical Customer",
+            customer_alias="CRIT-CUST",
+            status=Order.Status.IMPORTED,
+        )
+        line_a = OrderLine.objects.create(
+            order=order,
+            product=self.product_a,
+            line_number=1,
+            quantity_ordered=Decimal(str(quantity_a)),
+            quantity_picked=Decimal("0"),
+        )
+        line_b = OrderLine.objects.create(
+            order=order,
+            product=self.product_b,
+            line_number=2,
+            quantity_ordered=Decimal(str(quantity_b)),
+            quantity_picked=Decimal("0"),
+        )
+        task_a = PickingTask.objects.create(
+            branch=self.branch,
+            order_line=line_a,
+            source_location=self.location_a,
+            status=PickingTask.Status.OPEN,
+            quantity_to_pick=Decimal(str(quantity_a)),
+        )
+        task_b = PickingTask.objects.create(
+            branch=self.branch,
+            order_line=line_b,
+            source_location=self.location_b,
+            status=PickingTask.Status.OPEN,
+            quantity_to_pick=Decimal(str(quantity_b)),
+        )
+        inventory_a = InventoryItem.objects.create(
+            branch=self.branch,
+            location=self.location_a,
+            product=self.product_a,
+            quantity_on_hand=Decimal(str(stock_a)),
+            quantity_reserved=Decimal("0"),
+        )
+        inventory_b = InventoryItem.objects.create(
+            branch=self.branch,
+            location=self.location_b,
+            product=self.product_b,
+            quantity_on_hand=Decimal(str(stock_b)),
+            quantity_reserved=Decimal("0"),
+        )
+        return {
+            "route_run": route_run,
+            "order": order,
+            "task_a": task_a,
+            "task_b": task_b,
+            "inventory_a": inventory_a,
+            "inventory_b": inventory_b,
+        }
+
+    def create_unrelated_route_work(self, suffix="1"):
+        route = DeliveryRoute.objects.create(branch=self.unrelated_branch, code=f"OTH-R-{suffix}", name="Other Route")
+        route_run = RouteRun.objects.create(
+            route=route,
+            service_date=timezone.localdate(),
+            run_number=1,
+            order_cutoff_time=time(8, 30),
+            sync_time=time(8, 45),
+            departure_time=time(12, 0),
+            status=RouteRun.Status.OPEN,
+        )
+        order = Order.objects.create(
+            branch=self.unrelated_branch,
+            route_run=route_run,
+            external_reference=f"ORDER-CRIT-PICK-OTHER-{suffix}",
+            customer_name="Other Customer",
+            status=Order.Status.IMPORTED,
+        )
+        line = OrderLine.objects.create(
+            order=order,
+            product=self.unrelated_product,
+            line_number=1,
+            quantity_ordered=Decimal("1"),
+        )
+        return PickingTask.objects.create(
+            branch=self.unrelated_branch,
+            order_line=line,
+            source_location=self.unrelated_location,
+            status=PickingTask.Status.OPEN,
+            quantity_to_pick=Decimal("1"),
+        )
+
+    def create_job(self, route_run):
+        response = self.client.post(
+            "/api/scanner/proformas/create-jobs/",
+            {"route_run_ids": [route_run.id], "mode": "merged"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        return PickingJob.objects.get(id=response.data["jobs"][0]["id"])
+
+    def start_job(self, job, cart_code):
+        response = self.client.post(f"/api/scanner/tasks/{job.id}/start/", {"cart_code": cart_code}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        return response.data["session"]["id"], response.data["cart_work_session"]["id"]
+
+    def confirm_location(self, cart_work_session_id, location_code):
+        return self.client.post(
+            "/api/scanner/picking/confirm-location/",
+            {"cart_work_session_id": cart_work_session_id, "location_code": location_code},
+            format="json",
+        )
+
+    def pick(self, cart_work_session_id, product_code, quantity):
+        return self.client.post(
+            "/api/scanner/picking/pick/",
+            {"cart_work_session_id": cart_work_session_id, "product_code": product_code, "quantity": str(quantity)},
+            format="json",
+        )
+
+    def claim(self, cart_work_session_id, mode="beginning", picking_task_id=None):
+        payload = {"cart_work_session_id": cart_work_session_id, "mode": mode}
+        if picking_task_id is not None:
+            payload["picking_task_id"] = picking_task_id
+        return self.client.post("/api/scanner/cart-work/claim/", payload, format="json")
+
+    def shortage_challenge(self, cart_work_session_id, quantity):
+        return self.client.post(
+            "/api/scanner/picking/shortage-challenge/",
+            {"cart_work_session_id": cart_work_session_id, "quantity": str(quantity)},
+            format="json",
+        )
+
+    def report_shortage(self, challenge, operation_id="critical-shortage"):
+        return self.client.post(
+            "/api/scanner/picking/report-shortage/",
+            {
+                "challenge_token": challenge.data["challenge_token"],
+                "confirmation_code": challenge.data["confirmation_code"],
+                "client_operation_id": operation_id,
+            },
+            format="json",
+        )
+
+    def print_label(self, session_id, order_reference):
+        return self.client.post(
+            "/api/scanner/control/print-label/",
+            {"session_id": session_id, "order_reference": order_reference, "printer_code": "CRIT-PRINTER"},
+            format="json",
+        )
+
+    def prepare(self, session_id, order_reference, product_code, quantity):
+        return self.client.post(
+            "/api/scanner/picking/prepare/",
+            {
+                "session_id": session_id,
+                "order_reference": order_reference,
+                "product_code": product_code,
+                "quantity": str(quantity),
+            },
+            format="json",
+        )
+
+    def category_count(self, response, key):
+        category = next(item for item in response.data["categories"] if item["key"] == key)
+        return category["count"]
+
+
+class CriticalExactPickingControlIntegrationTests(CriticalPickingControlFixtureMixin, APITestCase):
+    def test_exact_picking_to_control_completion_is_branch_scoped_and_immutable(self):
+        work = self.create_route_work(
+            reference="ORDER-CRIT-PICK-EXACT",
+            route_code="CRIT-EXACT",
+            quantity_a="3",
+            quantity_b="2",
+            stock_a="5",
+            stock_b="4",
+        )
+        self.create_unrelated_route_work("visibility")
+
+        unauthenticated = self.client.get("/api/scanner/tasks/")
+        self.assertEqual(unauthenticated.status_code, status.HTTP_403_FORBIDDEN)
+        self.client.force_authenticate(self.worker)
+        proformas = self.client.get("/api/scanner/proformas/", {"branch": self.branch.id})
+        self.assertEqual(proformas.status_code, status.HTTP_200_OK)
+        self.assertTrue(any(row["id"] == work["route_run"].id and row["akt"] == 2 for row in proformas.data["results"]))
+
+        job = self.create_job(work["route_run"])
+        tasks = self.client.get("/api/scanner/tasks/")
+        self.assertEqual(tasks.status_code, status.HTTP_200_OK)
+        self.assertTrue(any(row["id"] == job.id and row["total_lines"] == 2 for row in tasks.data["results"]))
+
+        self.client.force_authenticate(self.unrelated_worker)
+        unrelated_tasks = self.client.get("/api/scanner/tasks/")
+        self.assertEqual(unrelated_tasks.status_code, status.HTTP_200_OK)
+        self.assertFalse(any(row["id"] == job.id for row in unrelated_tasks.data["results"]))
+        forbidden_start = self.client.post(f"/api/scanner/tasks/{job.id}/start/", {"cart_code": "CART-CRIT-PICK-EXACT"}, format="json")
+        self.assertEqual(forbidden_start.status_code, status.HTTP_403_FORBIDDEN)
+
+        self.client.force_authenticate(self.worker)
+        session_id, cart_work_session_id = self.start_job(job, "CART-CRIT-PICK-EXACT")
+        duplicate_join = self.client.post("/api/scanner/cart-work/join/", {"cart_barcode": "CART-CRIT-PICK-EXACT"}, format="json")
+        self.assertEqual(duplicate_join.status_code, status.HTTP_200_OK)
+        self.assertEqual(CartWorkParticipant.objects.filter(cart_work_session_id=cart_work_session_id, user=self.worker).count(), 1)
+        direction = self.claim(cart_work_session_id, mode="beginning")
+        self.assertEqual(direction.status_code, status.HTTP_200_OK)
+        self.assertEqual(direction.data["participant"]["picking_direction"], "beginning")
+        participant = CartWorkParticipant.objects.get(cart_work_session_id=cart_work_session_id, user=self.worker)
+        self.assertEqual(participant.picking_direction, CartWorkParticipant.PickingDirection.BEGINNING)
+
+        unrelated_task = self.create_unrelated_route_work("substitution")
+        substituted_task = self.claim(cart_work_session_id, mode="specific", picking_task_id=unrelated_task.id)
+        self.assertEqual(substituted_task.status_code, status.HTTP_404_NOT_FOUND)
+
+        wrong_location = self.confirm_location(cart_work_session_id, self.location_b.code)
+        self.assertEqual(wrong_location.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(self.confirm_location(cart_work_session_id, self.location_a.code).status_code, status.HTTP_200_OK)
+
+        wrong_product = self.pick(cart_work_session_id, self.product_b.sku, "1")
+        excessive = self.pick(cart_work_session_id, self.product_a.sku, "4")
+        self.assertEqual(wrong_product.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(excessive.status_code, status.HTTP_400_BAD_REQUEST)
+        work["inventory_a"].refresh_from_db()
+        self.assertEqual(work["inventory_a"].quantity_on_hand, Decimal("5.000"))
+        self.assertFalse(PickingShortage.objects.exists())
+
+        pick_a = self.pick(cart_work_session_id, self.product_a.barcode, "3")
+        self.assertEqual(pick_a.status_code, status.HTTP_200_OK)
+        self.assertEqual(pick_a.data["current_instruction"]["product"]["sku"], self.product_b.sku)
+        self.assertEqual(self.confirm_location(cart_work_session_id, self.location_b.code).status_code, status.HTTP_200_OK)
+        pick_b = self.pick(cart_work_session_id, self.product_b.sku, "2")
+        duplicate_pick = self.pick(cart_work_session_id, self.product_b.sku, "1")
+        self.assertEqual(pick_b.status_code, status.HTTP_200_OK)
+        self.assertEqual(duplicate_pick.status_code, status.HTTP_400_BAD_REQUEST)
+
+        work["task_a"].refresh_from_db()
+        work["task_b"].refresh_from_db()
+        work["inventory_a"].refresh_from_db()
+        work["inventory_b"].refresh_from_db()
+        job.refresh_from_db()
+        self.assertEqual(work["task_a"].quantity_picked, Decimal("3.000"))
+        self.assertEqual(work["task_b"].quantity_picked, Decimal("2.000"))
+        self.assertEqual(work["inventory_a"].quantity_on_hand, Decimal("2.000"))
+        self.assertEqual(work["inventory_b"].quantity_on_hand, Decimal("2.000"))
+        self.assertEqual(job.status, PickingJob.Status.PICKED)
+        self.assertEqual(StockMovement.objects.filter(movement_type=StockMovement.MovementType.PICK).count(), 2)
+
+        self.client.force_authenticate(self.unrelated_worker)
+        forbidden_control = self.client.get("/api/scanner/control/cart/", {"cart_code": "CART-CRIT-PICK-EXACT"})
+        self.assertEqual(forbidden_control.status_code, status.HTTP_403_FORBIDDEN)
+
+        self.client.force_authenticate(self.control_worker)
+        control_cart = self.client.get("/api/scanner/control/cart/", {"cart_code": "CART-CRIT-PICK-EXACT"})
+        self.assertEqual(control_cart.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(control_cart.data["items"]), 2)
+        self.assertEqual(self.client.get("/api/scanner/control/target/", {"session_id": session_id, "product_code": self.product_a.sku}).status_code, status.HTTP_200_OK)
+        self.assertEqual(self.print_label(session_id, work["order"].external_reference).status_code, status.HTTP_200_OK)
+        early_finish = self.client.post("/api/scanner/control/finish/", {"session_id": session_id}, format="json")
+        self.assertEqual(early_finish.status_code, status.HTTP_400_BAD_REQUEST)
+
+        self.assertEqual(self.prepare(session_id, work["order"].external_reference, self.product_a.sku, "3").status_code, status.HTTP_200_OK)
+        self.assertEqual(self.prepare(session_id, work["order"].external_reference, self.product_b.sku, "2").status_code, status.HTTP_200_OK)
+        over_prepare = self.prepare(session_id, work["order"].external_reference, self.product_b.sku, "1")
+        self.assertEqual(over_prepare.status_code, status.HTTP_400_BAD_REQUEST)
+        finish = self.client.post("/api/scanner/control/finish/", {"session_id": session_id}, format="json")
+        second_finish = self.client.post("/api/scanner/control/finish/", {"session_id": session_id}, format="json")
+        self.assertEqual(finish.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_finish.status_code, status.HTTP_400_BAD_REQUEST)
+
+        job.refresh_from_db()
+        cart_work = CartWorkSession.objects.get(id=cart_work_session_id)
+        work["route_run"].refresh_from_db()
+        work["task_a"].refresh_from_db()
+        work["task_b"].refresh_from_db()
+        self.assertEqual(job.status, PickingJob.Status.COMPLETED)
+        self.assertEqual(cart_work.status, CartWorkSession.Status.COMPLETED)
+        self.assertEqual(cart_work.cart.status, ScannerCart.Status.AVAILABLE)
+        self.assertEqual(work["task_a"].status, PickingTask.Status.COMPLETED)
+        self.assertEqual(work["task_b"].status, PickingTask.Status.COMPLETED)
+        self.assertEqual(work["route_run"].status, RouteRun.Status.READY_TO_CLOSE)
+        self.assertFalse(PickingShortage.objects.exists())
+
+        route_detail = self.client.get(f"/api/route-runs/{work['route_run'].id}/")
+        exceptions = self.client.get("/api/inventory-exceptions/", {"branch": self.branch.code})
+        events = self.client.get("/api/current-events/", {"search": "ORDER-CRIT-PICK-EXACT", "branch": self.branch.code})
+        self.assertEqual(route_detail.status_code, status.HTTP_200_OK)
+        self.assertEqual(route_detail.data["progress_percent"], 100.0)
+        self.assertEqual(route_detail.data["is_ready_to_close"], True)
+        self.assertEqual(exceptions.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.category_count(exceptions, "picking_shortages"), 0)
+        self.assertEqual(events.status_code, status.HTTP_200_OK)
+        event_types = {row["event_type"] for row in events.data["results"]}
+        self.assertTrue({"pick", "control"}.issubset(event_types))
+
+
+class CriticalPickingShortageControlIntegrationTests(CriticalPickingControlFixtureMixin, APITestCase):
+    def test_location_shortage_remains_actionable_while_picked_goods_are_controlled(self):
+        work = self.create_route_work(
+            reference="ORDER-CRIT-PICK-SHORT",
+            route_code="CRIT-SHORT",
+            quantity_a="5",
+            quantity_b="2",
+            stock_a="5",
+            stock_b="2",
+        )
+        self.client.force_authenticate(self.worker)
+        job = self.create_job(work["route_run"])
+        session_id, cart_work_session_id = self.start_job(job, "CART-CRIT-PICK-SHORT")
+
+        self.assertEqual(self.confirm_location(cart_work_session_id, self.location_a.code).status_code, status.HTTP_200_OK)
+        pick_wrong_product = self.pick(cart_work_session_id, self.product_b.sku, "1")
+        self.assertEqual(pick_wrong_product.status_code, status.HTTP_400_BAD_REQUEST)
+        first_pick = self.pick(cart_work_session_id, self.product_a.sku, "3")
+        self.assertEqual(first_pick.status_code, status.HTTP_200_OK)
+        excessive_challenge = self.shortage_challenge(cart_work_session_id, "3")
+        self.assertEqual(excessive_challenge.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(PickingShortage.objects.exists())
+
+        challenge = self.shortage_challenge(cart_work_session_id, "2")
+        self.assertEqual(challenge.status_code, status.HTTP_200_OK)
+        shortage_response = self.report_shortage(challenge, operation_id="critical-shortage-same-op")
+        duplicate_shortage_response = self.report_shortage(challenge, operation_id="critical-shortage-same-op")
+        self.assertEqual(shortage_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(duplicate_shortage_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(PickingShortage.objects.count(), 1)
+        self.assertEqual(StockMovement.objects.filter(movement_type=StockMovement.MovementType.PICKING_SHORTAGE).count(), 1)
+        self.assertEqual(shortage_response.data["replenishment_request"]["quantity"], "2.000")
+
+        shortage = PickingShortage.objects.get()
+        replenishment = ReplenishmentRequest.objects.get()
+        work["task_a"].refresh_from_db()
+        work["inventory_a"].refresh_from_db()
+        unconfirmed = InventoryItem.objects.get(branch=self.branch, location=self.unconfirmed_location, product=self.product_a)
+        self.assertEqual(shortage.quantity, Decimal("2.000"))
+        self.assertEqual(shortage.customer_unfulfilled_quantity, Decimal("2.000"))
+        self.assertEqual(shortage.status, PickingShortage.Status.OPEN)
+        self.assertEqual(replenishment.status, ReplenishmentRequest.Status.PENDING_ORDER)
+        self.assertEqual(work["task_a"].quantity_picked, Decimal("3.000"))
+        self.assertEqual(work["task_a"].shortage_quantity, Decimal("2.000"))
+        self.assertEqual(work["inventory_a"].quantity_on_hand, Decimal("0.000"))
+        self.assertEqual(unconfirmed.quantity_on_hand, Decimal("2.000"))
+
+        self.assertEqual(self.confirm_location(cart_work_session_id, self.location_b.code).status_code, status.HTTP_200_OK)
+        self.assertEqual(self.pick(cart_work_session_id, self.product_b.barcode, "2").status_code, status.HTTP_200_OK)
+        job.refresh_from_db()
+        self.assertEqual(job.status, PickingJob.Status.PICKED)
+
+        self.client.force_authenticate(self.unrelated_worker)
+        forbidden_shortages = self.client.get("/api/picking-shortages/", {"branch": self.branch.code})
+        self.assertEqual(forbidden_shortages.status_code, status.HTTP_403_FORBIDDEN)
+        forbidden_control = self.client.get("/api/scanner/control/cart/", {"cart_code": "CART-CRIT-PICK-SHORT"})
+        self.assertEqual(forbidden_control.status_code, status.HTTP_403_FORBIDDEN)
+
+        self.client.force_authenticate(self.worker)
+        worker_confirm_missing = self.client.post(
+            f"/api/picking-shortages/{shortage.id}/confirm-missing/",
+            {"worker_code": self.worker.username},
+            format="json",
+        )
+        self.assertEqual(worker_confirm_missing.status_code, status.HTTP_403_FORBIDDEN)
+        shortage.refresh_from_db()
+        self.assertEqual(shortage.status, PickingShortage.Status.OPEN)
+
+        shortages = self.client.get("/api/picking-shortages/", {"branch": self.branch.code, "search": "ORDER-CRIT-PICK-SHORT"})
+        exceptions = self.client.get("/api/inventory-exceptions/", {"branch": self.branch.code})
+        self.assertEqual(shortages.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(shortages.data["results"]), 1)
+        self.assertEqual(shortages.data["results"][0]["reported_by_username"], self.worker.username)
+        self.assertEqual(shortages.data["results"][0]["product_sku"], self.product_a.sku)
+        self.assertEqual(shortages.data["results"][0]["replenishment_quantity"], "2.000")
+        self.assertEqual(exceptions.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.category_count(exceptions, "picking_shortages"), 1)
+        self.assertEqual(self.category_count(exceptions, "replenishment"), 1)
+
+        self.client.force_authenticate(self.control_worker)
+        self.assertEqual(self.print_label(session_id, work["order"].external_reference).status_code, status.HTTP_200_OK)
+        control_a = self.prepare(session_id, work["order"].external_reference, self.product_a.sku, "3")
+        control_b = self.prepare(session_id, work["order"].external_reference, self.product_b.sku, "2")
+        missing_units_not_on_cart = self.prepare(session_id, work["order"].external_reference, self.product_a.sku, "2")
+        self.assertEqual(control_a.status_code, status.HTTP_200_OK)
+        self.assertEqual(control_b.status_code, status.HTTP_200_OK)
+        self.assertEqual(missing_units_not_on_cart.status_code, status.HTTP_400_BAD_REQUEST)
+
+        finish = self.client.post("/api/scanner/control/finish/", {"session_id": session_id}, format="json")
+        after_finish_pick = self.pick(cart_work_session_id, self.product_b.sku, "1")
+        self.assertEqual(finish.status_code, status.HTTP_200_OK)
+        self.assertEqual(after_finish_pick.status_code, status.HTTP_400_BAD_REQUEST)
+
+        job.refresh_from_db()
+        cart_work = CartWorkSession.objects.get(id=cart_work_session_id)
+        work["route_run"].refresh_from_db()
+        work["task_a"].refresh_from_db()
+        work["task_b"].refresh_from_db()
+        work["inventory_b"].refresh_from_db()
+        shortage.refresh_from_db()
+        self.assertEqual(job.status, PickingJob.Status.PICKED)
+        self.assertEqual(cart_work.status, CartWorkSession.Status.COMPLETED)
+        self.assertEqual(work["route_run"].status, RouteRun.Status.OPEN)
+        self.assertEqual(work["task_a"].quantity_prepared, Decimal("3.000"))
+        self.assertEqual(work["task_a"].status, PickingTask.Status.IN_PROGRESS)
+        self.assertEqual(work["task_b"].quantity_prepared, Decimal("2.000"))
+        self.assertEqual(work["task_b"].status, PickingTask.Status.COMPLETED)
+        self.assertEqual(work["inventory_b"].quantity_on_hand, Decimal("0.000"))
+        self.assertEqual(shortage.status, PickingShortage.Status.OPEN)
+
+        route_detail = self.client.get(f"/api/route-runs/{work['route_run'].id}/")
+        events = self.client.get("/api/current-events/", {"search": "ORDER-CRIT-PICK-SHORT", "branch": self.branch.code})
+        replenishment_events = self.client.get("/api/current-events/", {"search": replenishment.reference, "branch": self.branch.code})
+        self.assertEqual(route_detail.status_code, status.HTTP_200_OK)
+        self.assertEqual(route_detail.data["is_ready_to_close"], False)
+        self.assertEqual(events.status_code, status.HTTP_200_OK)
+        self.assertEqual(replenishment_events.status_code, status.HTTP_200_OK)
+        event_types = {row["event_type"] for row in events.data["results"]}
+        self.assertTrue({"pick", "picking_location_shortage", "control"}.issubset(event_types))
+        self.assertTrue(any(row["event_type"] == "replenishment_requested" for row in replenishment_events.data["results"]))
 
 
 class SeedDemoDataCommandTests(APITestCase):

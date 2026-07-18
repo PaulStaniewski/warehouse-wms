@@ -172,6 +172,26 @@ def _get_active_session_or_response(session_id):
     return session, None
 
 
+def _scanner_session_branch(session: ScannerSession):
+    cart_work_session = getattr(session, "cart_work_session", None)
+    if cart_work_session is not None:
+        return _cart_work_branch(cart_work_session)
+
+    cart_item = (
+        CartPickedItem.objects.select_related("picking_task__branch")
+        .filter(session=session)
+        .order_by("id")
+        .first()
+    )
+    return cart_item.picking_task.branch if cart_item is not None else None
+
+
+def _require_scanner_session_branch_access(request, session: ScannerSession):
+    branch = _scanner_session_branch(session)
+    if branch is not None:
+        require_branch_access(request.user, branch)
+
+
 def _cart_item_data(item: CartPickedItem):
     order = item.picking_task.order_line.order
     remaining = item.quantity_picked - item.quantity_prepared
@@ -1753,6 +1773,7 @@ def _prepare_for_order(request):
     session, error = _get_active_session_or_response(request.data.get("session_id"))
     if error is not None:
         return error
+    _require_scanner_session_branch_access(request, session)
 
     order_reference = str(request.data.get("order_reference") or request.data.get("code") or "").strip()
     product_code = str(request.data.get("product_code", "")).strip()
@@ -2816,6 +2837,7 @@ class ScannerControlCartItemsView(APIView):
         session, error = _get_active_session_or_response(request.query_params.get("session_id"))
         if error is not None:
             return error
+        _require_scanner_session_branch_access(request, session)
 
         items = (
             CartPickedItem.objects.select_related(
@@ -2843,6 +2865,9 @@ class ScannerControlCartView(APIView):
         )
         if cart_work_session is None or cart_work_session.scanner_session is None:
             return Response({"detail": "Cart has no active picked work."}, status=status.HTTP_404_NOT_FOUND)
+        branch = _cart_work_branch(cart_work_session)
+        if branch is not None:
+            require_branch_access(request.user, branch)
 
         items = (
             CartPickedItem.objects.select_related(
@@ -2868,6 +2893,7 @@ class ScannerControlTargetView(APIView):
         session, error = _get_active_session_or_response(request.query_params.get("session_id"))
         if error is not None:
             return error
+        _require_scanner_session_branch_access(request, session)
 
         product_code = str(request.query_params.get("product_code", "")).strip()
         if not product_code:
@@ -2898,6 +2924,7 @@ class ScannerControlPrintLabelView(APIView):
         session, error = _get_active_session_or_response(request.data.get("session_id"))
         if error is not None:
             return error
+        _require_scanner_session_branch_access(request, session)
 
         order_reference = str(request.data.get("order_reference", "")).strip()
         printer_code = str(request.data.get("printer_code", "")).strip()
@@ -2948,6 +2975,7 @@ class ScannerControlFinishView(APIView):
         session, error = _get_active_session_or_response(request.data.get("session_id"))
         if error is not None:
             return error
+        _require_scanner_session_branch_access(request, session)
 
         remaining_exists = CartPickedItem.objects.filter(
             session=session,

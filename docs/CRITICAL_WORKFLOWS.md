@@ -11,6 +11,8 @@ The integration scenarios live in `backend/operations/tests.py` alongside the ex
 - `CriticalInterBranchExactReceivingIntegrationTests`
 - `CriticalInterBranchShortageIntegrationTests`
 - `CriticalSourceReviewReconciliationIntegrationTests`
+- `CriticalExactPickingControlIntegrationTests`
+- `CriticalPickingShortageControlIntegrationTests`
 
 The project still uses the existing monolithic operations test module. No test package migration was introduced for this stage.
 
@@ -24,6 +26,8 @@ The project still uses the existing monolithic operations test module. No test p
 | Inter-branch exact receiving | Destination Worker, source Worker, unrelated Worker | Destination arrival confirmation, receiving start/recovery, product scan, put-away, canonical close, compatibility close alias retry, validation rollback, branch isolation | MM Tasks, Transport Overview, Universal Contents, Current Events |
 | Inter-branch shortage receiving | Destination Worker, source Worker, unrelated Worker | Destination arrival confirmation, partial receiving, shortage close, duplicate close guard, compatibility close alias retry, branch visibility | Transfer Discrepancies, Discrepancy Action Queue, Inventory Exceptions, Transport Overview, Universal Contents, Current Events |
 | Source review and reconciliation | Destination Worker/Leader, source Worker/Leader, unrelated Worker | Receiving shortage, discrepancy report print, destination shortage confirmation, source review, reconciliation acknowledgement, source stock verification, partial source recovery, source search close, final manual accounting | Discrepancy detail, Source Review detail, Reconciliation detail, Source Stock Verification detail, Action Queue, Inventory Exceptions, Current Events |
+| Exact outbound Picking and Control | Branch Worker, Control Worker, unrelated branch Worker | Proforma job creation, cart start, participant join, picking direction, location/product scans, quantity confirmation, control label, prepare scans, finish control, duplicate and immutable-state guards | Scanner Tasks, Route Run detail, Inventory Exceptions, Current Events |
+| Picking shortage and Control | Branch Worker, Control Worker, Branch Leader, unrelated branch Worker | Partial picking, shortage challenge/report, replenishment request creation, picked-goods control, Leader-only shortage follow-up rejection for Worker, duplicate shortage replay, branch isolation | Picking Shortages, Inventory Exceptions, Route Run detail, Current Events |
 
 ## Authorization Coverage
 
@@ -33,6 +37,7 @@ The integration tests include targeted authorization checks:
 - Workers cannot create or reconcile Leader-owned cycle count work,
 - unrelated branch users cannot read branch-owned movement/session details,
 - source and unrelated branch users cannot operate destination receiving sessions,
+- unrelated branch users cannot inspect or finish another branch scanner control cart,
 - inter-branch discrepancy detail is visible to participating branches while unrelated branches are excluded,
 - destination users cannot execute source-owned review and source-stock commands,
 - source Workers can investigate source work, while final reconciliation completion remains Leader-only,
@@ -53,6 +58,8 @@ The tests verify that successful commands update the same state visible to users
 - no successful StockMovement or AuditLog after validation failures,
 - exact transfer receiving creates destination inventory without a discrepancy case,
 - shortage transfer receiving creates one discrepancy case with shortage lines and does not duplicate it on retry,
+- exact Picking reduces source stock at physical pick time and Control does not deduct inventory again,
+- Picking shortages move missing location stock to branch `UNCONFIRMED`, create replenishment when no alternative stock covers the shortage, and leave only physically picked goods available for Control,
 - source review and reconciliation preserve the accounting identity for confirmed shortages,
 - source stock recovery restores found stock into source inventory through `SOURCE_DISCREPANCY_RECOVERY`,
 - Event Register entries for meaningful workflow transitions.
@@ -72,6 +79,18 @@ expected 9 = received 6 + source-found 1 + unresolved/source-loss 2
 ```
 
 Found source stock is operational, not only evidential: the recovery command restores quantity to source inventory and creates one `SOURCE_DISCREPANCY_RECOVERY` stock movement. The final manual reconciliation is Leader-only and completes the case without adding destination inventory. The test verifies duplicate command safety, invalid product/location rollback, branch-scoped read models, Action Queue transitions, Inventory Exceptions transitions, and Event Register evidence for the chain.
+
+## Outbound Picking And Control
+
+`CriticalExactPickingControlIntegrationTests` covers the normal outbound path from deterministic route/order/task setup into real scanner APIs. The preparation boundary is the initial WMS document/task fixture: there is no separate tested WMS API for creating the source order, route run, and picking tasks, so the test creates those records directly and then uses the scanner APIs for all execution.
+
+The exact flow creates a merged Picking Job from `/api/scanner/proformas/create-jobs/`, starts it on a cart, verifies task visibility, idempotent same-user join, participant ownership, and persisted `beginning` picking direction, then performs real location and product scans through `/api/scanner/picking/confirm-location/` and `/api/scanner/picking/pick/`. The test verifies wrong location, wrong product, over-quantity, cross-branch start/control, unrelated task substitution, duplicate final pick, inventory mutation, StockMovement evidence, and absence of Picking Shortage records.
+
+Control is branch-scoped scanner work. A same-branch Worker can open the picked cart, print the customer label, prepare each picked product, and finish control. Control completion releases the cart, completes the Picking Job, marks tasks completed, and moves the Route Run to ready-to-close. Control does not deduct inventory again. Completed sessions reject repeated finish and further preparation attempts.
+
+`CriticalPickingShortageControlIntegrationTests` covers the current supported shortage path. The Worker physically picks available units, records a real location shortage through the scanner challenge/report flow, and then continues with other picked goods. When no alternative stock is available, the shortage remains open and a replenishment request is created. The missing quantity is moved from the reported shelf location to branch `UNCONFIRMED`; it is not placed on the cart and is not available for Control. Control prepares only physically picked units, can finish the cart, and leaves the Picking Job in the picked state while the shortage/replenishment remain actionable.
+
+Worker users cannot execute the Leader-only physical-loss confirmation action. Unrelated branch users cannot list the branch Picking Shortage, inspect the control cart, or use another branch scanner session. Event Register assertions cover pick, picking shortage, replenishment, and control evidence using stable event metadata rather than full prose messages.
 
 ## Quick Transfer Idempotency
 
@@ -112,6 +131,12 @@ Run only the critical integration scenarios:
 
 ```powershell
 docker compose run --rm backend python manage.py test operations.tests.CriticalQuickTransferIntegrationTests operations.tests.CriticalCycleCountIntegrationTests operations.tests.CriticalInterBranchExactReceivingIntegrationTests operations.tests.CriticalInterBranchShortageIntegrationTests operations.tests.CriticalSourceReviewReconciliationIntegrationTests --noinput
+```
+
+Run only outbound Picking and Control critical scenarios:
+
+```powershell
+docker compose run --rm backend python manage.py test operations.tests.CriticalExactPickingControlIntegrationTests operations.tests.CriticalPickingShortageControlIntegrationTests --noinput
 ```
 
 Run the full backend suites:
