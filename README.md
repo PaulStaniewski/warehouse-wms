@@ -33,6 +33,15 @@ warehouse-wms/
 - `backend`
 - `frontend`
 
+## Production Readiness
+
+Provider-neutral production notes live in:
+
+- `docs/PRODUCTION_READINESS.md`
+- `docs/BACKUP_RESTORE.md`
+
+Production uses Gunicorn for Django and Nginx for the built React app. The development override keeps Django `runserver` and Vite.
+
 ## Local Development With Docker
 
 Create an environment file:

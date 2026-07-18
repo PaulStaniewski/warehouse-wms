@@ -1,7 +1,7 @@
 from django.contrib.auth import get_user_model
 from django.test import override_settings
 from rest_framework import status
-from rest_framework.test import APITestCase
+from rest_framework.test import APIClient, APITestCase
 
 from accounts.models import UserBranchMembership
 from warehouse.models import Branch
@@ -61,3 +61,39 @@ class AuthSessionWorkflowTests(APITestCase):
         self.assertEqual(worker_memberships.status_code, status.HTTP_200_OK)
         self.assertEqual(worker_memberships.data[0]["branch_code"], "GDY")
         self.assertEqual(worker_memberships.data[0]["role"], "worker")
+
+    def test_cookie_login_requires_csrf_when_csrf_checks_are_enforced(self):
+        csrf_client = APIClient(enforce_csrf_checks=True)
+
+        missing_csrf = csrf_client.post(
+            "/api/auth/login/",
+            {"username": "GDY_WORKER", "password": "demo12345"},
+            format="json",
+        )
+        session_response = csrf_client.get("/api/auth/session/")
+        token = csrf_client.cookies["csrftoken"].value
+        login_response = csrf_client.post(
+            "/api/auth/login/",
+            {"username": "GDY_WORKER", "password": "demo12345"},
+            format="json",
+            HTTP_X_CSRFTOKEN=token,
+        )
+
+        self.assertEqual(missing_csrf.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(session_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(login_response.status_code, status.HTTP_200_OK)
+
+    def test_health_and_readiness_are_public_and_minimal(self):
+        live = self.client.get("/api/health/live/")
+        ready = self.client.get("/api/health/ready/")
+
+        self.assertEqual(live.status_code, status.HTTP_200_OK)
+        self.assertEqual(live.json(), {"status": "ok"})
+        self.assertEqual(ready.status_code, status.HTTP_200_OK)
+        self.assertEqual(ready.json()["status"], "ready")
+        self.assertEqual(ready.json()["checks"], {"database": "ok"})
+
+    def test_anonymous_operational_api_remains_denied(self):
+        response = self.client.get("/api/products/")
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)

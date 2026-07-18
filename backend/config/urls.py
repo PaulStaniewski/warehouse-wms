@@ -1,10 +1,9 @@
 from django.contrib import admin
+from django.conf import settings
 from django.urls import include, path
-from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
-from rest_framework.permissions import AllowAny
 
 from config.api import auth_login, auth_logout, auth_session, current_events, me_branch_memberships, router
-from config.views import health_check
+from config.views import health_check, liveness_check, readiness_check
 from operations.scanner_views import (
     InterBranchMMTasksView,
     ScannerCartWorkCurrentView,
@@ -52,8 +51,8 @@ from operations.scanner_views import (
 
 urlpatterns = [
     path("api/health/", health_check, name="health-check"),
-    path("api/schema/", SpectacularAPIView.as_view(permission_classes=[AllowAny]), name="schema"),
-    path("api/docs/", SpectacularSwaggerView.as_view(url_name="schema", permission_classes=[AllowAny]), name="swagger-ui"),
+    path("api/health/live/", liveness_check, name="health-live"),
+    path("api/health/ready/", readiness_check, name="health-ready"),
     path("api/auth/session/", auth_session, name="auth-session"),
     path("api/auth/login/", auth_login, name="auth-login"),
     path("api/auth/logout/", auth_logout, name="auth-logout"),
@@ -103,3 +102,10 @@ urlpatterns = [
     path("api/", include(router.urls)),
     path("admin/", admin.site.urls),
 ]
+
+if settings.ENABLE_API_DOCS:
+    from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
+    from rest_framework.permissions import AllowAny
+
+    urlpatterns.insert(1, path("api/schema/", SpectacularAPIView.as_view(permission_classes=[AllowAny]), name="schema"))
+    urlpatterns.insert(2, path("api/docs/", SpectacularSwaggerView.as_view(url_name="schema", permission_classes=[AllowAny]), name="swagger-ui"))

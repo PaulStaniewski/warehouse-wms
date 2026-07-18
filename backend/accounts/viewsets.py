@@ -1,7 +1,8 @@
 from django.contrib.auth import authenticate, get_user, login, logout
 from django.utils.decorators import method_decorator
-from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.csrf import csrf_protect, ensure_csrf_cookie
 from rest_framework import status
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -33,6 +34,7 @@ class CurrentUserBranchMembershipsView(APIView):
         return Response(serializer.data)
 
 
+@method_decorator(ensure_csrf_cookie, name="dispatch")
 class AuthSessionView(APIView):
     authentication_classes = []
     permission_classes = [AllowAny]
@@ -50,10 +52,12 @@ class AuthSessionView(APIView):
         )
 
 
-@method_decorator(csrf_exempt, name="dispatch")
+@method_decorator(csrf_protect, name="dispatch")
 class AuthLoginView(APIView):
     authentication_classes = []
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "auth_login"
 
     def post(self, request):
         username = str(request.data.get("username", "")).strip()
@@ -77,7 +81,7 @@ class AuthLoginView(APIView):
         )
 
 
-@method_decorator(csrf_exempt, name="dispatch")
+@method_decorator(csrf_protect, name="dispatch")
 class AuthLogoutView(APIView):
     authentication_classes = []
     permission_classes = [AllowAny]
