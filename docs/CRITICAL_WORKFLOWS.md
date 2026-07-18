@@ -8,6 +8,8 @@ The integration scenarios live in `backend/operations/tests.py` alongside the ex
 
 - `CriticalQuickTransferIntegrationTests`
 - `CriticalCycleCountIntegrationTests`
+- `CriticalInterBranchExactReceivingIntegrationTests`
+- `CriticalInterBranchShortageIntegrationTests`
 
 The project still uses the existing monolithic operations test module. No test package migration was introduced for this stage.
 
@@ -18,6 +20,8 @@ The project still uses the existing monolithic operations test module. No test p
 | Scanner Quick Transfer | Branch Worker, unrelated branch Worker | Scanner transfer command, validation rollback, idempotent repeat submission, concurrent duplicate delivery, branch-protected detail access | Stock Movements / Stock Transfers history, Stock Movement detail, Current Events |
 | Cycle Count safe variance | Branch Leader, Branch Worker, unrelated branch Leader | WMS create/open, blind scanner count/submit, Leader review, adjustment, duplicate adjustment guard, close | Cycle Count detail, Review Queue, Stock Adjustments, Current Events |
 | Cycle Count recount | Branch Leader, Branch Worker | Stale original variance, recount request, blind recount detail, scanner recount submission, acceptance, adjustment, duplicate guard, stale recount rejection | Cycle Count detail, Stock Movements, Current Events |
+| Inter-branch exact receiving | Destination Worker, source Worker, unrelated Worker | Destination arrival confirmation, receiving start/recovery, product scan, put-away, canonical close, compatibility close alias retry, validation rollback, branch isolation | MM Tasks, Transport Overview, Universal Contents, Current Events |
+| Inter-branch shortage receiving | Destination Worker, source Worker, unrelated Worker | Destination arrival confirmation, partial receiving, shortage close, duplicate close guard, compatibility close alias retry, branch visibility | Transfer Discrepancies, Discrepancy Action Queue, Inventory Exceptions, Transport Overview, Universal Contents, Current Events |
 
 ## Authorization Coverage
 
@@ -26,6 +30,8 @@ The integration tests include targeted authorization checks:
 - anonymous users cannot start operational commands,
 - Workers cannot create or reconcile Leader-owned cycle count work,
 - unrelated branch users cannot read branch-owned movement/session details,
+- source and unrelated branch users cannot operate destination receiving sessions,
+- inter-branch discrepancy detail is visible to participating branches while unrelated branches are excluded,
 - same-branch Workers can execute scanner work,
 - same-branch Leaders can execute review and reconciliation work.
 
@@ -41,7 +47,13 @@ The tests verify that successful commands update the same state visible to users
 - count-correction StockMovement creation,
 - no duplicate stock mutation on repeated commands,
 - no successful StockMovement or AuditLog after validation failures,
+- exact transfer receiving creates destination inventory without a discrepancy case,
+- shortage transfer receiving creates one discrepancy case with shortage lines and does not duplicate it on retry,
 - Event Register entries for meaningful workflow transitions.
+
+## Inter-Branch Receiving Boundary
+
+The current receiving command flow starts at destination arrival. There is no dedicated source-branch release scanner/API command in the tested path, so the critical receiving fixtures create a transfer and pallet directly in the released/in-transit database state. From that point onward the tests use the real scanner and WMS API endpoints.
 
 ## Quick Transfer Idempotency
 
@@ -81,7 +93,7 @@ These areas are not duplicated wholesale in the critical integration classes. Fu
 Run only the critical integration scenarios:
 
 ```powershell
-docker compose run --rm backend python manage.py test operations.tests.CriticalQuickTransferIntegrationTests operations.tests.CriticalCycleCountIntegrationTests --noinput
+docker compose run --rm backend python manage.py test operations.tests.CriticalQuickTransferIntegrationTests operations.tests.CriticalCycleCountIntegrationTests operations.tests.CriticalInterBranchExactReceivingIntegrationTests operations.tests.CriticalInterBranchShortageIntegrationTests --noinput
 ```
 
 Run the full backend suites:

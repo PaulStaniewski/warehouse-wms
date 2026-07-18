@@ -1139,7 +1139,7 @@ def _receiving_session_data(session: PalletReceivingSession):
     }
 
 
-def _get_active_receiving_session_or_response(session_id):
+def _get_active_receiving_session_or_response(session_id, request=None):
     if not session_id:
         return None, Response({"detail": "receiving_session_id is required."}, status=status.HTTP_400_BAD_REQUEST)
     session = (
@@ -1158,6 +1158,8 @@ def _get_active_receiving_session_or_response(session_id):
         return None, Response({"detail": "Receiving session not found."}, status=status.HTTP_404_NOT_FOUND)
     if session.status != PalletReceivingSession.Status.ACTIVE:
         return None, Response({"detail": "Receiving session is not active."}, status=status.HTTP_400_BAD_REQUEST)
+    if request is not None:
+        require_branch_access(request.user, session.pallet.transfer.destination_branch)
     return session, None
 
 
@@ -1204,9 +1206,9 @@ def _mm_task_data(pallet):
     }
 
 
-def _close_receiving_session(session_id):
+def _close_receiving_session(session_id, request=None):
     with transaction.atomic():
-        session, error = _get_active_receiving_session_or_response(session_id)
+        session, error = _get_active_receiving_session_or_response(session_id, request)
         if error is not None:
             return error
         session = (
@@ -3189,6 +3191,7 @@ class ScannerReceivingStartView(APIView):
             )
             if pallet is None:
                 return Response({"detail": "Pallet not found."}, status=status.HTTP_404_NOT_FOUND)
+            require_branch_access(request.user, pallet.transfer.destination_branch)
             if _pallet_is_closed(pallet):
                 return Response({"detail": "Pallet is already closed."}, status=status.HTTP_400_BAD_REQUEST)
             if not TransferPalletArrival.objects.filter(pallet=pallet).exists():
@@ -3267,6 +3270,7 @@ class ScannerReceivingCurrentView(APIView):
             return Response({"detail": "Receiving session not found."}, status=status.HTTP_404_NOT_FOUND)
         if session.status != PalletReceivingSession.Status.ACTIVE:
             return Response({"detail": "Receiving session is not active."}, status=status.HTTP_404_NOT_FOUND)
+        require_branch_access(request.user, session.pallet.transfer.destination_branch)
 
         return Response({"receiving_session": _receiving_session_data(session)})
 
@@ -3286,7 +3290,7 @@ class ScannerReceivingScanProductView(APIView):
             return Response({"detail": "Product not found."}, status=status.HTTP_404_NOT_FOUND)
 
         with transaction.atomic():
-            session, error = _get_active_receiving_session_or_response(request.data.get("receiving_session_id"))
+            session, error = _get_active_receiving_session_or_response(request.data.get("receiving_session_id"), request)
             if error is not None:
                 return error
             session = PalletReceivingSession.objects.select_for_update().get(pk=session.id)
@@ -3343,7 +3347,7 @@ class ScannerReceivingPutAwayView(APIView):
             return Response({"detail": "location_code is required."}, status=status.HTTP_400_BAD_REQUEST)
 
         with transaction.atomic():
-            session, error = _get_active_receiving_session_or_response(request.data.get("receiving_session_id"))
+            session, error = _get_active_receiving_session_or_response(request.data.get("receiving_session_id"), request)
             if error is not None:
                 return error
             session = (
@@ -3457,12 +3461,12 @@ class ScannerReceivingPutAwayView(APIView):
 
 class ScannerReceivingCompleteView(APIView):
     def post(self, request):
-        return _close_receiving_session(request.data.get("receiving_session_id"))
+        return _close_receiving_session(request.data.get("receiving_session_id"), request)
 
 
 class ScannerReceivingCloseView(APIView):
     def post(self, request):
-        return _close_receiving_session(request.data.get("receiving_session_id"))
+        return _close_receiving_session(request.data.get("receiving_session_id"), request)
 
 
 class ScannerQuickTransferView(APIView):

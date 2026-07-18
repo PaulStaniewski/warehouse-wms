@@ -5090,6 +5090,387 @@ class ScannerReceivingWorkflowTests(APITestCase):
         self.assertFalse(TransferDiscrepancySourceReview.objects.exists())
 
 
+class CriticalInterBranchReceivingFixtureMixin:
+    def setUp(self):
+        self.source_branch = Branch.objects.create(code="GDA", name="Gdansk", city="Gdansk", country="Poland")
+        self.destination_branch = Branch.objects.create(code="GDY", name="Gdynia", city="Gdynia", country="Poland")
+        self.unrelated_branch = Branch.objects.create(code="WAW", name="Warsaw", city="Warsaw", country="Poland")
+        self.destination_location = Location.objects.create(
+            branch=self.destination_branch,
+            code="GDY-A-01",
+            name="Gdynia A-01",
+            location_type=Location.LocationType.STORAGE,
+        )
+        self.second_destination_location = Location.objects.create(
+            branch=self.destination_branch,
+            code="GDY-B-01",
+            name="Gdynia B-01",
+            location_type=Location.LocationType.STORAGE,
+        )
+        self.source_location = Location.objects.create(
+            branch=self.source_branch,
+            code="GDA-SRC-01",
+            name="Gdansk source",
+            location_type=Location.LocationType.STORAGE,
+        )
+        self.unrelated_location = Location.objects.create(
+            branch=self.unrelated_branch,
+            code="WAW-A-01",
+            name="Warsaw A-01",
+            location_type=Location.LocationType.STORAGE,
+        )
+        self.product = Product.objects.create(
+            sku="IBT-FILTR-001",
+            name="Critical filter",
+            barcode="590100000001",
+            unit_of_measure="pcs",
+        )
+        self.second_product = Product.objects.create(
+            sku="IBT-OLEJ-001",
+            name="Critical oil",
+            barcode="590100000002",
+            unit_of_measure="pcs",
+        )
+        self.unexpected_product = Product.objects.create(
+            sku="IBT-OTHER-001",
+            name="Unexpected product",
+            barcode="590100000099",
+            unit_of_measure="pcs",
+        )
+        self.destination_worker = create_branch_user("CRIT_GDY_WORKER", self.destination_branch)
+        self.destination_leader = create_branch_user(
+            "CRIT_GDY_LEADER",
+            self.destination_branch,
+            role=UserBranchMembership.Role.LEADER,
+        )
+        self.source_worker = create_branch_user("CRIT_GDA_WORKER", self.source_branch)
+        self.unrelated_worker = create_branch_user("CRIT_WAW_WORKER", self.unrelated_branch)
+
+    def authenticate(self, user):
+        self.client.force_authenticate(user)
+
+    def create_in_transit_pallet(self, *, reference, pallet_code, first_quantity="3", second_quantity="2"):
+        transfer = InterBranchTransfer.objects.create(
+            reference=reference,
+            source_branch=self.source_branch,
+            destination_branch=self.destination_branch,
+            status=InterBranchTransfer.Status.IN_TRANSIT,
+            released_at=timezone.now(),
+        )
+        pallet = TransferPallet.objects.create(
+            transfer=transfer,
+            scan_code=pallet_code,
+            status=TransferPallet.Status.IN_TRANSIT,
+            released_at=timezone.now(),
+        )
+        TransferPalletItem.objects.create(
+            pallet=pallet,
+            product=self.product,
+            expected_quantity=Decimal(first_quantity),
+        )
+        TransferPalletItem.objects.create(
+            pallet=pallet,
+            product=self.second_product,
+            expected_quantity=Decimal(second_quantity),
+        )
+        InventoryItem.objects.create(
+            branch=self.source_branch,
+            location=self.source_location,
+            product=self.product,
+            quantity_on_hand=Decimal("20"),
+            quantity_reserved=Decimal("0"),
+        )
+        InventoryItem.objects.create(
+            branch=self.source_branch,
+            location=self.source_location,
+            product=self.second_product,
+            quantity_on_hand=Decimal("20"),
+            quantity_reserved=Decimal("0"),
+        )
+        StockMovement.objects.create(
+            branch=self.source_branch,
+            product=self.product,
+            source_location=self.source_location,
+            movement_type=StockMovement.MovementType.TRANSFER,
+            quantity=Decimal(first_quantity),
+            reference=reference,
+        )
+        return transfer, pallet
+
+    def confirm_arrival(self, pallet):
+        return self.client.post(
+            "/api/scanner/inter-branch-arrivals/",
+            {
+                "pallet_code": pallet.scan_code,
+                "worker_code": self.destination_worker.username,
+                "client_operation_id": f"arrival-{pallet.scan_code.lower()}",
+            },
+            format="json",
+        )
+
+    def start_receiving(self, pallet):
+        return self.client.post(
+            "/api/scanner/receiving/start/",
+            {"pallet_code": pallet.scan_code, "worker_code": self.destination_worker.username},
+            format="json",
+        )
+
+    def scan_product(self, session_id, product_code, quantity):
+        return self.client.post(
+            "/api/scanner/receiving/scan-product/",
+            {"receiving_session_id": session_id, "product_code": product_code, "quantity": str(quantity)},
+            format="json",
+        )
+
+    def put_away(self, session_id, location_code):
+        return self.client.post(
+            "/api/scanner/receiving/put-away/",
+            {"receiving_session_id": session_id, "location_code": location_code},
+            format="json",
+        )
+
+    def close_receiving(self, session_id):
+        return self.client.post(
+            "/api/scanner/receiving/close/",
+            {"receiving_session_id": session_id},
+            format="json",
+        )
+
+    def complete_receiving_alias(self, session_id):
+        return self.client.post(
+            "/api/scanner/receiving/complete/",
+            {"receiving_session_id": session_id},
+            format="json",
+        )
+
+    def receive_line(self, session_id, product_code, quantity, location_code):
+        scan = self.scan_product(session_id, product_code, quantity)
+        self.assertEqual(scan.status_code, status.HTTP_200_OK)
+        put_away = self.put_away(session_id, location_code)
+        self.assertEqual(put_away.status_code, status.HTTP_200_OK)
+        return put_away
+
+    def paged_results(self, response):
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        return response.data["results"] if isinstance(response.data, dict) and "results" in response.data else response.data
+
+    def inventory_quantity(self, product, location):
+        return InventoryItem.objects.get(
+            branch=self.destination_branch,
+            location=location,
+            product=product,
+        ).quantity_on_hand
+
+
+class CriticalInterBranchExactReceivingIntegrationTests(CriticalInterBranchReceivingFixtureMixin, APITestCase):
+    def test_exact_receiving_closes_without_discrepancy_and_updates_read_models(self):
+        transfer, pallet = self.create_in_transit_pallet(
+            reference="IBT-CRIT-EXACT-001",
+            pallet_code="PAL-CRIT-EXACT-001",
+        )
+        self.authenticate(self.unrelated_worker)
+        unrelated_arrivals = self.client.get("/api/scanner/inter-branch-arrivals/", {"branch": self.destination_branch.code})
+        self.assertEqual(unrelated_arrivals.status_code, status.HTTP_403_FORBIDDEN)
+
+        self.authenticate(self.destination_worker)
+        arrival = self.confirm_arrival(pallet)
+        repeated_arrival = self.confirm_arrival(pallet)
+        self.assertEqual(arrival.status_code, status.HTTP_200_OK)
+        self.assertEqual(repeated_arrival.status_code, status.HTTP_200_OK)
+        self.assertEqual(repeated_arrival.data["arrival"]["arrival_result"], "already_registered")
+        self.assertEqual(TransferPalletArrival.objects.filter(pallet=pallet).count(), 1)
+        mm_tasks = self.paged_results(self.client.get("/api/mm-tasks/", {"branch": self.destination_branch.code}))
+        self.assertEqual([row["pallet_code"] for row in mm_tasks], [pallet.scan_code])
+
+        started = self.start_receiving(pallet)
+        self.assertEqual(started.status_code, status.HTTP_200_OK)
+        session_id = started.data["receiving_session"]["id"]
+        self.assertEqual(started.data["receiving_session"]["summary"]["remaining_quantity"], 5)
+
+        invalid_product = self.scan_product(session_id, self.unexpected_product.sku, "1")
+        self.assertEqual(invalid_product.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(PalletReceivingScan.objects.filter(pallet=pallet).count(), 0)
+        self.assertEqual(StockMovement.objects.filter(branch=self.destination_branch, reference=pallet.scan_code).count(), 0)
+
+        pending = self.scan_product(session_id, self.product.sku, "3")
+        self.assertEqual(pending.status_code, status.HTTP_200_OK)
+        wrong_branch_location = self.put_away(session_id, self.source_location.code)
+        self.assertEqual(wrong_branch_location.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(PalletReceivingScan.objects.filter(pallet=pallet).count(), 0)
+        self.assertFalse(
+            InventoryItem.objects.filter(
+                branch=self.destination_branch,
+                product=self.product,
+                quantity_on_hand__gt=0,
+            ).exists()
+        )
+        self.assertEqual(self.put_away(session_id, self.destination_location.code).status_code, status.HTTP_200_OK)
+        self.receive_line(session_id, self.second_product.barcode, "2", self.second_destination_location.code)
+
+        closed = self.close_receiving(session_id)
+        duplicate_close = self.close_receiving(session_id)
+        alias_after_close = self.complete_receiving_alias(session_id)
+
+        self.assertEqual(closed.status_code, status.HTTP_200_OK)
+        self.assertEqual(closed.data["result"], "exact")
+        self.assertEqual(duplicate_close.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(alias_after_close.status_code, status.HTTP_400_BAD_REQUEST)
+        pallet.refresh_from_db()
+        transfer.refresh_from_db()
+        self.assertEqual(pallet.status, TransferPallet.Status.RECEIVED)
+        self.assertEqual(transfer.status, InterBranchTransfer.Status.RECEIVED)
+        self.assertFalse(TransferDiscrepancy.objects.filter(pallet=pallet).exists())
+        self.assertEqual(self.inventory_quantity(self.product, self.destination_location), Decimal("3.000"))
+        self.assertEqual(self.inventory_quantity(self.second_product, self.second_destination_location), Decimal("2.000"))
+        self.assertEqual(PalletReceivingScan.objects.filter(pallet=pallet).count(), 2)
+        self.assertEqual(
+            StockMovement.objects.filter(
+                branch=self.destination_branch,
+                reference=pallet.scan_code,
+                movement_type=StockMovement.MovementType.TRANSFER,
+            ).count(),
+            2,
+        )
+        self.assertEqual(AuditLog.objects.filter(event_type="mm_task_completed", pallet=pallet).count(), 1)
+        self.assertEqual(self.client.get("/api/mm-tasks/", {"branch": self.destination_branch.code}).data["results"], [])
+
+        overview = self.client.get("/api/transport-overview/", {"branch": self.destination_branch.code})
+        self.assertEqual(overview.status_code, status.HTTP_200_OK)
+        self.assertEqual(overview.data["summary"]["pallets_awaiting_receipt"], 0)
+        self.assertEqual(overview.data["summary"]["unresolved_discrepancy_transfers"], 0)
+
+        contents = self.client.get("/api/scanner/contents/", {"code": pallet.scan_code})
+        self.assertEqual(contents.status_code, status.HTTP_200_OK)
+        self.assertEqual(contents.data["object_type"], "pallet")
+        self.assertEqual(contents.data["status"], TransferPallet.Status.RECEIVED)
+        self.assertIsNone(contents.data["discrepancy_reference"])
+        self.assertEqual(
+            {item["sku"]: item["received_quantity"] for item in contents.data["items"]},
+            {self.product.sku: 3, self.second_product.sku: 2},
+        )
+
+        events = self.client.get("/api/current-events/", {"branch": self.destination_branch.code, "search": pallet.scan_code})
+        event_types = {event["event_type"] for event in events.data["results"]}
+        self.assertIn("inter_branch_arrival", event_types)
+        self.assertIn("receive_scan", event_types)
+        self.assertIn("mm_task_completed", event_types)
+
+        self.authenticate(self.source_worker)
+        source_current = self.client.get("/api/scanner/receiving/current/", {"receiving_session_id": session_id})
+        self.assertEqual(source_current.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertFalse(
+            any(
+                row["pallet_code"] == pallet.scan_code
+                for row in self.client.get("/api/mm-tasks/", {"branch": self.source_branch.code}).data["results"]
+            )
+        )
+
+
+class CriticalInterBranchShortageIntegrationTests(CriticalInterBranchReceivingFixtureMixin, APITestCase):
+    def test_shortage_receiving_creates_one_case_and_exposes_branch_scoped_read_models(self):
+        transfer, pallet = self.create_in_transit_pallet(
+            reference="IBT-CRIT-SHORT-001",
+            pallet_code="PAL-CRIT-SHORT-001",
+        )
+        self.authenticate(self.destination_worker)
+        self.assertEqual(self.confirm_arrival(pallet).status_code, status.HTTP_200_OK)
+        session_id = self.start_receiving(pallet).data["receiving_session"]["id"]
+        self.receive_line(session_id, self.product.sku, "2", self.destination_location.code)
+        self.receive_line(session_id, self.second_product.sku, "1", self.second_destination_location.code)
+
+        closed = self.close_receiving(session_id)
+        duplicate_close = self.close_receiving(session_id)
+        alias_after_close = self.complete_receiving_alias(session_id)
+
+        self.assertEqual(closed.status_code, status.HTTP_200_OK)
+        self.assertEqual(closed.data["result"], "discrepancy")
+        self.assertEqual(duplicate_close.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(alias_after_close.status_code, status.HTTP_400_BAD_REQUEST)
+        pallet.refresh_from_db()
+        transfer.refresh_from_db()
+        self.assertEqual(pallet.status, TransferPallet.Status.CLOSED_WITH_DISCREPANCY)
+        self.assertEqual(transfer.status, InterBranchTransfer.Status.CLOSED_WITH_DISCREPANCY)
+        self.assertEqual(self.inventory_quantity(self.product, self.destination_location), Decimal("2.000"))
+        self.assertEqual(self.inventory_quantity(self.second_product, self.second_destination_location), Decimal("1.000"))
+
+        discrepancy = TransferDiscrepancy.objects.get(pallet=pallet)
+        self.assertEqual(TransferDiscrepancy.objects.filter(pallet=pallet).count(), 1)
+        self.assertEqual(discrepancy.status, TransferDiscrepancy.Status.OPEN)
+        lines = {item.product.sku: item for item in discrepancy.items.select_related("product")}
+        self.assertEqual(set(lines), {self.product.sku, self.second_product.sku})
+        self.assertEqual(lines[self.product.sku].expected_quantity, Decimal("3.000"))
+        self.assertEqual(lines[self.product.sku].received_quantity, Decimal("2.000"))
+        self.assertEqual(lines[self.product.sku].difference_quantity, Decimal("-1.000"))
+        self.assertEqual(lines[self.product.sku].discrepancy_quantity, Decimal("1.000"))
+        self.assertEqual(lines[self.second_product.sku].expected_quantity, Decimal("2.000"))
+        self.assertEqual(lines[self.second_product.sku].received_quantity, Decimal("1.000"))
+        self.assertEqual(lines[self.second_product.sku].discrepancy_quantity, Decimal("1.000"))
+        self.assertEqual(AuditLog.objects.filter(event_type="mm_task_completed", pallet=pallet).count(), 1)
+        self.assertEqual(PalletReceivingScan.objects.filter(pallet=pallet).count(), 2)
+
+        destination_list = self.client.get("/api/transfer-discrepancies/", {"branch": self.destination_branch.code})
+        self.assertEqual(destination_list.status_code, status.HTTP_200_OK)
+        self.assertEqual([row["reference"] for row in destination_list.data["results"]], [discrepancy.reference])
+        destination_detail = self.client.get(f"/api/transfer-discrepancies/{discrepancy.id}/")
+        self.assertEqual(destination_detail.status_code, status.HTTP_200_OK)
+        self.assertEqual(destination_detail.data["line_count"], 2)
+        self.assertTrue(destination_detail.data["source_review"] is None)
+
+        contents = self.client.get("/api/scanner/contents/", {"code": pallet.scan_code})
+        self.assertEqual(contents.status_code, status.HTTP_200_OK)
+        self.assertEqual(contents.data["discrepancy_reference"], discrepancy.reference)
+        self.assertEqual(
+            {item["sku"]: item["missing_quantity"] for item in contents.data["items"]},
+            {self.product.sku: 1, self.second_product.sku: 1},
+        )
+
+        overview = self.client.get("/api/transport-overview/", {"branch": self.destination_branch.code})
+        self.assertEqual(overview.status_code, status.HTTP_200_OK)
+        self.assertEqual(overview.data["summary"]["pallets_awaiting_receipt"], 0)
+        self.assertEqual(overview.data["summary"]["unresolved_discrepancy_transfers"], 1)
+        self.assertTrue(
+            any(item["reference"] == discrepancy.reference for item in overview.data["attention_items"])
+        )
+
+        exceptions = self.client.get("/api/inventory-exceptions/summary/", {"branch": self.destination_branch.code})
+        self.assertEqual(exceptions.status_code, status.HTTP_200_OK)
+        transfer_category = next(item for item in exceptions.data["categories"] if item["key"] == "transfer_discrepancies")
+        action_category = next(item for item in exceptions.data["categories"] if item["key"] == "action_queue")
+        self.assertEqual(transfer_category["count"], 1)
+        self.assertEqual(action_category["count"], 1)
+
+        action_rows = self.client.get("/api/transfer-discrepancy-actions/", {"branch": self.destination_branch.code})
+        self.assertEqual(action_rows.status_code, status.HTTP_200_OK)
+        self.assertEqual(action_rows.data["results"][0]["action_type"], "review_destination_shortage")
+        self.assertEqual(action_rows.data["results"][0]["target_reference"], discrepancy.reference)
+        source_actions = self.client.get("/api/transfer-discrepancy-actions/", {"branch": self.source_branch.code})
+        self.assertEqual(source_actions.status_code, status.HTTP_200_OK)
+        self.assertEqual(source_actions.data["results"], [])
+
+        events = self.client.get("/api/current-events/", {"branch": self.destination_branch.code, "search": pallet.scan_code})
+        self.assertEqual(events.status_code, status.HTTP_200_OK)
+        self.assertTrue(any(event["event_type"] == "mm_task_completed" for event in events.data["results"]))
+
+        self.authenticate(self.source_worker)
+        source_detail = self.client.get(f"/api/transfer-discrepancies/{discrepancy.id}/")
+        self.assertEqual(source_detail.status_code, status.HTTP_200_OK)
+        source_filtered_list = self.client.get("/api/transfer-discrepancies/", {"branch": self.source_branch.code})
+        self.assertEqual(source_filtered_list.status_code, status.HTTP_200_OK)
+        self.assertEqual(source_filtered_list.data["results"], [])
+        source_start = self.start_receiving(pallet)
+        self.assertEqual(source_start.status_code, status.HTTP_403_FORBIDDEN)
+
+        self.authenticate(self.unrelated_worker)
+        unrelated_list = self.client.get("/api/transfer-discrepancies/")
+        self.assertEqual(unrelated_list.status_code, status.HTTP_200_OK)
+        self.assertEqual(unrelated_list.data["results"], [])
+        unrelated_detail = self.client.get(f"/api/transfer-discrepancies/{discrepancy.id}/")
+        self.assertEqual(unrelated_detail.status_code, status.HTTP_404_NOT_FOUND)
+        unrelated_overview = self.client.get("/api/transport-overview/", {"branch": self.unrelated_branch.code})
+        self.assertEqual(unrelated_overview.status_code, status.HTTP_200_OK)
+        self.assertEqual(unrelated_overview.data["summary"]["unresolved_discrepancy_transfers"], 0)
+
+
 class ScannerLookupAndQuickTransferTests(APITestCase):
     def setUp(self):
         self.branch = Branch.objects.create(code="LKP", name="Lookup Branch", city="Gdynia", country="Poland")
@@ -7595,8 +7976,10 @@ class RouteRunLifecycleTests(APITestCase):
         self.assertFalse(response.data["is_late"])
 
     def test_ready_route_is_late_after_departure(self):
-        self.route_run.departure_time = (timezone.localtime() - timezone.timedelta(hours=1)).time()
-        self.route_run.save(update_fields=["departure_time", "updated_at"])
+        past_departure = timezone.localtime() - timezone.timedelta(hours=1)
+        self.route_run.service_date = past_departure.date()
+        self.route_run.departure_time = past_departure.time()
+        self.route_run.save(update_fields=["service_date", "departure_time", "updated_at"])
         self.mark_prepared()
 
         response = self.client.get(f"/api/route-runs/{self.route_run.id}/")
