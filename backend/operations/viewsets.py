@@ -3636,16 +3636,17 @@ class TransferDiscrepancyReconciliationViewSet(ReadOnlyModelViewSet):
 
         with transaction.atomic():
             reconciliation = (
-                TransferDiscrepancyReconciliation.objects.select_for_update()
-                .select_related(
-                    "discrepancy",
-                    "discrepancy__pallet",
-                    "discrepancy__transfer",
-                    "discrepancy__transfer__source_branch",
-                    "discrepancy__transfer__destination_branch",
-                    "source_review",
+                get_object_or_404(
+                    TransferDiscrepancyReconciliation.objects.select_for_update().select_related(
+                        "discrepancy",
+                        "discrepancy__pallet",
+                        "discrepancy__transfer",
+                        "discrepancy__transfer__source_branch",
+                        "discrepancy__transfer__destination_branch",
+                        "source_review",
+                    ),
+                    pk=pk,
                 )
-                .get(pk=pk)
             )
             if request.user.is_authenticated:
                 require_any_branch_access(

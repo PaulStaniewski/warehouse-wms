@@ -10,6 +10,7 @@ The integration scenarios live in `backend/operations/tests.py` alongside the ex
 - `CriticalCycleCountIntegrationTests`
 - `CriticalInterBranchExactReceivingIntegrationTests`
 - `CriticalInterBranchShortageIntegrationTests`
+- `CriticalSourceReviewReconciliationIntegrationTests`
 
 The project still uses the existing monolithic operations test module. No test package migration was introduced for this stage.
 
@@ -22,6 +23,7 @@ The project still uses the existing monolithic operations test module. No test p
 | Cycle Count recount | Branch Leader, Branch Worker | Stale original variance, recount request, blind recount detail, scanner recount submission, acceptance, adjustment, duplicate guard, stale recount rejection | Cycle Count detail, Stock Movements, Current Events |
 | Inter-branch exact receiving | Destination Worker, source Worker, unrelated Worker | Destination arrival confirmation, receiving start/recovery, product scan, put-away, canonical close, compatibility close alias retry, validation rollback, branch isolation | MM Tasks, Transport Overview, Universal Contents, Current Events |
 | Inter-branch shortage receiving | Destination Worker, source Worker, unrelated Worker | Destination arrival confirmation, partial receiving, shortage close, duplicate close guard, compatibility close alias retry, branch visibility | Transfer Discrepancies, Discrepancy Action Queue, Inventory Exceptions, Transport Overview, Universal Contents, Current Events |
+| Source review and reconciliation | Destination Worker/Leader, source Worker/Leader, unrelated Worker | Receiving shortage, discrepancy report print, destination shortage confirmation, source review, reconciliation acknowledgement, source stock verification, partial source recovery, source search close, final manual accounting | Discrepancy detail, Source Review detail, Reconciliation detail, Source Stock Verification detail, Action Queue, Inventory Exceptions, Current Events |
 
 ## Authorization Coverage
 
@@ -32,6 +34,8 @@ The integration tests include targeted authorization checks:
 - unrelated branch users cannot read branch-owned movement/session details,
 - source and unrelated branch users cannot operate destination receiving sessions,
 - inter-branch discrepancy detail is visible to participating branches while unrelated branches are excluded,
+- destination users cannot execute source-owned review and source-stock commands,
+- source Workers can investigate source work, while final reconciliation completion remains Leader-only,
 - same-branch Workers can execute scanner work,
 - same-branch Leaders can execute review and reconciliation work.
 
@@ -49,11 +53,25 @@ The tests verify that successful commands update the same state visible to users
 - no successful StockMovement or AuditLog after validation failures,
 - exact transfer receiving creates destination inventory without a discrepancy case,
 - shortage transfer receiving creates one discrepancy case with shortage lines and does not duplicate it on retry,
+- source review and reconciliation preserve the accounting identity for confirmed shortages,
+- source stock recovery restores found stock into source inventory through `SOURCE_DISCREPANCY_RECOVERY`,
 - Event Register entries for meaningful workflow transitions.
 
 ## Inter-Branch Receiving Boundary
 
 The current receiving command flow starts at destination arrival. There is no dedicated source-branch release scanner/API command in the tested path, so the critical receiving fixtures create a transfer and pallet directly in the released/in-transit database state. From that point onward the tests use the real scanner and WMS API endpoints.
+
+## Source Review And Reconciliation
+
+`CriticalSourceReviewReconciliationIntegrationTests` starts from a real destination receiving shortage. The baseline transfer has 9 expected units, 6 received units, and 3 missing units across two products. Destination report printing posts those missing units to destination `UNCONFIRMED`, and a destination Leader confirms the full shortage, creating exactly one source review.
+
+The source branch starts and completes the source review with `source_shortage_found`, which creates exactly one reconciliation on the source stock verification route. A source Worker acknowledges it, starts source verification, records 1 found unit at a source location, then closes the search with 2 unresolved units. The final accounting assertion is:
+
+```text
+expected 9 = received 6 + source-found 1 + unresolved/source-loss 2
+```
+
+Found source stock is operational, not only evidential: the recovery command restores quantity to source inventory and creates one `SOURCE_DISCREPANCY_RECOVERY` stock movement. The final manual reconciliation is Leader-only and completes the case without adding destination inventory. The test verifies duplicate command safety, invalid product/location rollback, branch-scoped read models, Action Queue transitions, Inventory Exceptions transitions, and Event Register evidence for the chain.
 
 ## Quick Transfer Idempotency
 
@@ -93,7 +111,7 @@ These areas are not duplicated wholesale in the critical integration classes. Fu
 Run only the critical integration scenarios:
 
 ```powershell
-docker compose run --rm backend python manage.py test operations.tests.CriticalQuickTransferIntegrationTests operations.tests.CriticalCycleCountIntegrationTests operations.tests.CriticalInterBranchExactReceivingIntegrationTests operations.tests.CriticalInterBranchShortageIntegrationTests --noinput
+docker compose run --rm backend python manage.py test operations.tests.CriticalQuickTransferIntegrationTests operations.tests.CriticalCycleCountIntegrationTests operations.tests.CriticalInterBranchExactReceivingIntegrationTests operations.tests.CriticalInterBranchShortageIntegrationTests operations.tests.CriticalSourceReviewReconciliationIntegrationTests --noinput
 ```
 
 Run the full backend suites:
