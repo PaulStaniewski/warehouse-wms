@@ -97,6 +97,8 @@ const wmsNavSections: NavSection[] = [
     items: [
       { to: "/wms/stock-transfers", label: "Stock Transfers", icon: Boxes },
       { to: "/wms/stock-adjustments", label: "Stock Adjustments", icon: ClipboardList },
+      { to: "/wms/returns", label: "Returns", icon: ArchiveRestore },
+      { to: "/wms/sales-corrections", label: "Sales Corrections", icon: ClipboardCheck },
       { to: "/wms/cycle-counts", label: "Cycle Counts", icon: ClipboardCheck },
       { to: "/wms/cycle-count-review-queue", label: "Review Queue", icon: ListChecks, minimumRole: "leader" },
     ],
@@ -123,6 +125,7 @@ const wmsNavSections: NavSection[] = [
         icon: History,
         activePatterns: ["/wms/events", "/wms/current-events"],
       },
+      { to: "/wms/reports/correction-activity", label: "Correction Activity Report", icon: History },
     ],
   },
   {
@@ -170,6 +173,9 @@ const wmsPageTitles: Array<[string, string]> = [
   ["/wms/cycle-counts", "Cycle Counts"],
   ["/wms/cycle-count-review-queue", "Cycle Count Review Queue"],
   ["/wms/stock-adjustments", "Stock Adjustments"],
+  ["/wms/returns", "Returns"],
+  ["/wms/sales-corrections", "Sales Corrections"],
+  ["/wms/reports/correction-activity", "Correction Activity Report"],
   ["/wms/stock-transfers", "Stock Transfers"],
   ["/wms/dashboard", "Dashboard"],
   ["/wms/products", "Products"],

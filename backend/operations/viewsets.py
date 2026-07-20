@@ -12,7 +12,7 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
-from rest_framework.viewsets import ReadOnlyModelViewSet, ViewSet
+from rest_framework.viewsets import ModelViewSet, ReadOnlyModelViewSet, ViewSet
 
 from accounts.authorization import (
     branch_codes_filter,
@@ -29,6 +29,8 @@ from operations.models import (
     CycleCountRecount,
     CycleCountSession,
     DeliveryRoute,
+    ExternalReturnDocument,
+    ExternalReturnDocumentLine,
     InterBranchTransfer,
     Order,
     OrderLine,
@@ -36,9 +38,12 @@ from operations.models import (
     PickingShortage,
     PickingTask,
     ReplenishmentRequest,
+    ReturnAction,
     ReturnBatch,
     ReturnLine,
     RouteRun,
+    SalesCorrection,
+    SalesCorrectionLine,
     StockMovement,
     TransferDiscrepancy,
     TransferDiscrepancyManualReconciliationDecision,
@@ -59,6 +64,8 @@ from operations.serializers import (
     CycleCountReviewQueueItemSerializer,
     CycleCountSessionSerializer,
     DeliveryRouteSerializer,
+    CorrectionActivityReportSerializer,
+    ExternalReturnDocumentSerializer,
     InventoryExceptionSummarySerializer,
     OrderLineSerializer,
     OrderSerializer,
@@ -68,6 +75,8 @@ from operations.serializers import (
     ReturnBatchSerializer,
     ReturnLineSerializer,
     RouteRunSerializer,
+    SalesCorrectionSerializer,
+    SalesHistoryCandidateSerializer,
     StockMovementSerializer,
     TransportOverviewSerializer,
     TransferDiscrepancyActionSerializer,
@@ -76,6 +85,14 @@ from operations.serializers import (
     TransferDiscrepancySourceStockVerificationSerializer,
     TransferDiscrepancySourceReviewSerializer,
     TransferDiscrepancyTransitInvestigationSerializer,
+)
+from operations.return_services import (
+    Conflict,
+    apply_return_action,
+    confirm_sales_correction,
+    corrected_quantity_for_order_line,
+    parse_positive_quantity,
+    remaining_correctable_quantity,
 )
 from operations.services import is_route_late, is_route_work_fully_prepared, recalculate_route_readiness
 from operations.services import (
@@ -406,6 +423,355 @@ class ReturnLineViewSet(ReadOnlyModelViewSet):
 
     def get_queryset(self):
         return filter_branch_queryset(super().get_queryset(), self.request, "return_batch__branch")
+
+
+class ExternalReturnDocumentFilter(django_filters.FilterSet):
+    branch = django_filters.CharFilter(method="filter_branch")
+    external_reference = django_filters.CharFilter(field_name="external_reference", lookup_expr="iexact")
+    customer = django_filters.CharFilter(field_name="customer_name", lookup_expr="icontains")
+    source_sales_document = django_filters.CharFilter(field_name="source_sales_document_reference", lookup_expr="icontains")
+    product = django_filters.CharFilter(method="filter_product")
+    employee = django_filters.CharFilter(method="filter_employee")
+    date_from = django_filters.DateFilter(field_name="imported_at", lookup_expr="date__gte")
+    date_to = django_filters.DateFilter(field_name="imported_at", lookup_expr="date__lte")
+
+    def filter_branch(self, queryset, name, value):
+        if str(value).isdigit():
+            return queryset.filter(branch_id=value)
+        return queryset.filter(branch__code__iexact=value)
+
+    def filter_product(self, queryset, name, value):
+        return queryset.filter(
+            models.Q(lines__product__sku__iexact=value)
+            | models.Q(lines__product__barcode__iexact=value)
+            | models.Q(lines__product__name__icontains=value)
+        ).distinct()
+
+    def filter_employee(self, queryset, name, value):
+        return queryset.filter(actions__performed_by__username__iexact=value).distinct()
+
+    class Meta:
+        model = ExternalReturnDocument
+        fields = [
+            "branch",
+            "external_reference",
+            "status",
+            "customer",
+            "source_sales_document",
+            "product",
+            "employee",
+            "date_from",
+            "date_to",
+        ]
+
+
+class ExternalReturnDocumentViewSet(ReadOnlyModelViewSet):
+    queryset = ExternalReturnDocument.objects.select_related("branch").prefetch_related(
+        "lines",
+        "lines__product",
+        "lines__actions",
+        "lines__actions__performed_by",
+        "actions",
+        "actions__performed_by",
+        "actions__product",
+        "actions__stock_movement",
+    )
+    serializer_class = ExternalReturnDocumentSerializer
+    filterset_class = ExternalReturnDocumentFilter
+    search_fields = ["external_reference", "customer_name", "source_sales_document_reference", "lines__product__sku"]
+    ordering = ["-imported_at", "-created_at"]
+    ordering_fields = ["external_reference", "status", "imported_at", "external_created_at", "created_at"]
+
+    def get_queryset(self):
+        return filter_branch_queryset(super().get_queryset(), self.request, "branch")
+
+    @action(detail=False, methods=["get"])
+    def lookup(self, request):
+        reference = str(request.query_params.get("external_reference", "")).strip()
+        if not reference:
+            return Response({"detail": "external_reference is required."}, status=status.HTTP_400_BAD_REQUEST)
+        document = self.get_queryset().filter(external_reference__iexact=reference).first()
+        if document is None:
+            return Response({"detail": "Return document not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(self.get_serializer(document).data)
+
+    @action(detail=True, methods=["post"], url_path=r"lines/(?P<line_id>\d+)/actions")
+    def record_action(self, request, pk=None, line_id=None):
+        document = self.get_object()
+        action, replayed = apply_return_action(
+            user=request.user,
+            document_id=document.id,
+            line_id=line_id,
+            action_type=str(request.data.get("action_type", "")).strip(),
+            quantity=request.data.get("quantity"),
+            note=request.data.get("note", ""),
+            client_operation_id=request.data.get("client_operation_id"),
+        )
+        document.refresh_from_db()
+        serializer = self.get_serializer(document)
+        return Response(
+            {
+                "message": "Return action replayed." if replayed else "Return action recorded.",
+                "action_id": action.id,
+                "document": serializer.data,
+            }
+        )
+
+
+class SalesCorrectionFilter(django_filters.FilterSet):
+    branch = django_filters.CharFilter(method="filter_branch")
+    customer = django_filters.CharFilter(field_name="lines__customer_name_snapshot", lookup_expr="icontains")
+    source_sales_document = django_filters.CharFilter(field_name="lines__source_sales_document_reference", lookup_expr="icontains")
+    product = django_filters.CharFilter(method="filter_product")
+    employee = django_filters.CharFilter(field_name="confirmed_by__username", lookup_expr="iexact")
+    date_from = django_filters.DateFilter(field_name="confirmed_at", lookup_expr="date__gte")
+    date_to = django_filters.DateFilter(field_name="confirmed_at", lookup_expr="date__lte")
+
+    def filter_branch(self, queryset, name, value):
+        if str(value).isdigit():
+            return queryset.filter(branch_id=value)
+        return queryset.filter(branch__code__iexact=value)
+
+    def filter_product(self, queryset, name, value):
+        return queryset.filter(
+            models.Q(lines__product__sku__iexact=value)
+            | models.Q(lines__product__barcode__iexact=value)
+            | models.Q(lines__product__name__icontains=value)
+        ).distinct()
+
+    class Meta:
+        model = SalesCorrection
+        fields = ["branch", "status", "customer", "source_sales_document", "product", "employee", "date_from", "date_to"]
+
+
+class SalesCorrectionViewSet(ModelViewSet):
+    queryset = SalesCorrection.objects.select_related("branch", "created_by", "confirmed_by").prefetch_related(
+        "lines",
+        "lines__product",
+        "lines__source_order",
+        "lines__source_order_line",
+        "lines__returns_location",
+        "lines__stock_movement",
+    )
+    serializer_class = SalesCorrectionSerializer
+    filterset_class = SalesCorrectionFilter
+    http_method_names = ["get", "post", "head", "options"]
+    search_fields = [
+        "reference",
+        "lines__customer_name_snapshot",
+        "lines__source_sales_document_reference",
+        "lines__product__sku",
+    ]
+    ordering = ["-created_at"]
+    ordering_fields = ["reference", "status", "confirmed_at", "created_at"]
+
+    def get_queryset(self):
+        return filter_branch_queryset(super().get_queryset(), self.request, "branch")
+
+    def create(self, request, *args, **kwargs):
+        branch_value = str(request.data.get("branch") or request.data.get("branch_code") or "").strip()
+        if not branch_value:
+            return Response({"detail": "branch is required."}, status=status.HTTP_400_BAD_REQUEST)
+        if branch_value.isdigit():
+            branch = get_object_or_404(Branch, pk=branch_value)
+        else:
+            branch = get_object_or_404(Branch, code__iexact=branch_value)
+        require_branch_access(request.user, branch)
+        correction = SalesCorrection.objects.create(
+            branch=branch,
+            created_by=request.user,
+            note=str(request.data.get("note", "")).strip(),
+        )
+        AuditLog.objects.create(
+            actor=request.user,
+            action_type=AuditLog.ActionType.CREATE,
+            event_type="sales_correction_draft_created",
+            branch=branch,
+            reference=correction.reference,
+            entity_name="SalesCorrection",
+            entity_id=str(correction.id),
+            message=f"{request.user.username} created sales correction draft {correction.reference}.",
+        )
+        return Response(self.get_serializer(correction).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=["get"], url_path="sales-history")
+    def sales_history(self, request):
+        product_code = str(request.query_params.get("product", "")).strip()
+        branch_value = str(request.query_params.get("branch", "")).strip()
+        if not product_code:
+            return Response({"detail": "product is required."}, status=status.HTTP_400_BAD_REQUEST)
+        product = Product.objects.filter(
+            models.Q(sku__iexact=product_code) | models.Q(barcode__iexact=product_code)
+        ).first()
+        if product is None:
+            return Response({"detail": "Product not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        queryset = OrderLine.objects.select_related("order", "order__branch", "product").filter(
+            product=product,
+            order__status=Order.Status.COMPLETED,
+        )
+        queryset = filter_branch_queryset(queryset, request, "order__branch")
+        if branch_value:
+            queryset = queryset.filter(
+                models.Q(order__branch_id=branch_value) if branch_value.isdigit() else models.Q(order__branch__code__iexact=branch_value)
+            )
+
+        rows = []
+        for line in queryset.order_by("-order__requested_ship_date", "-order__created_at", "line_number")[:100]:
+            corrected = corrected_quantity_for_order_line(line)
+            remaining = line.quantity_ordered - corrected
+            if remaining <= 0:
+                continue
+            rows.append(
+                {
+                    "order": line.order_id,
+                    "order_line": line.id,
+                    "branch": line.order.branch_id,
+                    "branch_code": line.order.branch.code,
+                    "customer_name": line.order.customer_name,
+                    "customer_alias": line.order.customer_alias,
+                    "source_sales_document_reference": line.order.external_reference,
+                    "sale_date": line.order.requested_ship_date,
+                    "product": product.id,
+                    "product_sku": product.sku,
+                    "product_name": product.name,
+                    "sold_quantity": str(line.quantity_ordered),
+                    "previously_corrected_quantity": str(corrected),
+                    "remaining_correctable_quantity": str(remaining),
+                }
+            )
+        return Response(SalesHistoryCandidateSerializer(rows, many=True).data)
+
+    @action(detail=True, methods=["post"], url_path="add-line")
+    def add_line(self, request, pk=None):
+        correction = self.get_object()
+        require_branch_access(request.user, correction.branch)
+        if correction.status != SalesCorrection.Status.DRAFT:
+            return Response({"detail": "Completed sales corrections are read-only."}, status=status.HTTP_400_BAD_REQUEST)
+        source_line_id = request.data.get("source_order_line")
+        quantity = parse_positive_quantity(request.data.get("quantity"))
+        source_line = get_object_or_404(OrderLine.objects.select_related("order", "product"), pk=source_line_id)
+        if source_line.order.branch_id != correction.branch_id:
+            raise PermissionDenied("You do not have access to this branch or operation.")
+        if source_line.order.status != Order.Status.COMPLETED:
+            return Response({"detail": "Only completed sales can be corrected."}, status=status.HTTP_400_BAD_REQUEST)
+        if correction.lines.filter(source_order_line=source_line).exists():
+            return Response({"detail": "This sales line is already in the correction draft."}, status=status.HTTP_400_BAD_REQUEST)
+        remaining = remaining_correctable_quantity(source_line)
+        if quantity > remaining:
+            return Response({"detail": "Quantity exceeds remaining correctable quantity."}, status=status.HTTP_400_BAD_REQUEST)
+        line = SalesCorrectionLine.objects.create(
+            correction=correction,
+            product=source_line.product,
+            source_order=source_line.order,
+            source_order_line=source_line,
+            customer_name_snapshot=source_line.order.customer_name,
+            customer_alias_snapshot=source_line.order.customer_alias,
+            source_sales_document_reference=source_line.order.external_reference,
+            sold_quantity_snapshot=source_line.quantity_ordered,
+            corrected_quantity=quantity,
+        )
+        return Response(SalesCorrectionSerializer(correction).data)
+
+    @action(detail=True, methods=["post"], url_path=r"lines/(?P<line_id>\d+)/update")
+    def update_line(self, request, pk=None, line_id=None):
+        correction = self.get_object()
+        require_branch_access(request.user, correction.branch)
+        if correction.status != SalesCorrection.Status.DRAFT:
+            return Response({"detail": "Completed sales corrections are read-only."}, status=status.HTTP_400_BAD_REQUEST)
+        line = get_object_or_404(correction.lines.select_related("source_order_line"), pk=line_id)
+        quantity = parse_positive_quantity(request.data.get("quantity"))
+        if quantity > remaining_correctable_quantity(line.source_order_line, exclude_correction_id=correction.id):
+            return Response({"detail": "Quantity exceeds remaining correctable quantity."}, status=status.HTTP_400_BAD_REQUEST)
+        line.corrected_quantity = quantity
+        line.save(update_fields=["corrected_quantity", "updated_at"])
+        return Response(SalesCorrectionSerializer(correction).data)
+
+    @action(detail=True, methods=["post"], url_path=r"lines/(?P<line_id>\d+)/remove")
+    def remove_line(self, request, pk=None, line_id=None):
+        correction = self.get_object()
+        require_branch_access(request.user, correction.branch)
+        if correction.status != SalesCorrection.Status.DRAFT:
+            return Response({"detail": "Completed sales corrections are read-only."}, status=status.HTTP_400_BAD_REQUEST)
+        line = get_object_or_404(correction.lines, pk=line_id)
+        line.delete()
+        return Response(SalesCorrectionSerializer(correction).data)
+
+    @action(detail=True, methods=["post"])
+    def confirm(self, request, pk=None):
+        correction, replayed = confirm_sales_correction(
+            user=request.user,
+            correction_id=self.get_object().id,
+            client_operation_id=request.data.get("client_operation_id"),
+        )
+        correction.refresh_from_db()
+        return Response(
+            {
+                "message": "Sales correction confirmation replayed." if replayed else "Sales correction confirmed.",
+                "correction": self.get_serializer(correction).data,
+            }
+        )
+
+    @action(detail=False, methods=["get"], url_path="activity-report")
+    def activity_report(self, request):
+        queryset = SalesCorrectionLine.objects.select_related(
+            "correction",
+            "correction__branch",
+            "correction__confirmed_by",
+            "product",
+            "returns_location",
+            "stock_movement",
+        ).filter(correction__status=SalesCorrection.Status.COMPLETED)
+        queryset = filter_branch_queryset(queryset, request, "correction__branch")
+        employee = str(request.query_params.get("employee", "")).strip()
+        if employee:
+            queryset = queryset.filter(correction__confirmed_by__username__iexact=employee)
+        correction_reference = str(request.query_params.get("correction_reference", "")).strip()
+        if correction_reference:
+            queryset = queryset.filter(correction__reference__iexact=correction_reference)
+        customer = str(request.query_params.get("customer", "")).strip()
+        if customer:
+            queryset = queryset.filter(customer_name_snapshot__icontains=customer)
+        source_sales_document = str(request.query_params.get("source_sales_document", "")).strip()
+        if source_sales_document:
+            queryset = queryset.filter(source_sales_document_reference__icontains=source_sales_document)
+        product = str(request.query_params.get("product", "")).strip()
+        if product:
+            queryset = queryset.filter(models.Q(product__sku__iexact=product) | models.Q(product__barcode__iexact=product))
+        date_from = parse_date(request.query_params.get("date_from", ""))
+        date_to = parse_date(request.query_params.get("date_to", ""))
+        if date_from:
+            queryset = queryset.filter(correction__confirmed_at__date__gte=date_from)
+        if date_to:
+            queryset = queryset.filter(correction__confirmed_at__date__lte=date_to)
+
+        rows_queryset = queryset.order_by("-correction__confirmed_at", "-id")
+        summary = {
+            "completed_corrections": rows_queryset.values("correction_id").distinct().count(),
+            "correction_lines": rows_queryset.count(),
+            "total_corrected_quantity": str(
+                rows_queryset.aggregate(total=models.Sum("corrected_quantity"))["total"] or Decimal("0")
+            ),
+        }
+        rows = [
+            {
+                "id": line.id,
+                "confirmed_at": line.correction.confirmed_at,
+                "employee": line.correction.confirmed_by.username if line.correction.confirmed_by else "",
+                "branch_code": line.correction.branch.code,
+                "correction_reference": line.correction.reference,
+                "customer_name": line.customer_name_snapshot,
+                "source_sales_document_reference": line.source_sales_document_reference,
+                "product_sku": line.product.sku,
+                "product_name": line.product.name,
+                "corrected_quantity": str(line.corrected_quantity),
+                "returns_location_code": line.returns_location.code if line.returns_location else "",
+                "stock_movement": line.stock_movement_id,
+                "summary": summary,
+            }
+            for line in rows_queryset[:200]
+        ]
+        return Response({"summary": summary, "results": CorrectionActivityReportSerializer(rows, many=True).data})
 
 
 class PickingTaskViewSet(ReadOnlyModelViewSet):

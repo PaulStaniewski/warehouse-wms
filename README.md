@@ -101,6 +101,18 @@ Run Django migrations:
 docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm backend python manage.py migrate
 ```
 
+Seed deterministic demo data:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm backend python manage.py seed_demo_data
+```
+
+Useful demo references:
+
+- External Return Document: `ZW1103872`
+- Returns Area location: `RETURNS`
+- Completed sales for Sales Corrections: `AX-SALE-RET-001`, `AX-SALE-RET-002`
+
 Create Django migrations:
 
 ```bash

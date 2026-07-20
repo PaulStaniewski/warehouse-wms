@@ -176,6 +176,160 @@ export type ReturnBatch = {
   received_at: string | null;
 };
 
+export type ReturnAction = {
+  id: number;
+  document: number;
+  line: number;
+  branch: number;
+  product: number;
+  product_sku: string;
+  product_name: string;
+  action_type: string;
+  action_type_label: string;
+  source_pool: string;
+  source_pool_label: string;
+  quantity: string;
+  employee: string | null;
+  note: string;
+  client_operation_id: string;
+  inventory_quantity_before: string | null;
+  inventory_quantity_after: string | null;
+  stock_movement: number | null;
+  stock_movement_id: number | null;
+  stock_movement_reference: string | null;
+  created_at: string;
+};
+
+export type ReturnDocumentLine = {
+  id: number;
+  document: number;
+  line_number: number;
+  product: number;
+  product_sku: string;
+  product_name: string;
+  product_barcode: string | null;
+  expected_quantity: string;
+  accepted_quantity: string;
+  rejected_quantity: string;
+  on_hold_quantity: string;
+  remaining_quantity: string;
+  latest_action: string | null;
+  latest_employee: string | null;
+  actions: ReturnAction[];
+};
+
+export type ReturnDocument = {
+  id: number;
+  branch: number;
+  branch_code: string;
+  branch_name: string;
+  external_reference: string;
+  source_system: string;
+  customer_name: string;
+  customer_alias: string;
+  source_sales_document_reference: string;
+  external_created_at: string | null;
+  imported_at: string;
+  last_synced_at: string | null;
+  completed_at: string | null;
+  status: string;
+  status_label: string;
+  expected_total: string;
+  accepted_total: string;
+  rejected_total: string;
+  on_hold_total: string;
+  remaining_total: string;
+  lines: ReturnDocumentLine[];
+  actions: ReturnAction[];
+};
+
+export type SalesHistoryCandidate = {
+  order: number;
+  order_line: number;
+  branch: number;
+  branch_code: string;
+  customer_name: string;
+  customer_alias: string;
+  source_sales_document_reference: string;
+  sale_date: string | null;
+  product: number;
+  product_sku: string;
+  product_name: string;
+  sold_quantity: string;
+  previously_corrected_quantity: string;
+  remaining_correctable_quantity: string;
+};
+
+export type SalesCorrectionLine = {
+  id: number;
+  correction: number;
+  product: number;
+  product_sku: string;
+  product_name: string;
+  source_order: number;
+  source_order_line: number;
+  customer_name_snapshot: string;
+  customer_alias_snapshot: string;
+  source_sales_document_reference: string;
+  sold_quantity_snapshot: string;
+  previously_corrected_quantity: string;
+  remaining_correctable_quantity: string;
+  corrected_quantity: string;
+  returns_location: number | null;
+  returns_location_code: string | null;
+  stock_movement: number | null;
+  stock_movement_reference: string | null;
+  inventory_quantity_before: string | null;
+  inventory_quantity_after: string | null;
+};
+
+export type SalesCorrection = {
+  id: number;
+  reference: string;
+  branch: number;
+  branch_code: string;
+  status: string;
+  status_label: string;
+  created_by: number | null;
+  created_by_username: string | null;
+  confirmed_by: number | null;
+  confirmed_by_username: string | null;
+  confirmed_at: string | null;
+  note: string;
+  line_count: number;
+  total_corrected_quantity: string;
+  lines: SalesCorrectionLine[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type CorrectionActivitySummary = {
+  completed_corrections: number;
+  correction_lines: number;
+  total_corrected_quantity: string;
+};
+
+export type CorrectionActivityRow = {
+  id: number;
+  confirmed_at: string;
+  employee: string;
+  branch_code: string;
+  correction_reference: string;
+  customer_name: string;
+  source_sales_document_reference: string;
+  product_sku: string;
+  product_name: string;
+  corrected_quantity: string;
+  returns_location_code: string;
+  stock_movement: number | null;
+  summary: CorrectionActivitySummary;
+};
+
+export type CorrectionActivityResponse = {
+  summary: CorrectionActivitySummary;
+  results: CorrectionActivityRow[];
+};
+
 export type AuditLog = {
   id: number;
   actor: number | null;

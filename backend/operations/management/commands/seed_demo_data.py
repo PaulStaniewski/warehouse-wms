@@ -12,6 +12,8 @@ from operations.models import (
     CartPickedItem,
     CartWorkSession,
     DeliveryRoute,
+    ExternalReturnDocument,
+    ExternalReturnDocumentLine,
     InterBranchTransfer,
     Order,
     OrderLine,
@@ -23,9 +25,12 @@ from operations.models import (
     PickingTask,
     PickingTaskReallocation,
     ReplenishmentRequest,
+    ReturnAction,
     ReturnBatch,
     ReturnLine,
     RouteRun,
+    SalesCorrection,
+    SalesCorrectionLine,
     ScannerCart,
     ScannerCustomerLabel,
     ScannerSession,
@@ -63,6 +68,7 @@ class Command(BaseCommand):
             route_runs = self.create_route_runs(delivery_routes)
             orders, order_lines = self.create_orders(branches, products, route_runs)
             return_batch, return_lines = self.create_returns(branches, products)
+            external_return, external_return_lines = self.create_external_return_documents(branches, products)
             picking_tasks = self.create_picking_tasks(branches, locations, order_lines)
             scanner_carts = self.create_scanner_carts()
             transfer_pallets = self.create_transfer_pallets(branches, products)
@@ -80,6 +86,7 @@ class Command(BaseCommand):
         self.stdout.write(f"Orders: {len(orders)}")
         self.stdout.write(f"Order lines: {len(order_lines)}")
         self.stdout.write(f"Returns: 1 batch, {len(return_lines)} lines")
+        self.stdout.write(f"External return documents: 1 document, {len(external_return_lines)} lines")
         self.stdout.write(f"Picking tasks: {len(picking_tasks)}")
         self.stdout.write(f"Scanner carts: {len(scanner_carts)}")
         self.stdout.write(f"Transfer pallets: {len(transfer_pallets)}")
@@ -98,7 +105,12 @@ class Command(BaseCommand):
             "AX-ORDER-0004",
             "AX-ORDER-0005",
             "AX-ORDER-LABEL-TEST",
+            "AX-SALE-RET-001",
+            "AX-SALE-RET-002",
+            "AX-SALE-RET-003",
         ]
+        demo_external_return_refs = ["ZW1103872"]
+        demo_sales_correction_refs = ["SC-000001", "SC-000002", "SC-000003"]
         cart_code_filter = models.Q()
         related_cart_code_filter = models.Q()
         job_cart_code_filter = models.Q()
@@ -115,6 +127,18 @@ class Command(BaseCommand):
         ).distinct()
 
         demo_shortages = PickingShortage.objects.filter(order__external_reference__in=demo_order_refs)
+        demo_return_actions = ReturnAction.objects.filter(document__external_reference__in=demo_external_return_refs)
+        StockMovement.objects.filter(
+            models.Q(external_return_action__in=demo_return_actions)
+            | models.Q(reference__in=demo_external_return_refs)
+            | models.Q(reference__in=demo_sales_correction_refs)
+        ).delete()
+        ReturnAction.objects.filter(document__external_reference__in=demo_external_return_refs).delete()
+        ExternalReturnDocument.objects.filter(external_reference__in=demo_external_return_refs).delete()
+        SalesCorrection.objects.filter(
+            models.Q(reference__in=demo_sales_correction_refs)
+            | models.Q(lines__source_order__external_reference__in=demo_order_refs)
+        ).distinct().delete()
         PickingShortageAllocation.objects.filter(shortage__in=demo_shortages).delete()
         PickingTaskReallocation.objects.filter(
             models.Q(original_picking_task__order_line__order__external_reference__in=demo_order_refs)
@@ -223,6 +247,7 @@ class Command(BaseCommand):
             ("GDY", "A-03-01", Location.LocationType.STORAGE),
             ("GDY", "B-02-01", Location.LocationType.PICKING),
             ("GDY", "C-01-03", Location.LocationType.PICKING),
+            ("GDY", "RETURNS", Location.LocationType.RETURNS),
             ("GDY", "RET-01", Location.LocationType.RETURNS),
             ("GDY", "PACK-01", Location.LocationType.SHIPPING),
             ("GDY", "UNCONFIRMED", Location.LocationType.RECEIVING),
@@ -230,6 +255,7 @@ class Command(BaseCommand):
             ("GDA", "B-01-01", Location.LocationType.STORAGE),
             ("GDA", "B-01-02", Location.LocationType.PICKING),
             ("GDA", "A-03-01", Location.LocationType.STORAGE),
+            ("GDA", "RETURNS", Location.LocationType.RETURNS),
             ("GDA", "RET-01", Location.LocationType.RETURNS),
             ("GDA", "PACK-01", Location.LocationType.SHIPPING),
             ("GDA", "UNCONFIRMED", Location.LocationType.RECEIVING),
@@ -241,7 +267,7 @@ class Command(BaseCommand):
                 branch=branches[branch_code],
                 code=code,
                 defaults={
-                    "name": code,
+                    "name": "Returns Area" if code == "RETURNS" else code,
                     "location_type": location_type,
                     "is_active": True,
                 },
@@ -282,10 +308,13 @@ class Command(BaseCommand):
             ("GDY", "C-01-03", "OLEJ-001", "2", "0"),
             ("GDY", "A-02-01", "FILTR-001", "12", "0"),
             ("GDY", "A-02-01", "KLOCKI-001", "6", "0"),
+            ("GDY", "RETURNS", "FILTR-001", "0", "0"),
+            ("GDY", "RETURNS", "OLEJ-001", "0", "0"),
             ("GDY", "RET-01", "WYCIER-001", "3", "0"),
             ("GDA", "B-01-01", "FILTR-001", "8", "0"),
             ("GDA", "B-01-02", "OLEJ-001", "12", "0"),
             ("GDA", "A-03-01", "FILTR-001", "4", "0"),
+            ("GDA", "RETURNS", "FILTR-001", "0", "0"),
         ]
 
         inventory_items = {}
@@ -447,6 +476,30 @@ class Command(BaseCommand):
                 ("GDY", "ROUTE-04", 1),
                 [("FILTR-001", 1, "3"), ("OLEJ-001", 2, "2")],
             ),
+            (
+                "AX-SALE-RET-001",
+                "GDY",
+                "Demo Return Customer One",
+                "RET-CUST-1",
+                ("GDY", "ROUTE-03", 1),
+                [("FILTR-001", 1, "4"), ("OLEJ-001", 2, "2")],
+            ),
+            (
+                "AX-SALE-RET-002",
+                "GDY",
+                "Demo Return Customer Two",
+                "RET-CUST-2",
+                ("GDY", "ROUTE-03", 1),
+                [("FILTR-001", 1, "2")],
+            ),
+            (
+                "AX-SALE-RET-003",
+                "GDA",
+                "Demo Gda Return Customer",
+                "GDA-RET",
+                ("GDA", "ROUTE-01", 1),
+                [("FILTR-001", 1, "1")],
+            ),
         ]
 
         orders = {}
@@ -455,12 +508,12 @@ class Command(BaseCommand):
             order, _ = Order.objects.update_or_create(
                 external_reference=reference,
                 defaults={
-                    "branch": branches[branch_code],
-                    "route_run": route_runs[route_run_key],
-                    "customer_name": customer_name,
-                    "customer_alias": customer_alias,
-                    "status": Order.Status.IMPORTED,
-                    "requested_ship_date": None,
+                        "branch": branches[branch_code],
+                        "route_run": route_runs[route_run_key],
+                        "customer_name": customer_name,
+                        "customer_alias": customer_alias,
+                        "status": Order.Status.COMPLETED if reference.startswith("AX-SALE-RET") else Order.Status.IMPORTED,
+                        "requested_ship_date": None,
                 },
             )
             orders[reference] = order
@@ -508,6 +561,41 @@ class Command(BaseCommand):
             return_lines[line_number] = line
 
         return return_batch, return_lines
+
+    def create_external_return_documents(self, branches, products):
+        document, _ = ExternalReturnDocument.objects.update_or_create(
+            source_system="AX",
+            external_reference="ZW1103872",
+            defaults={
+                "branch": branches["GDY"],
+                "customer_name": "Demo Return Customer One",
+                "customer_alias": "RET-CUST-1",
+                "source_sales_document_reference": "AX-SALE-RET-001",
+                "external_created_at": timezone.now(),
+                "last_synced_at": timezone.now(),
+                "status": ExternalReturnDocument.Status.OPEN,
+                "completed_at": None,
+            },
+        )
+        return_lines = {}
+        line_data = [
+            (1, "FILTR-001", "5"),
+            (2, "OLEJ-001", "2"),
+        ]
+        for line_number, sku, quantity in line_data:
+            line, _ = ExternalReturnDocumentLine.objects.update_or_create(
+                document=document,
+                line_number=line_number,
+                defaults={
+                    "product": products[sku],
+                    "expected_quantity": Decimal(quantity),
+                    "accepted_quantity": Decimal("0"),
+                    "rejected_quantity": Decimal("0"),
+                    "on_hold_quantity": Decimal("0"),
+                },
+            )
+            return_lines[line_number] = line
+        return document, return_lines
 
     def create_picking_tasks(self, branches, locations, order_lines):
         picking_data = [

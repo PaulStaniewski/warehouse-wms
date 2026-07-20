@@ -6,6 +6,7 @@ from operations.viewsets import (
     CycleCountReviewQueueViewSet,
     CycleCountSessionViewSet,
     DeliveryRouteViewSet,
+    ExternalReturnDocumentViewSet,
     InventoryExceptionSummaryViewSet,
     OrderLineViewSet,
     OrderViewSet,
@@ -15,6 +16,7 @@ from operations.viewsets import (
     ReturnLineViewSet,
     ReplenishmentRequestViewSet,
     RouteRunViewSet,
+    SalesCorrectionViewSet,
     StockAdjustmentViewSet,
     StockMovementViewSet,
     TransportOverviewViewSet,
@@ -43,6 +45,8 @@ router.register("orders", OrderViewSet, basename="order")
 router.register("order-lines", OrderLineViewSet, basename="order-line")
 router.register("return-batches", ReturnBatchViewSet, basename="return-batch")
 router.register("return-lines", ReturnLineViewSet, basename="return-line")
+router.register("return-documents", ExternalReturnDocumentViewSet, basename="return-document")
+router.register("sales-corrections", SalesCorrectionViewSet, basename="sales-correction")
 router.register("picking-tasks", PickingTaskViewSet, basename="picking-task")
 router.register("picking-shortages", PickingShortageViewSet, basename="picking-shortage")
 router.register("replenishment-requests", ReplenishmentRequestViewSet, basename="replenishment-request")

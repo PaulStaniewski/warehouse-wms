@@ -27,6 +27,7 @@ function lazyNamed<T extends ComponentType<any>>(
 
 const BranchDetailPage = lazyNamed(() => import("./pages/BranchDetailPage"), "BranchDetailPage");
 const BranchesPage = lazyNamed(() => import("./pages/BranchesPage"), "BranchesPage");
+const CorrectionActivityReportPage = lazyNamed(() => import("./pages/CorrectionActivityReportPage"), "CorrectionActivityReportPage");
 const CycleCountCreatePage = lazyNamed(() => import("./pages/CycleCountCreatePage"), "CycleCountCreatePage");
 const CycleCountDetailPage = lazyNamed(() => import("./pages/CycleCountDetailPage"), "CycleCountDetailPage");
 const CycleCountReviewQueuePage = lazyNamed(() => import("./pages/CycleCountReviewQueuePage"), "CycleCountReviewQueuePage");
@@ -54,6 +55,8 @@ const OrdersPage = lazyNamed(() => import("./pages/OrdersPage"), "OrdersPage");
 const PickingShortagesPage = lazyNamed(() => import("./pages/PickingShortagesPage"), "PickingShortagesPage");
 const ProductsPage = lazyNamed(() => import("./pages/ProductsPage"), "ProductsPage");
 const ReplenishmentRequestsPage = lazyNamed(() => import("./pages/ReplenishmentRequestsPage"), "ReplenishmentRequestsPage");
+const ReturnDocumentDetailPage = lazyNamed(() => import("./pages/ReturnDocumentDetailPage"), "ReturnDocumentDetailPage");
+const ReturnsPage = lazyNamed(() => import("./pages/ReturnsPage"), "ReturnsPage");
 const RouteArchivePage = lazyNamed(() => import("./pages/RouteArchivePage"), "RouteArchivePage");
 const RouteDocumentsPage = lazyNamed(() => import("./pages/RouteDocumentsPage"), "RouteDocumentsPage");
 const RouteMonitorPage = lazyNamed(() => import("./pages/RouteMonitorPage"), "RouteMonitorPage");
@@ -84,6 +87,9 @@ const ScannerProformasPage = lazyNamed(() => import("./pages/ScannerProformasPag
 const ScannerQuickTransferPage = lazyNamed(() => import("./pages/ScannerQuickTransferPage"), "ScannerQuickTransferPage");
 const ScannerReceivingPage = lazyNamed(() => import("./pages/ScannerReceivingPage"), "ScannerReceivingPage");
 const ScannerTasksPage = lazyNamed(() => import("./pages/ScannerTasksPage"), "ScannerTasksPage");
+const SalesCorrectionDetailPage = lazyNamed(() => import("./pages/SalesCorrectionDetailPage"), "SalesCorrectionDetailPage");
+const SalesCorrectionNewPage = lazyNamed(() => import("./pages/SalesCorrectionNewPage"), "SalesCorrectionNewPage");
+const SalesCorrectionsPage = lazyNamed(() => import("./pages/SalesCorrectionsPage"), "SalesCorrectionsPage");
 const SourceDiscrepancyReviewDetailPage = lazyNamed(
   () => import("./pages/SourceDiscrepancyReviewDetailPage"),
   "SourceDiscrepancyReviewDetailPage",
@@ -347,6 +353,12 @@ function App() {
             <Route path="wms/stock-adjustments" element={lazyRoute(<StockAdjustmentsPage />)} />
             <Route path="wms/stock-adjustments/new" element={lazyRoute(<StockAdjustmentCreatePage />)} />
             <Route path="wms/stock-adjustments/:id" element={lazyRoute(<StockAdjustmentDetailPage />)} />
+            <Route path="wms/returns" element={lazyRoute(<ReturnsPage />)} />
+            <Route path="wms/returns/:id" element={lazyRoute(<ReturnDocumentDetailPage />)} />
+            <Route path="wms/sales-corrections" element={lazyRoute(<SalesCorrectionsPage />)} />
+            <Route path="wms/sales-corrections/new" element={lazyRoute(<SalesCorrectionNewPage />)} />
+            <Route path="wms/sales-corrections/:id" element={lazyRoute(<SalesCorrectionDetailPage />)} />
+            <Route path="wms/reports/correction-activity" element={lazyRoute(<CorrectionActivityReportPage />)} />
             <Route path="wms/cycle-counts" element={lazyRoute(<CycleCountsPage />)} />
             <Route path="wms/cycle-count-review-queue" element={lazyRoute(<CycleCountReviewQueuePage />)} />
             <Route path="wms/cycle-counts/new" element={lazyRoute(<CycleCountCreatePage />)} />

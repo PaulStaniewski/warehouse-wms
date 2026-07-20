@@ -253,6 +253,234 @@ class ReturnLine(TimestampedModel):
         return f"{self.return_batch.reference} / {self.line_number}"
 
 
+class ExternalReturnDocument(TimestampedModel):
+    class Status(models.TextChoices):
+        OPEN = "open", "Open"
+        IN_PROGRESS = "in_progress", "In progress"
+        ON_HOLD = "on_hold", "On hold"
+        COMPLETED = "completed", "Completed"
+
+    branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="external_return_documents")
+    external_reference = models.CharField(max_length=128)
+    source_system = models.CharField(max_length=64, default="AX")
+    customer_name = models.CharField(max_length=255)
+    customer_alias = models.CharField(max_length=128, blank=True)
+    source_sales_document_reference = models.CharField(max_length=128, blank=True)
+    external_created_at = models.DateTimeField(blank=True, null=True)
+    imported_at = models.DateTimeField(default=timezone.now)
+    last_synced_at = models.DateTimeField(blank=True, null=True)
+    completed_at = models.DateTimeField(blank=True, null=True)
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.OPEN)
+
+    class Meta:
+        ordering = ["-imported_at", "-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["source_system", "external_reference"],
+                name="unique_external_return_document_reference_per_source",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["branch", "status"]),
+            models.Index(fields=["external_reference"]),
+            models.Index(fields=["source_sales_document_reference"]),
+            models.Index(fields=["customer_name"]),
+            models.Index(fields=["imported_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return self.external_reference
+
+
+class ExternalReturnDocumentLine(TimestampedModel):
+    document = models.ForeignKey(ExternalReturnDocument, on_delete=models.CASCADE, related_name="lines")
+    product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name="external_return_lines")
+    line_number = models.PositiveIntegerField()
+    expected_quantity = models.DecimalField(max_digits=12, decimal_places=3)
+    accepted_quantity = models.DecimalField(max_digits=12, decimal_places=3, default=0)
+    rejected_quantity = models.DecimalField(max_digits=12, decimal_places=3, default=0)
+    on_hold_quantity = models.DecimalField(max_digits=12, decimal_places=3, default=0)
+
+    class Meta:
+        ordering = ["document", "line_number"]
+        constraints = [
+            models.UniqueConstraint(fields=["document", "line_number"], name="unique_external_return_line_number"),
+            models.CheckConstraint(check=models.Q(expected_quantity__gt=0), name="external_return_expected_positive"),
+            models.CheckConstraint(check=models.Q(accepted_quantity__gte=0), name="external_return_accepted_non_negative"),
+            models.CheckConstraint(check=models.Q(rejected_quantity__gte=0), name="external_return_rejected_non_negative"),
+            models.CheckConstraint(check=models.Q(on_hold_quantity__gte=0), name="external_return_on_hold_non_negative"),
+        ]
+        indexes = [
+            models.Index(fields=["document"]),
+            models.Index(fields=["product"]),
+        ]
+
+    @property
+    def remaining_quantity(self):
+        return self.expected_quantity - self.accepted_quantity - self.rejected_quantity - self.on_hold_quantity
+
+    @property
+    def is_completed(self) -> bool:
+        return self.remaining_quantity == 0 and self.on_hold_quantity == 0
+
+    def __str__(self) -> str:
+        return f"{self.document.external_reference} / {self.line_number}"
+
+
+class ReturnAction(TimestampedModel):
+    class ActionType(models.TextChoices):
+        ACCEPT_REMAINING = "accept_remaining", "Accept remaining quantity"
+        REJECT_REMAINING = "reject_remaining", "Reject remaining quantity"
+        PUT_ON_HOLD = "put_on_hold", "Put remaining quantity on hold"
+        ACCEPT_ON_HOLD = "accept_on_hold", "Accept on-hold quantity"
+        REJECT_ON_HOLD = "reject_on_hold", "Reject on-hold quantity"
+
+    class SourcePool(models.TextChoices):
+        REMAINING = "remaining", "Remaining"
+        ON_HOLD = "on_hold", "On hold"
+
+    document = models.ForeignKey(ExternalReturnDocument, on_delete=models.PROTECT, related_name="actions")
+    line = models.ForeignKey(ExternalReturnDocumentLine, on_delete=models.PROTECT, related_name="actions")
+    branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="return_actions")
+    product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name="return_actions")
+    action_type = models.CharField(max_length=32, choices=ActionType.choices)
+    source_pool = models.CharField(max_length=32, choices=SourcePool.choices)
+    quantity = models.DecimalField(max_digits=12, decimal_places=3)
+    performed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="return_actions",
+        blank=True,
+        null=True,
+    )
+    note = models.TextField(blank=True)
+    client_operation_id = models.CharField(max_length=64, unique=True)
+    payload_fingerprint = models.CharField(max_length=64)
+    inventory_quantity_before = models.DecimalField(max_digits=12, decimal_places=3, blank=True, null=True)
+    inventory_quantity_after = models.DecimalField(max_digits=12, decimal_places=3, blank=True, null=True)
+    stock_movement = models.OneToOneField(
+        "StockMovement",
+        on_delete=models.SET_NULL,
+        related_name="return_action",
+        blank=True,
+        null=True,
+    )
+
+    class Meta:
+        ordering = ["created_at", "id"]
+        indexes = [
+            models.Index(fields=["document", "created_at"]),
+            models.Index(fields=["line", "created_at"]),
+            models.Index(fields=["branch", "action_type"]),
+            models.Index(fields=["product"]),
+            models.Index(fields=["performed_by"]),
+            models.Index(fields=["client_operation_id"]),
+        ]
+        constraints = [
+            models.CheckConstraint(check=models.Q(quantity__gt=0), name="return_action_quantity_positive"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.document.external_reference} / {self.action_type} / {self.quantity}"
+
+
+class SalesCorrection(TimestampedModel):
+    class Status(models.TextChoices):
+        DRAFT = "draft", "Draft"
+        COMPLETED = "completed", "Completed"
+        CANCELLED = "cancelled", "Cancelled"
+
+    reference = models.CharField(max_length=64, unique=True, blank=True)
+    branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="sales_corrections")
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.DRAFT)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="created_sales_corrections",
+        blank=True,
+        null=True,
+    )
+    confirmed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="confirmed_sales_corrections",
+        blank=True,
+        null=True,
+    )
+    confirmed_at = models.DateTimeField(blank=True, null=True)
+    note = models.TextField(blank=True)
+    confirmation_client_operation_id = models.CharField(max_length=64, unique=True, blank=True, null=True)
+    confirmation_payload_fingerprint = models.CharField(max_length=64, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["reference"]),
+            models.Index(fields=["branch", "status"]),
+            models.Index(fields=["confirmed_at"]),
+            models.Index(fields=["created_by"]),
+            models.Index(fields=["confirmed_by"]),
+        ]
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        if not self.reference:
+            self.reference = f"SC-{self.id:06d}"
+            super().save(update_fields=["reference", "updated_at"])
+
+    def __str__(self) -> str:
+        return self.reference or f"Sales correction {self.id}"
+
+
+class SalesCorrectionLine(TimestampedModel):
+    correction = models.ForeignKey(SalesCorrection, on_delete=models.CASCADE, related_name="lines")
+    product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name="sales_correction_lines")
+    source_order = models.ForeignKey(Order, on_delete=models.PROTECT, related_name="sales_correction_lines")
+    source_order_line = models.ForeignKey(OrderLine, on_delete=models.PROTECT, related_name="sales_correction_lines")
+    customer_name_snapshot = models.CharField(max_length=255)
+    customer_alias_snapshot = models.CharField(max_length=128, blank=True)
+    source_sales_document_reference = models.CharField(max_length=128)
+    sold_quantity_snapshot = models.DecimalField(max_digits=12, decimal_places=3)
+    corrected_quantity = models.DecimalField(max_digits=12, decimal_places=3, default=0)
+    returns_location = models.ForeignKey(
+        Location,
+        on_delete=models.PROTECT,
+        related_name="sales_correction_lines",
+        blank=True,
+        null=True,
+    )
+    stock_movement = models.OneToOneField(
+        "StockMovement",
+        on_delete=models.SET_NULL,
+        related_name="posted_sales_correction_line",
+        blank=True,
+        null=True,
+    )
+    inventory_quantity_before = models.DecimalField(max_digits=12, decimal_places=3, blank=True, null=True)
+    inventory_quantity_after = models.DecimalField(max_digits=12, decimal_places=3, blank=True, null=True)
+
+    class Meta:
+        ordering = ["correction", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["correction", "source_order_line"],
+                name="unique_sales_correction_source_line_per_correction",
+            ),
+            models.CheckConstraint(check=models.Q(sold_quantity_snapshot__gt=0), name="sales_correction_sold_positive"),
+            models.CheckConstraint(check=models.Q(corrected_quantity__gte=0), name="sales_correction_corrected_non_negative"),
+        ]
+        indexes = [
+            models.Index(fields=["correction"]),
+            models.Index(fields=["product"]),
+            models.Index(fields=["source_order_line"]),
+            models.Index(fields=["source_sales_document_reference"]),
+            models.Index(fields=["customer_name_snapshot"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.correction.reference} / {self.product.sku}"
+
+
 class PickingTask(TimestampedModel):
     class Status(models.TextChoices):
         OPEN = "open", "Open"
@@ -1123,6 +1351,8 @@ class StockMovement(TimestampedModel):
         PICKING_SHORTAGE = "picking_shortage", "Picking shortage"
         PICKING_SHORTAGE_FOUND = "picking_shortage_found", "Picking shortage found"
         PICKING_SHORTAGE_CONFIRMED_MISSING = "picking_shortage_confirmed_missing", "Picking shortage confirmed missing"
+        RETURN_RECEIPT = "return_receipt", "Return receipt"
+        SALES_CORRECTION_RECEIPT = "sales_correction_receipt", "Sales correction receipt"
 
     class AdjustmentDirection(models.TextChoices):
         INCREASE = "increase", "Increase"
@@ -1185,6 +1415,20 @@ class StockMovement(TimestampedModel):
         "CycleCountRecount",
         on_delete=models.PROTECT,
         related_name="reconciliation_stock_movement",
+        blank=True,
+        null=True,
+    )
+    external_return_action = models.ForeignKey(
+        "ReturnAction",
+        on_delete=models.SET_NULL,
+        related_name="stock_movements",
+        blank=True,
+        null=True,
+    )
+    sales_correction_line = models.ForeignKey(
+        "SalesCorrectionLine",
+        on_delete=models.SET_NULL,
+        related_name="stock_movements",
         blank=True,
         null=True,
     )

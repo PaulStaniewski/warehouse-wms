@@ -11,6 +11,8 @@ from operations.models import (
     CycleCountRecount,
     CycleCountSession,
     DeliveryRoute,
+    ExternalReturnDocument,
+    ExternalReturnDocumentLine,
     Order,
     OrderLine,
     PickingShortage,
@@ -18,9 +20,12 @@ from operations.models import (
     PickingTaskReallocation,
     PickingTask,
     ReplenishmentRequest,
+    ReturnAction,
     ReturnBatch,
     ReturnLine,
     RouteRun,
+    SalesCorrection,
+    SalesCorrectionLine,
     StockMovement,
     TransferDiscrepancy,
     TransferDiscrepancyItem,
@@ -294,6 +299,270 @@ class ReturnLineSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
+
+
+class ReturnActionSerializer(serializers.ModelSerializer):
+    action_type_label = serializers.CharField(source="get_action_type_display", read_only=True)
+    source_pool_label = serializers.CharField(source="get_source_pool_display", read_only=True)
+    employee = serializers.CharField(source="performed_by.username", read_only=True)
+    product_sku = serializers.CharField(source="product.sku", read_only=True)
+    product_name = serializers.CharField(source="product.name", read_only=True)
+    stock_movement_reference = serializers.CharField(source="stock_movement.reference", read_only=True)
+    stock_movement_id = serializers.IntegerField(source="stock_movement.id", read_only=True)
+
+    class Meta:
+        model = ReturnAction
+        fields = [
+            "id",
+            "document",
+            "line",
+            "branch",
+            "product",
+            "product_sku",
+            "product_name",
+            "action_type",
+            "action_type_label",
+            "source_pool",
+            "source_pool_label",
+            "quantity",
+            "employee",
+            "note",
+            "client_operation_id",
+            "inventory_quantity_before",
+            "inventory_quantity_after",
+            "stock_movement",
+            "stock_movement_id",
+            "stock_movement_reference",
+            "created_at",
+            "updated_at",
+        ]
+
+
+class ExternalReturnDocumentLineSerializer(serializers.ModelSerializer):
+    product_sku = serializers.CharField(source="product.sku", read_only=True)
+    product_name = serializers.CharField(source="product.name", read_only=True)
+    product_barcode = serializers.CharField(source="product.barcode", read_only=True)
+    remaining_quantity = serializers.SerializerMethodField()
+    latest_action = serializers.SerializerMethodField()
+    latest_employee = serializers.SerializerMethodField()
+    actions = ReturnActionSerializer(many=True, read_only=True)
+
+    def get_remaining_quantity(self, obj) -> str:
+        return str(obj.remaining_quantity)
+
+    def _latest_action(self, obj):
+        if hasattr(obj, "_latest_return_action_cache"):
+            return obj._latest_return_action_cache
+        action = obj.actions.select_related("performed_by").order_by("-created_at", "-id").first()
+        obj._latest_return_action_cache = action
+        return action
+
+    def get_latest_action(self, obj) -> str | None:
+        action = self._latest_action(obj)
+        return action.action_type if action else None
+
+    def get_latest_employee(self, obj) -> str | None:
+        action = self._latest_action(obj)
+        return action.performed_by.username if action and action.performed_by else None
+
+    class Meta:
+        model = ExternalReturnDocumentLine
+        fields = [
+            "id",
+            "document",
+            "line_number",
+            "product",
+            "product_sku",
+            "product_name",
+            "product_barcode",
+            "expected_quantity",
+            "accepted_quantity",
+            "rejected_quantity",
+            "on_hold_quantity",
+            "remaining_quantity",
+            "latest_action",
+            "latest_employee",
+            "actions",
+            "created_at",
+            "updated_at",
+        ]
+
+
+class ExternalReturnDocumentSerializer(serializers.ModelSerializer):
+    branch_code = serializers.CharField(source="branch.code", read_only=True)
+    branch_name = serializers.CharField(source="branch.name", read_only=True)
+    status_label = serializers.CharField(source="get_status_display", read_only=True)
+    expected_total = serializers.SerializerMethodField()
+    accepted_total = serializers.SerializerMethodField()
+    rejected_total = serializers.SerializerMethodField()
+    on_hold_total = serializers.SerializerMethodField()
+    remaining_total = serializers.SerializerMethodField()
+    lines = ExternalReturnDocumentLineSerializer(many=True, read_only=True)
+    actions = ReturnActionSerializer(many=True, read_only=True)
+
+    def _lines(self, obj):
+        return list(obj.lines.all())
+
+    def get_expected_total(self, obj) -> str:
+        return str(sum((line.expected_quantity for line in self._lines(obj)), Decimal("0")))
+
+    def get_accepted_total(self, obj) -> str:
+        return str(sum((line.accepted_quantity for line in self._lines(obj)), Decimal("0")))
+
+    def get_rejected_total(self, obj) -> str:
+        return str(sum((line.rejected_quantity for line in self._lines(obj)), Decimal("0")))
+
+    def get_on_hold_total(self, obj) -> str:
+        return str(sum((line.on_hold_quantity for line in self._lines(obj)), Decimal("0")))
+
+    def get_remaining_total(self, obj) -> str:
+        return str(sum((line.remaining_quantity for line in self._lines(obj)), Decimal("0")))
+
+    class Meta:
+        model = ExternalReturnDocument
+        fields = [
+            "id",
+            "branch",
+            "branch_code",
+            "branch_name",
+            "external_reference",
+            "source_system",
+            "customer_name",
+            "customer_alias",
+            "source_sales_document_reference",
+            "external_created_at",
+            "imported_at",
+            "last_synced_at",
+            "completed_at",
+            "status",
+            "status_label",
+            "expected_total",
+            "accepted_total",
+            "rejected_total",
+            "on_hold_total",
+            "remaining_total",
+            "lines",
+            "actions",
+            "created_at",
+            "updated_at",
+        ]
+
+
+class SalesCorrectionLineSerializer(serializers.ModelSerializer):
+    product_sku = serializers.CharField(source="product.sku", read_only=True)
+    product_name = serializers.CharField(source="product.name", read_only=True)
+    returns_location_code = serializers.CharField(source="returns_location.code", read_only=True)
+    stock_movement_reference = serializers.CharField(source="stock_movement.reference", read_only=True)
+    previously_corrected_quantity = serializers.SerializerMethodField()
+    remaining_correctable_quantity = serializers.SerializerMethodField()
+
+    def get_previously_corrected_quantity(self, obj) -> str:
+        from operations.return_services import corrected_quantity_for_order_line
+
+        return str(corrected_quantity_for_order_line(obj.source_order_line, exclude_correction_id=obj.correction_id))
+
+    def get_remaining_correctable_quantity(self, obj) -> str:
+        from operations.return_services import remaining_correctable_quantity
+
+        return str(remaining_correctable_quantity(obj.source_order_line, exclude_correction_id=obj.correction_id))
+
+    class Meta:
+        model = SalesCorrectionLine
+        fields = [
+            "id",
+            "correction",
+            "product",
+            "product_sku",
+            "product_name",
+            "source_order",
+            "source_order_line",
+            "customer_name_snapshot",
+            "customer_alias_snapshot",
+            "source_sales_document_reference",
+            "sold_quantity_snapshot",
+            "previously_corrected_quantity",
+            "remaining_correctable_quantity",
+            "corrected_quantity",
+            "returns_location",
+            "returns_location_code",
+            "stock_movement",
+            "stock_movement_reference",
+            "inventory_quantity_before",
+            "inventory_quantity_after",
+            "created_at",
+            "updated_at",
+        ]
+
+
+class SalesCorrectionSerializer(serializers.ModelSerializer):
+    branch_code = serializers.CharField(source="branch.code", read_only=True)
+    status_label = serializers.CharField(source="get_status_display", read_only=True)
+    created_by_username = serializers.CharField(source="created_by.username", read_only=True)
+    confirmed_by_username = serializers.CharField(source="confirmed_by.username", read_only=True)
+    line_count = serializers.SerializerMethodField()
+    total_corrected_quantity = serializers.SerializerMethodField()
+    lines = SalesCorrectionLineSerializer(many=True, read_only=True)
+
+    def get_line_count(self, obj) -> int:
+        return obj.lines.count()
+
+    def get_total_corrected_quantity(self, obj) -> str:
+        return str(sum((line.corrected_quantity for line in obj.lines.all()), Decimal("0")))
+
+    class Meta:
+        model = SalesCorrection
+        fields = [
+            "id",
+            "reference",
+            "branch",
+            "branch_code",
+            "status",
+            "status_label",
+            "created_by",
+            "created_by_username",
+            "confirmed_by",
+            "confirmed_by_username",
+            "confirmed_at",
+            "note",
+            "line_count",
+            "total_corrected_quantity",
+            "lines",
+            "created_at",
+            "updated_at",
+        ]
+
+
+class SalesHistoryCandidateSerializer(serializers.Serializer):
+    order = serializers.IntegerField()
+    order_line = serializers.IntegerField()
+    branch = serializers.IntegerField()
+    branch_code = serializers.CharField()
+    customer_name = serializers.CharField()
+    customer_alias = serializers.CharField(allow_blank=True)
+    source_sales_document_reference = serializers.CharField()
+    sale_date = serializers.DateField(allow_null=True)
+    product = serializers.IntegerField()
+    product_sku = serializers.CharField()
+    product_name = serializers.CharField()
+    sold_quantity = serializers.CharField()
+    previously_corrected_quantity = serializers.CharField()
+    remaining_correctable_quantity = serializers.CharField()
+
+
+class CorrectionActivityReportSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    confirmed_at = serializers.DateTimeField()
+    employee = serializers.CharField(allow_blank=True)
+    branch_code = serializers.CharField()
+    correction_reference = serializers.CharField()
+    customer_name = serializers.CharField()
+    source_sales_document_reference = serializers.CharField()
+    product_sku = serializers.CharField()
+    product_name = serializers.CharField()
+    corrected_quantity = serializers.CharField()
+    returns_location_code = serializers.CharField(allow_blank=True)
+    stock_movement = serializers.IntegerField(allow_null=True)
+    summary = serializers.DictField()
 
 
 class PickingTaskSerializer(serializers.ModelSerializer):
@@ -648,6 +917,10 @@ class StockMovementSerializer(serializers.ModelSerializer):
     def get_origin(self, obj) -> str:
         if obj.movement_type == StockMovement.MovementType.TRANSFER and obj.source_location_id and obj.destination_location_id:
             return "Scanner Quick Transfer"
+        if obj.movement_type == StockMovement.MovementType.RETURN_RECEIPT:
+            return "External Return Document"
+        if obj.movement_type == StockMovement.MovementType.SALES_CORRECTION_RECEIPT:
+            return "Sales Correction"
         if obj.movement_type == StockMovement.MovementType.ADJUSTMENT and obj.cycle_count_line_id:
             return "Cycle Count variance reconciliation"
         if obj.movement_type == StockMovement.MovementType.ADJUSTMENT and obj.adjustment_direction and obj.adjustment_reason:

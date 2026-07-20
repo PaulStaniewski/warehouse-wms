@@ -6,6 +6,7 @@ import type {
   Branch,
   BranchMembership,
   AuditLog,
+  CorrectionActivityResponse,
   CycleCountSession,
   CycleCountReviewQueueResponse,
   InventoryExceptionSummary,
@@ -19,6 +20,7 @@ import type {
   PickingShortage,
   PickingShortageChallenge,
   Product,
+  ReturnDocument,
   ReturnBatch,
   ReplenishmentRequest,
   RouteRun,
@@ -42,6 +44,8 @@ import type {
   ScannerPrintLabelResponse,
   ScannerSessionResponse,
   ScannerTaskStartResponse,
+  SalesCorrection,
+  SalesHistoryCandidate,
   StockMovement,
   TransportOverview,
   TransferDiscrepancy,
@@ -548,6 +552,191 @@ export function useReturnBatches() {
   return useQuery({
     queryKey: ["return-batches"],
     queryFn: () => getList<ReturnBatch>("/return-batches/"),
+  });
+}
+
+export function useReturnDocuments(branch?: string, search?: string, status?: string) {
+  return useQuery({
+    enabled: Boolean(branch),
+    queryKey: ["return-documents", branch, search, status],
+    queryFn: () => {
+      const params = new URLSearchParams();
+      if (branch) params.set("branch", branch);
+      if (search) params.set("search", search);
+      if (status) params.set("status", status);
+      return getList<ReturnDocument>(`/return-documents/?${params.toString()}`);
+    },
+  });
+}
+
+export function useReturnDocument(id?: string) {
+  return useQuery({
+    enabled: Boolean(id),
+    queryKey: ["return-document", id],
+    queryFn: async () => {
+      const response = await apiClient.get<ReturnDocument>(`/return-documents/${id}/`);
+      return response.data;
+    },
+  });
+}
+
+export function useLookupReturnDocument() {
+  return useMutation({
+    mutationFn: async ({ branch, externalReference }: { branch: string; externalReference: string }) => {
+      const params = new URLSearchParams({ branch, external_reference: externalReference });
+      const response = await apiClient.get<ReturnDocument>(`/return-documents/lookup/?${params.toString()}`);
+      return response.data;
+    },
+  });
+}
+
+export function useRecordReturnAction() {
+  return useMutation({
+    mutationFn: async ({
+      actionType,
+      clientOperationId,
+      documentId,
+      lineId,
+      note,
+      quantity,
+    }: {
+      actionType: string;
+      clientOperationId: string;
+      documentId: number;
+      lineId: number;
+      note?: string;
+      quantity: string;
+    }) => {
+      const response = await apiClient.post<{ message: string; action_id: number; document: ReturnDocument }>(
+        `/return-documents/${documentId}/lines/${lineId}/actions/`,
+        {
+          action_type: actionType,
+          client_operation_id: clientOperationId,
+          note: note || "",
+          quantity,
+        },
+      );
+      return response.data;
+    },
+  });
+}
+
+export function useSalesCorrections(branch?: string, status?: string) {
+  return useQuery({
+    enabled: Boolean(branch),
+    queryKey: ["sales-corrections", branch, status],
+    queryFn: () => {
+      const params = new URLSearchParams();
+      if (branch) params.set("branch", branch);
+      if (status) params.set("status", status);
+      return getList<SalesCorrection>(`/sales-corrections/?${params.toString()}`);
+    },
+  });
+}
+
+export function useSalesCorrection(id?: string) {
+  return useQuery({
+    enabled: Boolean(id),
+    queryKey: ["sales-correction", id],
+    queryFn: async () => {
+      const response = await apiClient.get<SalesCorrection>(`/sales-corrections/${id}/`);
+      return response.data;
+    },
+  });
+}
+
+export function useCreateSalesCorrection() {
+  return useMutation({
+    mutationFn: async ({ branch, note }: { branch: string; note?: string }) => {
+      const response = await apiClient.post<SalesCorrection>("/sales-corrections/", { branch, note: note || "" });
+      return response.data;
+    },
+  });
+}
+
+export function useSalesHistorySearch(branch?: string, product?: string) {
+  return useQuery({
+    enabled: Boolean(branch && product),
+    queryKey: ["sales-history", branch, product],
+    queryFn: async () => {
+      const params = new URLSearchParams();
+      if (branch) params.set("branch", branch);
+      if (product) params.set("product", product);
+      const response = await apiClient.get<SalesHistoryCandidate[]>(`/sales-corrections/sales-history/?${params.toString()}`);
+      return response.data;
+    },
+  });
+}
+
+export function useAddSalesCorrectionLine() {
+  return useMutation({
+    mutationFn: async ({ correctionId, quantity, sourceOrderLine }: { correctionId: number; quantity: string; sourceOrderLine: number }) => {
+      const response = await apiClient.post<SalesCorrection>(`/sales-corrections/${correctionId}/add-line/`, {
+        quantity,
+        source_order_line: sourceOrderLine,
+      });
+      return response.data;
+    },
+  });
+}
+
+export function useUpdateSalesCorrectionLine() {
+  return useMutation({
+    mutationFn: async ({ correctionId, lineId, quantity }: { correctionId: number; lineId: number; quantity: string }) => {
+      const response = await apiClient.post<SalesCorrection>(`/sales-corrections/${correctionId}/lines/${lineId}/update/`, {
+        quantity,
+      });
+      return response.data;
+    },
+  });
+}
+
+export function useRemoveSalesCorrectionLine() {
+  return useMutation({
+    mutationFn: async ({ correctionId, lineId }: { correctionId: number; lineId: number }) => {
+      const response = await apiClient.post<SalesCorrection>(`/sales-corrections/${correctionId}/lines/${lineId}/remove/`);
+      return response.data;
+    },
+  });
+}
+
+export function useConfirmSalesCorrection() {
+  return useMutation({
+    mutationFn: async ({ clientOperationId, correctionId }: { clientOperationId: string; correctionId: number }) => {
+      const response = await apiClient.post<{ message: string; correction: SalesCorrection }>(`/sales-corrections/${correctionId}/confirm/`, {
+        client_operation_id: clientOperationId,
+      });
+      return response.data;
+    },
+  });
+}
+
+export function useCorrectionActivityReport(filters: {
+  branch?: string;
+  correctionReference?: string;
+  customer?: string;
+  dateFrom?: string;
+  dateTo?: string;
+  employee?: string;
+  product?: string;
+  sourceSalesDocument?: string;
+}) {
+  return useQuery({
+    enabled: Boolean(filters.branch),
+    queryKey: ["correction-activity", filters],
+    queryFn: async () => {
+      const params = new URLSearchParams();
+      if (filters.branch) params.set("branch", filters.branch);
+      if (filters.employee) params.set("employee", filters.employee);
+      if (filters.dateFrom) params.set("date_from", filters.dateFrom);
+      if (filters.dateTo) params.set("date_to", filters.dateTo);
+      if (filters.correctionReference) params.set("correction_reference", filters.correctionReference);
+      if (filters.customer) params.set("customer", filters.customer);
+      if (filters.sourceSalesDocument) params.set("source_sales_document", filters.sourceSalesDocument);
+      if (filters.product) params.set("product", filters.product);
+      const response = await apiClient.get<CorrectionActivityResponse>(`/sales-corrections/activity-report/?${params.toString()}`);
+      return response.data;
+    },
   });
 }
 

@@ -6,6 +6,8 @@ from operations.models import (
     CartWorkParticipant,
     CartWorkSession,
     DeliveryRoute,
+    ExternalReturnDocument,
+    ExternalReturnDocumentLine,
     InterBranchTransfer,
     Order,
     OrderLine,
@@ -19,9 +21,12 @@ from operations.models import (
     PickingTask,
     PickingTaskClaim,
     ReplenishmentRequest,
+    ReturnAction,
     ReturnBatch,
     ReturnLine,
     RouteRun,
+    SalesCorrection,
+    SalesCorrectionLine,
     ScannerCart,
     ScannerCustomerLabel,
     ScannerSession,
@@ -113,6 +118,71 @@ class ReturnLineAdmin(admin.ModelAdmin):
     list_display = ["return_batch", "line_number", "product", "quantity", "condition"]
     list_filter = ["condition", "return_batch__branch"]
     search_fields = ["return_batch__reference", "product__sku", "product__name"]
+
+
+class ExternalReturnDocumentLineInline(admin.TabularInline):
+    model = ExternalReturnDocumentLine
+    extra = 0
+    readonly_fields = ["accepted_quantity", "rejected_quantity", "on_hold_quantity"]
+
+
+@admin.register(ExternalReturnDocument)
+class ExternalReturnDocumentAdmin(admin.ModelAdmin):
+    list_display = ["external_reference", "source_system", "branch", "customer_name", "status", "imported_at"]
+    list_filter = ["status", "source_system", "branch"]
+    search_fields = ["external_reference", "customer_name", "source_sales_document_reference", "lines__product__sku"]
+    inlines = [ExternalReturnDocumentLineInline]
+
+
+@admin.register(ExternalReturnDocumentLine)
+class ExternalReturnDocumentLineAdmin(admin.ModelAdmin):
+    list_display = [
+        "document",
+        "line_number",
+        "product",
+        "expected_quantity",
+        "accepted_quantity",
+        "rejected_quantity",
+        "on_hold_quantity",
+    ]
+    list_filter = ["document__branch", "document__status"]
+    search_fields = ["document__external_reference", "product__sku", "product__name"]
+
+
+@admin.register(ReturnAction)
+class ReturnActionAdmin(admin.ModelAdmin):
+    list_display = ["document", "line", "action_type", "quantity", "performed_by", "created_at"]
+    list_filter = ["action_type", "source_pool", "branch"]
+    search_fields = ["document__external_reference", "product__sku", "performed_by__username", "client_operation_id"]
+    readonly_fields = ["client_operation_id", "payload_fingerprint", "stock_movement"]
+
+
+class SalesCorrectionLineInline(admin.TabularInline):
+    model = SalesCorrectionLine
+    extra = 0
+    readonly_fields = ["returns_location", "stock_movement", "inventory_quantity_before", "inventory_quantity_after"]
+
+
+@admin.register(SalesCorrection)
+class SalesCorrectionAdmin(admin.ModelAdmin):
+    list_display = ["reference", "branch", "status", "created_by", "confirmed_by", "confirmed_at"]
+    list_filter = ["status", "branch", "confirmed_at"]
+    search_fields = ["reference", "lines__customer_name_snapshot", "lines__source_sales_document_reference"]
+    inlines = [SalesCorrectionLineInline]
+
+
+@admin.register(SalesCorrectionLine)
+class SalesCorrectionLineAdmin(admin.ModelAdmin):
+    list_display = [
+        "correction",
+        "product",
+        "customer_name_snapshot",
+        "source_sales_document_reference",
+        "corrected_quantity",
+        "returns_location",
+    ]
+    list_filter = ["correction__branch", "correction__status", "returns_location"]
+    search_fields = ["correction__reference", "product__sku", "customer_name_snapshot", "source_sales_document_reference"]
 
 
 @admin.register(PickingTask)

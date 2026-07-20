@@ -13,6 +13,8 @@ The integration scenarios live in `backend/operations/tests.py` alongside the ex
 - `CriticalSourceReviewReconciliationIntegrationTests`
 - `CriticalExactPickingControlIntegrationTests`
 - `CriticalPickingShortageControlIntegrationTests`
+- `ReturnDocumentWorkflowTests`
+- `SalesCorrectionWorkflowTests`
 
 The project still uses the existing monolithic operations test module. No test package migration was introduced for this stage.
 
@@ -28,6 +30,8 @@ The project still uses the existing monolithic operations test module. No test p
 | Source review and reconciliation | Destination Worker/Leader, source Worker/Leader, unrelated Worker | Receiving shortage, discrepancy report print, destination shortage confirmation, source review, reconciliation acknowledgement, source stock verification, partial source recovery, source search close, final manual accounting | Discrepancy detail, Source Review detail, Reconciliation detail, Source Stock Verification detail, Action Queue, Inventory Exceptions, Current Events |
 | Exact outbound Picking and Control | Branch Worker, Control Worker, unrelated branch Worker | Proforma job creation, cart start, participant join, picking direction, location/product scans, quantity confirmation, control label, prepare scans, finish control, duplicate and immutable-state guards | Scanner Tasks, Route Run detail, Inventory Exceptions, Current Events |
 | Picking shortage and Control | Branch Worker, Control Worker, Branch Leader, unrelated branch Worker | Partial picking, shortage challenge/report, replenishment request creation, picked-goods control, Leader-only shortage follow-up rejection for Worker, duplicate shortage replay, branch isolation | Picking Shortages, Inventory Exceptions, Route Run detail, Current Events |
+| External Return Documents | Branch Worker, Branch Leader, unrelated branch Worker | Exact external-reference lookup, partial accept/reject/on-hold actions, on-hold resolution, idempotent action replay, branch isolation | Return document detail, Returns Area inventory, Stock Movements, Current Events |
+| Sales Corrections | Branch Worker, Branch Leader, unrelated branch Worker | Completed-sales search, correction draft creation, line add/update/remove, confirmation, idempotent confirmation replay, over-correction guard, branch isolation | Sales Correction detail, Correction Activity Report, Returns Area inventory, Stock Movements, Current Events |
 
 ## Authorization Coverage
 
@@ -63,6 +67,8 @@ The tests verify that successful commands update the same state visible to users
 - source review and reconciliation preserve the accounting identity for confirmed shortages,
 - source stock recovery restores found stock into source inventory through `SOURCE_DISCREPANCY_RECOVERY`,
 - Event Register entries for meaningful workflow transitions.
+- External Return Document accepted quantities post only into the branch Returns Area; rejected and on-hold quantities do not mutate inventory.
+- Sales Correction confirmation posts all draft lines atomically into the branch Returns Area and creates one `SALES_CORRECTION_RECEIPT` StockMovement per line.
 
 ## Inter-Branch Receiving Boundary
 
@@ -113,6 +119,22 @@ The backend checks for an existing operation inside the transaction, locks inven
 
 ## Existing Specialized Coverage
 
+## Returns And Sales Corrections
+
+The Returns and Sales Corrections foundation uses English project terminology throughout the WMS UI and API. External references such as `ZW1103872` are treated as data supplied by an upstream system, not as module names.
+
+External Return Documents are imported records with expected return lines. Same-branch Workers and Leaders can accept, reject, or put quantities on hold. Quantity accounting follows:
+
+```text
+expected = accepted + rejected + on hold + remaining
+```
+
+Each decision creates an append-only Return Action with the authenticated employee, timestamp, quantity, source pool, note, and optional StockMovement. On-hold quantities can later be accepted or rejected by another same-branch employee without overwriting the original history.
+
+Sales Corrections are separate from External Return Documents. A Worker or Leader creates a draft, searches completed same-branch sales by product SKU/barcode, adds source OrderLine rows, enters returned quantities, and confirms. Confirmation validates remaining correctable quantity against completed sales and already completed correction lines. Draft lines do not consume correctable quantity.
+
+Accepted return quantities and confirmed correction quantities are posted to the branch location with code `RETURNS` and type `returns` when present. Existing legacy return locations remain readable, and Quick Transfer is still the follow-up workflow for moving goods from the Returns Area to normal shelf locations.
+
 The existing operations suite continues to cover deeper isolated and workflow-specific behavior for:
 
 - inter-branch pallet receiving,
@@ -137,6 +159,12 @@ Run only outbound Picking and Control critical scenarios:
 
 ```powershell
 docker compose run --rm backend python manage.py test operations.tests.CriticalExactPickingControlIntegrationTests operations.tests.CriticalPickingShortageControlIntegrationTests --noinput
+```
+
+Run Returns and Sales Corrections focused scenarios:
+
+```powershell
+docker compose run --rm backend python manage.py test operations.tests.ReturnDocumentWorkflowTests operations.tests.SalesCorrectionWorkflowTests --noinput
 ```
 
 Run the full backend suites:

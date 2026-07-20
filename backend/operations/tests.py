@@ -2,6 +2,7 @@ from datetime import datetime, time
 from decimal import Decimal
 from io import StringIO
 import threading
+import uuid
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
@@ -35,6 +36,8 @@ from operations.models import (
     CycleCountRecount,
     CycleCountSession,
     DeliveryRoute,
+    ExternalReturnDocument,
+    ExternalReturnDocumentLine,
     InterBranchTransfer,
     Order,
     OrderLine,
@@ -48,7 +51,10 @@ from operations.models import (
     PickingTaskClaim,
     PickingTaskReallocation,
     ReplenishmentRequest,
+    ReturnAction,
     RouteRun,
+    SalesCorrection,
+    SalesCorrectionLine,
     ScannerCart,
     ScannerCustomerLabel,
     ScannerQuickTransferOperation,
@@ -71,6 +77,252 @@ from operations.models import (
 )
 from operations.services import recalculate_route_readiness, reconciliation_route_for_finding, route_close_result
 from warehouse.models import Branch, InventoryItem, Location, Product
+
+
+class ReturnDocumentWorkflowTests(APITestCase):
+    def setUp(self):
+        self.branch = Branch.objects.create(code="RET", name="Returns Branch")
+        self.other_branch = Branch.objects.create(code="OTH", name="Other Branch")
+        self.worker = create_branch_user("RET_WORKER", self.branch)
+        self.leader = create_branch_user("RET_LEADER", self.branch, UserBranchMembership.Role.LEADER)
+        self.other_worker = create_branch_user("OTH_WORKER", self.other_branch)
+        self.returns_area = Location.objects.create(branch=self.branch, code="RETURNS", name="Returns Area", location_type=Location.LocationType.RETURNS)
+        Location.objects.create(branch=self.other_branch, code="RETURNS", name="Returns Area", location_type=Location.LocationType.RETURNS)
+        self.product = Product.objects.create(sku="RET-PROD", name="Return Product", barcode="999000000001")
+        self.document = ExternalReturnDocument.objects.create(
+            branch=self.branch,
+            external_reference="ZW1103872",
+            source_system="AX",
+            customer_name="Return Customer",
+            source_sales_document_reference="AX-SALE-RET",
+        )
+        self.line = ExternalReturnDocumentLine.objects.create(
+            document=self.document,
+            product=self.product,
+            line_number=1,
+            expected_quantity=Decimal("5"),
+        )
+
+    def login(self, user):
+        self.client.force_authenticate(user=user)
+
+    def action_payload(self, **overrides):
+        payload = {
+            "action_type": ReturnAction.ActionType.ACCEPT_REMAINING,
+            "quantity": "2",
+            "note": "",
+            "client_operation_id": str(uuid.uuid4()),
+        }
+        payload.update(overrides)
+        return payload
+
+    def post_action(self, payload):
+        return self.client.post(f"/api/return-documents/{self.document.id}/lines/{self.line.id}/actions/", payload, format="json")
+
+    def test_anonymous_return_documents_are_denied(self):
+        response = self.client.get("/api/return-documents/")
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_same_branch_worker_accepts_partial_quantity_to_returns_area(self):
+        self.login(self.worker)
+        response = self.post_action(self.action_payload(quantity="2"))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.line.refresh_from_db()
+        self.document.refresh_from_db()
+        self.assertEqual(self.line.accepted_quantity, Decimal("2"))
+        self.assertEqual(self.line.remaining_quantity, Decimal("3"))
+        self.assertEqual(self.document.status, ExternalReturnDocument.Status.IN_PROGRESS)
+        inventory = InventoryItem.objects.get(branch=self.branch, location=self.returns_area, product=self.product)
+        self.assertEqual(inventory.quantity_on_hand, Decimal("2"))
+        movement = StockMovement.objects.get(movement_type=StockMovement.MovementType.RETURN_RECEIPT)
+        self.assertEqual(movement.destination_location, self.returns_area)
+        self.assertEqual(movement.performed_by, self.worker)
+        self.assertEqual(ReturnAction.objects.get().performed_by, self.worker)
+
+    def test_same_branch_leader_uses_same_return_action_without_approval(self):
+        self.login(self.leader)
+        response = self.post_action(self.action_payload(action_type=ReturnAction.ActionType.REJECT_REMAINING, quantity="1"))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.line.refresh_from_db()
+        self.assertEqual(self.line.rejected_quantity, Decimal("1"))
+        self.assertFalse(StockMovement.objects.exists())
+
+    def test_other_branch_user_cannot_access_return_document(self):
+        self.login(self.other_worker)
+        response = self.client.get(f"/api/return-documents/{self.document.id}/")
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_put_on_hold_then_accept_on_hold_preserves_two_employee_actions(self):
+        self.login(self.worker)
+        hold_response = self.post_action(
+            self.action_payload(action_type=ReturnAction.ActionType.PUT_ON_HOLD, quantity="1", note="Needs visual check")
+        )
+        self.assertEqual(hold_response.status_code, status.HTTP_200_OK)
+        self.login(self.leader)
+        accept_response = self.post_action(self.action_payload(action_type=ReturnAction.ActionType.ACCEPT_ON_HOLD, quantity="1"))
+        self.assertEqual(accept_response.status_code, status.HTTP_200_OK)
+        self.line.refresh_from_db()
+        self.assertEqual(self.line.on_hold_quantity, Decimal("0"))
+        self.assertEqual(self.line.accepted_quantity, Decimal("1"))
+        self.assertEqual(
+            list(ReturnAction.objects.order_by("created_at").values_list("performed_by__username", flat=True)),
+            ["RET_WORKER", "RET_LEADER"],
+        )
+
+    def test_return_action_idempotency_replays_without_double_inventory(self):
+        self.login(self.worker)
+        operation_id = str(uuid.uuid4())
+        payload = self.action_payload(client_operation_id=operation_id, quantity="2")
+        first = self.post_action(payload)
+        second = self.post_action(payload)
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(ReturnAction.objects.count(), 1)
+        self.assertEqual(StockMovement.objects.count(), 1)
+        inventory = InventoryItem.objects.get(branch=self.branch, location=self.returns_area, product=self.product)
+        self.assertEqual(inventory.quantity_on_hand, Decimal("2"))
+
+    def test_return_action_operation_id_conflict_does_not_mutate(self):
+        self.login(self.worker)
+        operation_id = str(uuid.uuid4())
+        self.assertEqual(self.post_action(self.action_payload(client_operation_id=operation_id, quantity="1")).status_code, status.HTTP_200_OK)
+        response = self.post_action(self.action_payload(client_operation_id=operation_id, quantity="2"))
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(ReturnAction.objects.count(), 1)
+
+    def test_missing_returns_area_fails_without_inventory_mutation(self):
+        self.returns_area.delete()
+        self.login(self.worker)
+        response = self.post_action(self.action_payload(quantity="1"))
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(InventoryItem.objects.exists())
+        self.assertFalse(StockMovement.objects.exists())
+
+
+class SalesCorrectionWorkflowTests(APITestCase):
+    def setUp(self):
+        self.branch = Branch.objects.create(code="COR", name="Correction Branch")
+        self.other_branch = Branch.objects.create(code="CO2", name="Other Branch")
+        self.worker = create_branch_user("COR_WORKER", self.branch)
+        self.leader = create_branch_user("COR_LEADER", self.branch, UserBranchMembership.Role.LEADER)
+        self.other_worker = create_branch_user("CO2_WORKER", self.other_branch)
+        self.returns_area = Location.objects.create(branch=self.branch, code="RETURNS", name="Returns Area", location_type=Location.LocationType.RETURNS)
+        Location.objects.create(branch=self.other_branch, code="RETURNS", name="Returns Area", location_type=Location.LocationType.RETURNS)
+        self.product = Product.objects.create(sku="COR-PROD", name="Corrected Product", barcode="999000000002")
+        self.order = Order.objects.create(
+            branch=self.branch,
+            external_reference="AX-SALE-COR-001",
+            customer_name="Correction Customer One",
+            customer_alias="COR-C1",
+            status=Order.Status.COMPLETED,
+        )
+        self.order_line = OrderLine.objects.create(order=self.order, product=self.product, line_number=1, quantity_ordered=Decimal("4"))
+        second_order = Order.objects.create(
+            branch=self.branch,
+            external_reference="AX-SALE-COR-002",
+            customer_name="Correction Customer Two",
+            customer_alias="COR-C2",
+            status=Order.Status.COMPLETED,
+        )
+        OrderLine.objects.create(order=second_order, product=self.product, line_number=1, quantity_ordered=Decimal("2"))
+        cancelled_order = Order.objects.create(
+            branch=self.branch,
+            external_reference="AX-SALE-CANCELLED",
+            customer_name="Cancelled Customer",
+            status=Order.Status.CANCELLED,
+        )
+        OrderLine.objects.create(order=cancelled_order, product=self.product, line_number=1, quantity_ordered=Decimal("10"))
+
+    def login(self, user):
+        self.client.force_authenticate(user=user)
+
+    def create_correction(self, user=None):
+        self.login(user or self.worker)
+        response = self.client.post("/api/sales-corrections/", {"branch": self.branch.code}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        return SalesCorrection.objects.get(id=response.data["id"])
+
+    def test_sales_history_search_returns_completed_same_branch_sales(self):
+        self.login(self.worker)
+        response = self.client.get("/api/sales-corrections/sales-history/", {"branch": "COR", "product": self.product.barcode})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        references = {row["source_sales_document_reference"] for row in response.data}
+        self.assertIn("AX-SALE-COR-001", references)
+        self.assertIn("AX-SALE-COR-002", references)
+        self.assertNotIn("AX-SALE-CANCELLED", references)
+
+    def test_worker_confirms_sales_correction_to_returns_area(self):
+        correction = self.create_correction()
+        add_response = self.client.post(
+            f"/api/sales-corrections/{correction.id}/add-line/",
+            {"source_order_line": self.order_line.id, "quantity": "2"},
+            format="json",
+        )
+        self.assertEqual(add_response.status_code, status.HTTP_200_OK)
+        confirm_response = self.client.post(
+            f"/api/sales-corrections/{correction.id}/confirm/",
+            {"client_operation_id": str(uuid.uuid4())},
+            format="json",
+        )
+        self.assertEqual(confirm_response.status_code, status.HTTP_200_OK)
+        correction.refresh_from_db()
+        self.assertEqual(correction.status, SalesCorrection.Status.COMPLETED)
+        self.assertEqual(correction.confirmed_by, self.worker)
+        inventory = InventoryItem.objects.get(branch=self.branch, location=self.returns_area, product=self.product)
+        self.assertEqual(inventory.quantity_on_hand, Decimal("2"))
+        movement = StockMovement.objects.get(movement_type=StockMovement.MovementType.SALES_CORRECTION_RECEIPT)
+        self.assertEqual(movement.performed_by, self.worker)
+
+    def test_leader_confirms_without_approval_step(self):
+        correction = self.create_correction(user=self.leader)
+        response = self.client.post(
+            f"/api/sales-corrections/{correction.id}/add-line/",
+            {"source_order_line": self.order_line.id, "quantity": "1"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        confirm = self.client.post(
+            f"/api/sales-corrections/{correction.id}/confirm/",
+            {"client_operation_id": str(uuid.uuid4())},
+            format="json",
+        )
+        self.assertEqual(confirm.status_code, status.HTTP_200_OK)
+        correction.refresh_from_db()
+        self.assertEqual(correction.confirmed_by, self.leader)
+
+    def test_correction_cannot_exceed_remaining_correctable_quantity(self):
+        correction = self.create_correction()
+        response = self.client.post(
+            f"/api/sales-corrections/{correction.id}/add-line/",
+            {"source_order_line": self.order_line.id, "quantity": "5"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_other_branch_cannot_access_correction(self):
+        correction = self.create_correction()
+        self.login(self.other_worker)
+        response = self.client.get(f"/api/sales-corrections/{correction.id}/")
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_correction_confirmation_replay_posts_once(self):
+        correction = self.create_correction()
+        self.client.post(f"/api/sales-corrections/{correction.id}/add-line/", {"source_order_line": self.order_line.id, "quantity": "1"}, format="json")
+        operation_id = str(uuid.uuid4())
+        first = self.client.post(f"/api/sales-corrections/{correction.id}/confirm/", {"client_operation_id": operation_id}, format="json")
+        second = self.client.post(f"/api/sales-corrections/{correction.id}/confirm/", {"client_operation_id": operation_id}, format="json")
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(StockMovement.objects.filter(movement_type=StockMovement.MovementType.SALES_CORRECTION_RECEIPT).count(), 1)
+
+    def test_correction_activity_report_is_employee_attributed(self):
+        correction = self.create_correction()
+        self.client.post(f"/api/sales-corrections/{correction.id}/add-line/", {"source_order_line": self.order_line.id, "quantity": "1"}, format="json")
+        self.client.post(f"/api/sales-corrections/{correction.id}/confirm/", {"client_operation_id": str(uuid.uuid4())}, format="json")
+        response = self.client.get("/api/sales-corrections/activity-report/", {"branch": "COR", "employee": "COR_WORKER"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["summary"]["completed_corrections"], 1)
+        self.assertEqual(response.data["results"][0]["employee"], "COR_WORKER")
 
 
 class BranchMembershipAuthorizationTests(APITestCase):

@@ -52,6 +52,8 @@ Other operational routes inherit the authenticated default and then apply their 
 | Orders, order lines, proformas, route runs | Filtered through owning branch or route branch. | Scanner and route commands validate route, order, task, and branch relationships. |
 | Stock movements | Filtered by movement branch. | Created by controlled workflow commands; client-provided before/after values are not authoritative. |
 | Stock adjustments | Branch-scoped register and detail. | Manual creation requires Leader in the target branch. Product and location must belong to that branch. |
+| External Return Documents | Filtered by document branch. Exact external-reference lookup does not leak another branch's document. | Same-branch Workers and Leaders may accept, reject, put on hold, and resolve on-hold quantities. The backend derives employee, branch, product, Returns Area, inventory before/after, and StockMovement. |
+| Sales Corrections | Filtered by correction branch. Sales history search returns only completed same-branch sales with remaining correctable quantity. | Same-branch Workers and Leaders may create drafts, add source sales lines, edit draft quantities, remove draft lines, and confirm. The backend derives customer/source sale/product from the selected OrderLine and posts only to the branch Returns Area. |
 | Cycle Counts | Sessions, lines, and recounts are branch-scoped. | Create/open/reconcile/recount request/recount accept/recount cancel/close are Leader-only. Scanner counting and recount execution are branch Worker-capable. |
 | Picking, control, and cart work | Visible only for assigned branch work. | Workers and Leaders may execute scanner work in their branch. Task/cart/session IDs must belong to the same authorized workflow. |
 | Receiving and pallet arrivals | Destination branch receives arrival/receiving work. Source branch access is not enough for destination receipt. | Receiving commands validate transfer, pallet, product, destination location, and session relationships. |
@@ -68,6 +70,8 @@ Other operational routes inherit the authenticated default and then apply their 
 | Transport overview, transit, discrepancies, source reviews, reconciliations, replenishment, inventory exceptions, picking shortages | Read/allowed workflow visibility | Read plus eligible Leader actions where exposed |
 | Stock transfers | Read and workflow visibility according to branch involvement | Read and eligible branch actions |
 | Stock adjustments | Read; no manual create action | Read; manual create action |
+| Returns | Read and process External Return Documents | Read and process External Return Documents |
+| Sales Corrections | Create drafts, search completed sales, confirm corrections, view activity report | Same as Worker; no approval step |
 | Cycle Counts | Read and scanner execution | Create/open/reconcile/recount/close actions |
 | Cycle Count Review Queue | Hidden | Visible |
 
@@ -95,6 +99,7 @@ Other operational routes inherit the authenticated default and then apply their 
 
 - `require_branch_access` is the standard branch membership check.
 - `leader_required=True` is used for Leader-only commands.
+- Returns and Sales Corrections intentionally do not use a Leader approval workflow. Worker and Leader authorization is identical for same-branch return/correction operations; accountability is recorded through authenticated employee attribution.
 - `branch_codes_filter`, `branch_ids_filter`, `filter_branch_queryset`, and `filter_dual_branch_queryset` are used to constrain list/detail querysets.
 - Superusers are treated as Leaders across all branches by `membership_role`.
 - Staff users do not receive a bypass unless they are also superusers or have branch memberships.
