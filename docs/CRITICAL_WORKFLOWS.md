@@ -15,6 +15,7 @@ The integration scenarios live in `backend/operations/tests.py` alongside the ex
 - `CriticalPickingShortageControlIntegrationTests`
 - `ReturnDocumentWorkflowTests`
 - `SalesCorrectionWorkflowTests`
+- `ShipmentCommandCenterTests`
 
 The project still uses the existing monolithic operations test module. No test package migration was introduced for this stage.
 
@@ -32,6 +33,7 @@ The project still uses the existing monolithic operations test module. No test p
 | Picking shortage and Control | Branch Worker, Control Worker, Branch Leader, unrelated branch Worker | Partial picking, shortage challenge/report, replenishment request creation, picked-goods control, Leader-only shortage follow-up rejection for Worker, duplicate shortage replay, branch isolation | Picking Shortages, Inventory Exceptions, Route Run detail, Current Events |
 | External Return Documents | Branch Worker, Branch Leader, unrelated branch Worker | Exact external-reference lookup, partial accept/reject/on-hold actions, on-hold resolution, idempotent action replay, branch isolation | Return document detail, Returns Area inventory, Stock Movements, Current Events |
 | Sales Corrections | Branch Worker, Branch Leader, unrelated branch Worker | Completed-sales search, correction draft creation, line add/update/remove, confirmation, idempotent confirmation replay, over-correction guard, branch isolation | Sales Correction detail, Correction Activity Report, Returns Area inventory, Stock Movements, Current Events |
+| Shipments Command Center | Branch Worker, destination branch Worker, unrelated branch Worker | Shipment list/detail, activation, picking-work posting, preparation guard, cancellation, document-only posting, route change, route aggregation, line quantity removal, controlled status change, branch isolation | Shipment detail, Route assignments, Route Monitor, line adjustment history, Current Events |
 
 ## Authorization Coverage
 
@@ -135,6 +137,33 @@ Sales Corrections are separate from External Return Documents. A Worker or Leade
 
 Accepted return quantities and confirmed correction quantities are posted to the branch location with code `RETURNS` and type `returns` when present. Existing legacy return locations remain readable, and Quick Transfer is still the follow-up workflow for moving goods from the Returns Area to normal shelf locations.
 
+## Shipments Command Center
+
+The Shipments module uses a hybrid architecture. `Shipment` stores the outbound operational header, lifecycle timestamps, external AX-style metadata, document status, and relationships to the existing `Order`, `RouteRun`, and optional `InterBranchTransfer`. `ShipmentLine` points to the existing `OrderLine`; picking/control progress is derived from authoritative `PickingTask` quantities instead of copying physical execution state into a second system.
+
+Shipment lifecycle represents the overall outbound state: `pending_activation`, `active`, `picking`, `picked`, `controlled`, `prepared`, `documents_posted`, `ready_for_dispatch`, `dispatched`, `completed`, `cancelled`, and `exception`. Picking status, control status, document status, and route status remain separate operational dimensions in the read model.
+
+The WMS command panel exposes only context-aware commands:
+
+- Activation records actor/time and event evidence for eligible pending shipments.
+- Post Picking Lists creates missing PickingTasks for active shipment lines without duplicating existing tasks.
+- Prepare requires posted picking work, completed picking quantity, and completed control/prepared quantity.
+- Cancel requires a reason, keeps history, and blocks irreversible route/document states.
+- Post Documents records Shipment document-posted state and event evidence only. It does not release TransferPallets, change InterBranchTransfer transit state, mutate inventory, or enable destination Receiving; that boundary belongs to a future Freight/Forwarding module.
+- Picking Route confirmation records review evidence only; route optimization remains outside this stage.
+- Proforma print records an event for the existing source order representation. No invoice, tax, accounting, or AX document generation is implemented.
+- Close Routes delegates to the existing RouteRun readiness and document-print rules. `RouteRun` is the route aggregate; the monitor and close rules evaluate all non-cancelled Shipments assigned to the run, not only the currently selected Shipment.
+- Change Route updates the Shipment and source Order route assignment, records append-only route history, and marks printed documents as requiring refresh. It does not require a reason. Eligible targets are server-filtered to the same branch and exclude closed, cancelled, dispatched, and current RouteRuns. The WMS dialog defaults to today's operational routes and can expand to the current Monday-Sunday operational week with route-code search.
+- Change Status uses a small server-side transition matrix and cannot fake picking, control, document posting, receiving visibility, or route closure.
+
+Shipment Lines preserve original ordered quantity and expose effective and removed quantities. Removing units creates append-only `ShipmentLineQuantityAdjustment` history with actor, reason, previous/new effective quantities, and optional client operation ID. The command can reduce only unpicked/uncontrolled quantity; it never silently reverses inventory or changes the source OrderLine quantity.
+
+Removing unpicked quantity is not a return. The removed units stay in their current warehouse inventory location. The command does not create Return Actions, return receipts, Sales Corrections, StockMovements, Quick Transfers, Picking Shortages, or inventory increases/decreases. When the final unpicked unit is removed, the historical ShipmentLine remains with effective quantity zero and cancelled line status; related unpicked PickingTasks are made inactive by setting them to `cancelled` while preserving their positive original target quantity for history. A Shipment whose lines all reach zero effective quantity remains visible for audit and explicit cancellation, but it no longer contributes active route workload and is not marked prepared or completed automatically.
+
+Route Monitor and Shipments use the same `RouteRun` rows. A RouteRun is one route execution, many Shipments may belong to it, and monitor totals are derived from assigned non-cancelled Shipments, effective ShipmentLine quantities, and active PickingTasks rather than independent seeded progress counters. Operational route identifiers such as imported route codes are display/search labels; branch, date, route, run number, and planned times remain structured fields.
+
+External AX integration is modeled as metadata only: source system, external shipment/order/line references, external status, customer account, delivery reference, and notes. There is no live AX import, update-documents action, financial posting, freight release, receiving activation, or courier integration. Pallet provenance is not fabricated; line-level picking pallet/source pallet displays a dash until a real provenance relationship exists.
+
 The existing operations suite continues to cover deeper isolated and workflow-specific behavior for:
 
 - inter-branch pallet receiving,
@@ -165,6 +194,12 @@ Run Returns and Sales Corrections focused scenarios:
 
 ```powershell
 docker compose run --rm backend python manage.py test operations.tests.ReturnDocumentWorkflowTests operations.tests.SalesCorrectionWorkflowTests --noinput
+```
+
+Run Shipment Command Center focused scenarios:
+
+```powershell
+docker compose run --rm backend python manage.py test operations.tests.ShipmentCommandCenterTests --noinput
 ```
 
 Run the full backend suites:

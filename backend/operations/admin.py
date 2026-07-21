@@ -30,6 +30,11 @@ from operations.models import (
     ScannerCart,
     ScannerCustomerLabel,
     ScannerSession,
+    Shipment,
+    ShipmentLine,
+    ShipmentLineQuantityAdjustment,
+    ShipmentRouteAssignment,
+    ShipmentStatusHistory,
     StockMovement,
     TransferDiscrepancy,
     TransferDiscrepancyItem,
@@ -98,6 +103,60 @@ class OrderLineAdmin(admin.ModelAdmin):
     list_display = ["order", "line_number", "product", "quantity_ordered", "quantity_picked"]
     list_filter = ["order__branch"]
     search_fields = ["order__external_reference", "product__sku", "product__name"]
+
+
+class ShipmentLineInline(admin.TabularInline):
+    model = ShipmentLine
+    extra = 0
+    readonly_fields = ["order_line", "product", "line_number", "ordered_quantity"]
+
+
+class ShipmentRouteAssignmentInline(admin.TabularInline):
+    model = ShipmentRouteAssignment
+    extra = 0
+    readonly_fields = ["previous_route_run", "new_route_run", "changed_by", "reason", "created_at"]
+
+
+class ShipmentStatusHistoryInline(admin.TabularInline):
+    model = ShipmentStatusHistory
+    extra = 0
+    readonly_fields = ["previous_status", "new_status", "changed_by", "reason", "created_at"]
+
+
+@admin.register(Shipment)
+class ShipmentAdmin(admin.ModelAdmin):
+    list_display = ["reference", "branch", "status", "shipment_type", "route_run", "document_status", "delivery_date"]
+    list_filter = ["branch", "status", "shipment_type", "document_status", "delivery_date"]
+    search_fields = ["reference", "external_reference", "order__external_reference", "customer_name", "customer_alias"]
+    inlines = [ShipmentLineInline, ShipmentRouteAssignmentInline, ShipmentStatusHistoryInline]
+
+
+@admin.register(ShipmentLine)
+class ShipmentLineAdmin(admin.ModelAdmin):
+    list_display = ["shipment", "line_number", "product", "ordered_quantity", "external_line_reference"]
+    list_filter = ["product", "shipment__branch", "shipment__status"]
+    search_fields = ["shipment__reference", "product__sku", "product__name", "external_line_reference"]
+
+
+@admin.register(ShipmentLineQuantityAdjustment)
+class ShipmentLineQuantityAdjustmentAdmin(admin.ModelAdmin):
+    list_display = ["shipment", "shipment_line", "quantity_removed", "adjusted_by", "created_at"]
+    list_filter = ["shipment__branch", "created_at"]
+    search_fields = ["shipment__reference", "shipment_line__product__sku", "reason"]
+
+
+@admin.register(ShipmentRouteAssignment)
+class ShipmentRouteAssignmentAdmin(admin.ModelAdmin):
+    list_display = ["shipment", "previous_route_run", "new_route_run", "changed_by", "created_at"]
+    list_filter = ["new_route_run__route__branch", "created_at"]
+    search_fields = ["shipment__reference", "reason"]
+
+
+@admin.register(ShipmentStatusHistory)
+class ShipmentStatusHistoryAdmin(admin.ModelAdmin):
+    list_display = ["shipment", "previous_status", "new_status", "changed_by", "created_at"]
+    list_filter = ["new_status", "created_at"]
+    search_fields = ["shipment__reference", "reason"]
 
 
 class ReturnLineInline(admin.TabularInline):

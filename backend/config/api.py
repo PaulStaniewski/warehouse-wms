@@ -17,6 +17,7 @@ from operations.viewsets import (
     ReplenishmentRequestViewSet,
     RouteRunViewSet,
     SalesCorrectionViewSet,
+    ShipmentViewSet,
     StockAdjustmentViewSet,
     StockMovementViewSet,
     TransportOverviewViewSet,
@@ -47,6 +48,7 @@ router.register("return-batches", ReturnBatchViewSet, basename="return-batch")
 router.register("return-lines", ReturnLineViewSet, basename="return-line")
 router.register("return-documents", ExternalReturnDocumentViewSet, basename="return-document")
 router.register("sales-corrections", SalesCorrectionViewSet, basename="sales-correction")
+router.register("shipments", ShipmentViewSet, basename="shipment")
 router.register("picking-tasks", PickingTaskViewSet, basename="picking-task")
 router.register("picking-shortages", PickingShortageViewSet, basename="picking-shortage")
 router.register("replenishment-requests", ReplenishmentRequestViewSet, basename="replenishment-request")

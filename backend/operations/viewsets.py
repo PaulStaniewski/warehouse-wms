@@ -44,6 +44,10 @@ from operations.models import (
     RouteRun,
     SalesCorrection,
     SalesCorrectionLine,
+    Shipment,
+    ShipmentLine,
+    ShipmentRouteAssignment,
+    ShipmentStatusHistory,
     StockMovement,
     TransferDiscrepancy,
     TransferDiscrepancyManualReconciliationDecision,
@@ -77,6 +81,7 @@ from operations.serializers import (
     RouteRunSerializer,
     SalesCorrectionSerializer,
     SalesHistoryCandidateSerializer,
+    ShipmentSerializer,
     StockMovementSerializer,
     TransportOverviewSerializer,
     TransferDiscrepancyActionSerializer,
@@ -85,6 +90,20 @@ from operations.serializers import (
     TransferDiscrepancySourceStockVerificationSerializer,
     TransferDiscrepancySourceReviewSerializer,
     TransferDiscrepancyTransitInvestigationSerializer,
+)
+from operations.shipment_services import (
+    activate_shipment,
+    cancel_shipment,
+    change_shipment_route,
+    change_shipment_status,
+    close_shipment_route,
+    confirm_picking_route,
+    post_inter_branch_documents,
+    post_picking_lists,
+    prepare_shipment,
+    print_shipment_documents,
+    remove_shipment_line_quantity,
+    sync_shipment_status_from_work,
 )
 from operations.return_services import (
     Conflict,
@@ -772,6 +791,312 @@ class SalesCorrectionViewSet(ModelViewSet):
             for line in rows_queryset[:200]
         ]
         return Response({"summary": summary, "results": CorrectionActivityReportSerializer(rows, many=True).data})
+
+
+class ShipmentFilter(django_filters.FilterSet):
+    branch = django_filters.CharFilter(method="filter_branch")
+    shipment_status = django_filters.CharFilter(field_name="status", lookup_expr="iexact")
+    picking_status = django_filters.CharFilter(method="filter_picking_status")
+    route = django_filters.CharFilter(method="filter_route")
+    delivery_date = django_filters.DateFilter(field_name="delivery_date")
+    customer = django_filters.CharFilter(method="filter_customer")
+    payment_method = django_filters.CharFilter(field_name="payment_method", lookup_expr="icontains")
+    external_reference = django_filters.CharFilter(field_name="external_reference", lookup_expr="icontains")
+
+    def filter_branch(self, queryset, name, value):
+        if str(value).isdigit():
+            return queryset.filter(branch_id=value)
+        return queryset.filter(branch__code__iexact=value)
+
+    def filter_picking_status(self, queryset, name, value):
+        value = str(value).strip()
+        if value == "not_started":
+            return queryset.filter(lines__order_line__picking_tasks__isnull=True).distinct()
+        if value == "shortage":
+            return queryset.filter(lines__order_line__picking_tasks__shortage_quantity__gt=0).distinct()
+        if value == "completed":
+            return queryset.exclude(lines__order_line__picking_tasks__isnull=True).exclude(
+                lines__order_line__picking_tasks__quantity_picked__lt=models.F("lines__order_line__picking_tasks__quantity_to_pick")
+            ).distinct()
+        if value == "in_progress":
+            return queryset.filter(
+                lines__order_line__picking_tasks__status__in=[
+                    PickingTask.Status.OPEN,
+                    PickingTask.Status.ASSIGNED,
+                    PickingTask.Status.IN_PROGRESS,
+                    PickingTask.Status.PICKED,
+                ]
+            ).distinct()
+        return queryset
+
+    def filter_route(self, queryset, name, value):
+        route_query = models.Q(route_run__route__code__iexact=value)
+        if str(value).isdigit():
+            route_query |= models.Q(route_run_id=value)
+        return queryset.filter(route_query)
+
+    def filter_customer(self, queryset, name, value):
+        return queryset.filter(
+            models.Q(customer_name__icontains=value)
+            | models.Q(customer_alias__icontains=value)
+            | models.Q(external_customer_account__icontains=value)
+        )
+
+    class Meta:
+        model = Shipment
+        fields = [
+            "branch",
+            "shipment_status",
+            "picking_status",
+            "route",
+            "delivery_date",
+            "customer",
+            "payment_method",
+            "external_reference",
+            "shipment_type",
+            "document_status",
+        ]
+
+
+class ShipmentViewSet(ReadOnlyModelViewSet):
+    queryset = Shipment.objects.select_related(
+        "branch",
+        "order",
+        "route_run",
+        "route_run__route",
+        "route_run__route__branch",
+        "inter_branch_transfer",
+        "inter_branch_transfer__source_branch",
+        "inter_branch_transfer__destination_branch",
+        "activated_by",
+        "prepared_by",
+        "cancelled_by",
+        "documents_printed_by",
+        "documents_posted_by",
+    ).prefetch_related(
+        "lines",
+        "lines__product",
+        "lines__order_line",
+        "lines__order_line__picking_tasks",
+        "lines__order_line__picking_tasks__source_location",
+        "lines__quantity_adjustments",
+        "lines__quantity_adjustments__adjusted_by",
+        "route_assignments",
+        "route_assignments__changed_by",
+        "status_history",
+        "status_history__changed_by",
+    )
+    serializer_class = ShipmentSerializer
+    filterset_class = ShipmentFilter
+    search_fields = [
+        "reference",
+        "external_reference",
+        "external_order_reference",
+        "customer_name",
+        "customer_alias",
+        "recipient_account",
+        "delivery_name",
+        "external_notes",
+        "order__external_reference",
+        "route_run__route__code",
+    ]
+    ordering = ["-created_at"]
+    ordering_fields = [
+        "reference",
+        "status",
+        "delivery_date",
+        "customer_alias",
+        "payment_method",
+        "created_at",
+        "updated_at",
+        "route_run__departure_time",
+        "route_run__order_cutoff_time",
+    ]
+
+    def get_queryset(self):
+        queryset = filter_branch_queryset(super().get_queryset(), self.request, "branch")
+        branch = self.request.query_params.get("branch", "").strip()
+        if branch:
+            queryset = queryset.filter(models.Q(branch_id=branch) if branch.isdigit() else models.Q(branch__code__iexact=branch))
+        return queryset.distinct()
+
+    def retrieve(self, request, *args, **kwargs):
+        shipment = self.get_object()
+        sync_shipment_status_from_work(shipment)
+        shipment.refresh_from_db()
+        return Response(self.get_serializer(shipment).data)
+
+    @action(detail=False, methods=["get"], url_path="route-targets")
+    def route_targets(self, request):
+        branch_value = str(request.query_params.get("branch", "")).strip()
+        scope = str(request.query_params.get("scope", "today")).strip().lower()
+        current_route_run_id = str(request.query_params.get("exclude_route_run", "")).strip()
+        search = str(request.query_params.get("search", "")).strip()
+        operational_date = parse_date(str(request.query_params.get("operational_date", "")).strip()) or timezone.localdate()
+        queryset = RouteRun.objects.select_related("route", "route__branch").exclude(
+            status__in=[RouteRun.Status.CLOSED, RouteRun.Status.DISPATCHED, RouteRun.Status.CANCELLED]
+        )
+        queryset = filter_branch_queryset(queryset, request, "route__branch")
+        if branch_value:
+            queryset = queryset.filter(
+                models.Q(route__branch_id=branch_value) if branch_value.isdigit() else models.Q(route__branch__code__iexact=branch_value)
+            )
+        if current_route_run_id.isdigit():
+            queryset = queryset.exclude(id=current_route_run_id)
+
+        if scope == "week":
+            week_start = operational_date - timezone.timedelta(days=operational_date.weekday())
+            week_end = week_start + timezone.timedelta(days=6)
+            queryset = queryset.filter(service_date__range=(week_start, week_end))
+        else:
+            queryset = queryset.filter(service_date=operational_date)
+
+        if search:
+            queryset = queryset.filter(
+                models.Q(route__code__icontains=search)
+                | models.Q(route__name__icontains=search)
+                | models.Q(route__branch__code__icontains=search)
+            )
+
+        queryset = queryset.annotate(active_shipment_count=models.Count("shipments", filter=~models.Q(shipments__status=Shipment.Status.CANCELLED)))
+        data = [
+            {
+                "id": route_run.id,
+                "label": f"{route_run.route.code} / {route_run.service_date} / run {route_run.run_number} / {route_run.departure_time}",
+                "operational_identifier": route_run.route.code,
+                "branch_code": route_run.route.branch.code,
+                "route_code": route_run.route.code,
+                "route_name": route_run.route.name,
+                "service_date": route_run.service_date,
+                "weekday": route_run.service_date.strftime("%A"),
+                "departure_time": route_run.departure_time,
+                "status": route_run.status,
+                "shipment_count": route_run.active_shipment_count,
+            }
+            for route_run in queryset.order_by("service_date", "departure_time", "route__code", "run_number")[:100]
+        ]
+        return Response({"results": data})
+
+    @action(detail=True, methods=["post"])
+    def activate(self, request, pk=None):
+        shipment, replayed = activate_shipment(request.user, self.get_object().id, request.data.get("client_operation_id"))
+        return Response({"message": "Shipment activation replayed." if replayed else "Shipment activated.", "shipment": self.get_serializer(shipment).data})
+
+    @action(detail=True, methods=["post"], url_path="post-picking-lists")
+    def post_picking_lists(self, request, pk=None):
+        shipment, created_count = post_picking_lists(request.user, self.get_object().id, request.data.get("client_operation_id"))
+        return Response({"message": f"Picking work posted. Created {created_count} task(s).", "shipment": self.get_serializer(shipment).data})
+
+    @action(detail=True, methods=["post"])
+    def prepare(self, request, pk=None):
+        shipment, replayed = prepare_shipment(request.user, self.get_object().id)
+        return Response({"message": "Shipment was already prepared." if replayed else "Shipment prepared.", "shipment": self.get_serializer(shipment).data})
+
+    @action(detail=True, methods=["post"])
+    def cancel(self, request, pk=None):
+        shipment, replayed = cancel_shipment(request.user, self.get_object().id, str(request.data.get("reason", "")))
+        return Response({"message": "Shipment was already cancelled." if replayed else "Shipment cancelled.", "shipment": self.get_serializer(shipment).data})
+
+    @action(detail=True, methods=["post"], url_path="print-documents")
+    def print_documents(self, request, pk=None):
+        shipment = print_shipment_documents(request.user, self.get_object().id, str(request.data.get("printer", "")))
+        return Response({"message": "Shipment documents printed.", "shipment": self.get_serializer(shipment).data})
+
+    @action(detail=True, methods=["post"], url_path="post-documents")
+    def post_documents(self, request, pk=None):
+        shipment, replayed = post_inter_branch_documents(request.user, self.get_object().id)
+        return Response({"message": "Shipment documents already posted." if replayed else "Shipment documents posted.", "shipment": self.get_serializer(shipment).data})
+
+    @action(detail=True, methods=["get"], url_path="picking-route-preview")
+    def picking_route_preview(self, request, pk=None):
+        shipment = self.get_object()
+        tasks = PickingTask.objects.select_related("order_line__product", "source_location").filter(order_line__shipment_line__shipment=shipment).order_by(
+            "source_location__code", "order_line__line_number"
+        )
+        return Response({"results": PickingTaskSerializer(tasks, many=True).data})
+
+    @action(detail=True, methods=["post"], url_path="confirm-picking-route")
+    def confirm_picking_route(self, request, pk=None):
+        shipment, replayed = confirm_picking_route(request.user, self.get_object().id)
+        return Response({"message": "Picking route was already confirmed." if replayed else "Picking route confirmed.", "shipment": self.get_serializer(shipment).data})
+
+    @action(detail=True, methods=["get"], url_path="proforma-preview")
+    def proforma_preview(self, request, pk=None):
+        shipment = self.get_object()
+        order = Order.objects.select_related("branch", "route_run", "route_run__route").prefetch_related("lines__product").get(pk=shipment.order_id)
+        return Response(OrderSerializer(order).data)
+
+    @action(detail=True, methods=["post"], url_path="print-proforma")
+    def print_proforma(self, request, pk=None):
+        shipment = self.get_object()
+        require_branch_access(request.user, shipment.branch)
+        AuditLog.objects.create(
+            actor=request.user,
+            action_type=AuditLog.ActionType.UPDATE,
+            event_type="shipment_proforma_printed",
+            branch=shipment.branch,
+            order=shipment.order,
+            route_run=shipment.route_run,
+            reference=shipment.reference,
+            entity_name="Shipment",
+            entity_id=str(shipment.id),
+            message=f"{request.user.username} printed proforma preview for shipment {shipment.reference}.",
+        )
+        return Response({"message": "Proforma printed.", "shipment": self.get_serializer(shipment).data})
+
+    @action(detail=True, methods=["post"], url_path="close-route")
+    def close_route(self, request, pk=None):
+        shipment, replayed = close_shipment_route(request.user, self.get_object().id)
+        return Response({"message": "Route was already closed." if replayed else "Route closed.", "shipment": self.get_serializer(shipment).data})
+
+    @action(detail=True, methods=["post"], url_path="change-route")
+    def change_route(self, request, pk=None):
+        route_run_id = request.data.get("route_run")
+        if not route_run_id:
+            return Response({"detail": "route_run is required."}, status=status.HTTP_400_BAD_REQUEST)
+        shipment, replayed = change_shipment_route(
+            request.user,
+            self.get_object().id,
+            route_run_id,
+            str(request.data.get("reason", "")),
+            request.data.get("client_operation_id"),
+        )
+        return Response({"message": "Shipment already uses this route." if replayed else "Shipment route changed.", "shipment": self.get_serializer(shipment).data})
+
+    @action(detail=True, methods=["post"], url_path="change-status")
+    def change_status(self, request, pk=None):
+        shipment = change_shipment_status(
+            request.user,
+            self.get_object().id,
+            str(request.data.get("status", "")).strip(),
+            str(request.data.get("reason", "")),
+            request.data.get("client_operation_id"),
+        )
+        return Response({"message": "Shipment status changed.", "shipment": self.get_serializer(shipment).data})
+
+    @action(detail=True, methods=["post"], url_path="lines/(?P<line_id>[^/.]+)/remove-quantity")
+    def remove_line_quantity(self, request, pk=None, line_id=None):
+        try:
+            quantity = Decimal(str(request.data.get("quantity", "")))
+        except Exception:
+            return Response({"detail": "quantity must be a decimal value."}, status=status.HTTP_400_BAD_REQUEST)
+        shipment, line, adjustment, replayed = remove_shipment_line_quantity(
+            request.user,
+            self.get_object().id,
+            line_id,
+            quantity,
+            str(request.data.get("reason", "")),
+            request.data.get("client_operation_id"),
+        )
+        shipment.refresh_from_db()
+        return Response(
+            {
+                "message": "Quantity removal replayed." if replayed else "Shipment line quantity removed.",
+                "shipment": self.get_serializer(shipment).data,
+                "line_id": line.id,
+                "adjustment_id": adjustment.id,
+            }
+        )
 
 
 class PickingTaskViewSet(ReadOnlyModelViewSet):

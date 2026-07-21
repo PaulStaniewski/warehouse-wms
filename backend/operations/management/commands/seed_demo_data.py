@@ -34,6 +34,11 @@ from operations.models import (
     ScannerCart,
     ScannerCustomerLabel,
     ScannerSession,
+    Shipment,
+    ShipmentLine,
+    ShipmentLineQuantityAdjustment,
+    ShipmentRouteAssignment,
+    ShipmentStatusHistory,
     StockMovement,
     TransferDiscrepancy,
     TransferDiscrepancyItem,
@@ -72,6 +77,7 @@ class Command(BaseCommand):
             picking_tasks = self.create_picking_tasks(branches, locations, order_lines)
             scanner_carts = self.create_scanner_carts()
             transfer_pallets = self.create_transfer_pallets(branches, products)
+            shipments = self.create_shipments(branches, orders, order_lines, route_runs, transfer_pallets)
             stock_movements = self.create_stock_movements(branches, locations, products, inventory_items)
             audit_logs = self.create_audit_logs(orders, return_batch)
 
@@ -90,14 +96,27 @@ class Command(BaseCommand):
         self.stdout.write(f"Picking tasks: {len(picking_tasks)}")
         self.stdout.write(f"Scanner carts: {len(scanner_carts)}")
         self.stdout.write(f"Transfer pallets: {len(transfer_pallets)}")
+        self.stdout.write(f"Shipments: {len(shipments)}")
         self.stdout.write(f"Stock movements: {len(stock_movements)}")
         self.stdout.write(f"Audit logs: {len(audit_logs)}")
         self.stdout.write("Demo password: demo12345")
 
     def cleanup_demo_workflow(self):
         demo_cart_codes = ["WOZEK-01", "WOZEK-02", "WOZEK-03"]
-        demo_transfer_refs = ["IBT-GDA-GDY-001", "IBT-GDA-GDY-DISC-001"]
-        demo_pallet_codes = ["PAL-GDA-GDY-001", "PAL-GDA-GDY-DISC-001"]
+        demo_transfer_refs = ["IBT-GDA-GDY-001", "IBT-GDA-GDY-DISC-001", "IBT-SHP-GDA-GDY-001"]
+        demo_pallet_codes = ["PAL-GDA-GDY-001", "PAL-GDA-GDY-DISC-001", "PAL-SHP-GDA-GDY-001"]
+        demo_shipment_refs = [
+            "SHP-GDY-0001",
+            "SHP-GDY-0002",
+            "SHP-GDY-0003",
+            "SHP-GDY-0004",
+            "SHP-GDY-0005",
+            "SHP-GDA-GDY-0001",
+            "SHP-GDA-GDY-0002",
+            "SHP-GDY-0006",
+            "SHP-GDY-0007",
+            "SHP-GDY-0008",
+        ]
         demo_order_refs = [
             "AX-ORDER-0001",
             "AX-ORDER-0002",
@@ -128,6 +147,12 @@ class Command(BaseCommand):
 
         demo_shortages = PickingShortage.objects.filter(order__external_reference__in=demo_order_refs)
         demo_return_actions = ReturnAction.objects.filter(document__external_reference__in=demo_external_return_refs)
+        demo_shipments = Shipment.objects.filter(reference__in=demo_shipment_refs)
+        ShipmentRouteAssignment.objects.filter(shipment__in=demo_shipments).delete()
+        ShipmentStatusHistory.objects.filter(shipment__in=demo_shipments).delete()
+        ShipmentLineQuantityAdjustment.objects.filter(shipment__in=demo_shipments).delete()
+        ShipmentLine.objects.filter(shipment__in=demo_shipments).delete()
+        demo_shipments.delete()
         StockMovement.objects.filter(
             models.Q(external_return_action__in=demo_return_actions)
             | models.Q(reference__in=demo_external_return_refs)
@@ -364,6 +389,7 @@ class Command(BaseCommand):
                 "GDY",
                 "ROUTE-01",
                 1,
+                0,
                 as_time(timedelta(minutes=0)),
                 as_time(timedelta(minutes=1)),
                 as_time(timedelta(minutes=10)),
@@ -373,6 +399,7 @@ class Command(BaseCommand):
                 "GDY",
                 "ROUTE-01",
                 2,
+                0,
                 as_time(timedelta(hours=3, minutes=50)),
                 as_time(timedelta(hours=3, minutes=51)),
                 as_time(timedelta(hours=4)),
@@ -382,15 +409,17 @@ class Command(BaseCommand):
                 "GDY",
                 "ROUTE-02",
                 1,
+                0,
                 as_time(timedelta(hours=1, minutes=50)),
                 as_time(timedelta(hours=1, minutes=51)),
                 as_time(timedelta(hours=2)),
-                RouteRun.Status.OPEN,
+                RouteRun.Status.READY_TO_CLOSE,
             ),
             (
                 "GDY",
                 "ROUTE-03",
                 1,
+                0,
                 as_time(timedelta(hours=5, minutes=50)),
                 as_time(timedelta(hours=5, minutes=51)),
                 as_time(timedelta(hours=6)),
@@ -400,6 +429,7 @@ class Command(BaseCommand):
                 "GDA",
                 "ROUTE-01",
                 1,
+                0,
                 as_time(timedelta(hours=2, minutes=50)),
                 as_time(timedelta(hours=2, minutes=51)),
                 as_time(timedelta(hours=3)),
@@ -409,6 +439,7 @@ class Command(BaseCommand):
                 "GDA",
                 "ROUTE-02",
                 1,
+                0,
                 as_time(timedelta(hours=4, minutes=50)),
                 as_time(timedelta(hours=4, minutes=51)),
                 as_time(timedelta(hours=5)),
@@ -418,16 +449,28 @@ class Command(BaseCommand):
                 "GDY",
                 "ROUTE-04",
                 1,
+                0,
                 as_time(timedelta(hours=6, minutes=50)),
                 as_time(timedelta(hours=6, minutes=51)),
                 as_time(timedelta(hours=7)),
                 RouteRun.Status.OPEN,
             ),
+            (
+                "GDY",
+                "ROUTE-05",
+                1,
+                2,
+                as_time(timedelta(hours=2, minutes=50)),
+                as_time(timedelta(hours=2, minutes=51)),
+                as_time(timedelta(hours=3)),
+                RouteRun.Status.OPEN,
+            ),
         ]
 
         route_runs = {}
-        for branch_code, route_code, run_number, cutoff_time, sync_time, departure_time, status in run_data:
+        for branch_code, route_code, run_number, day_offset, cutoff_time, sync_time, departure_time, status in run_data:
             route = delivery_routes[(branch_code, route_code)]
+            service_date = today + timedelta(days=day_offset)
             departure_at = as_datetime(departure_time)
             ready_at = None
             documents_printed_at = None
@@ -436,10 +479,13 @@ class Command(BaseCommand):
                 ready_at = departure_at - timedelta(minutes=25)
                 documents_printed_at = departure_at - timedelta(minutes=15)
                 closed_at = departure_at - timedelta(minutes=5)
+            elif status == RouteRun.Status.READY_TO_CLOSE:
+                ready_at = departure_at - timedelta(minutes=25)
+                documents_printed_at = departure_at - timedelta(minutes=15)
 
             route_run, _ = RouteRun.objects.update_or_create(
                 route=route,
-                service_date=today,
+                service_date=service_date,
                 run_number=run_number,
                 defaults={
                     "order_cutoff_time": cutoff_time,
@@ -464,7 +510,7 @@ class Command(BaseCommand):
                 ("GDY", "ROUTE-01", 1),
                 [("FILTR-001", 1, "2"), ("OLEJ-001", 2, "5")],
             ),
-            ("AX-ORDER-0002", "GDY", "Demo Client Two", "BRAKE-PL", ("GDY", "ROUTE-01", 2), [("KLOCKI-001", 1, "1")]),
+            ("AX-ORDER-0002", "GDY", "Demo Client Two", "BRAKE-PL", ("GDY", "ROUTE-01", 1), [("KLOCKI-001", 1, "1")]),
             ("AX-ORDER-0003", "GDA", "Demo Client Three", "GDA-AUTO", ("GDA", "ROUTE-01", 1), [("FILTR-001", 1, "3")]),
             ("AX-ORDER-0004", "GDY", "Demo Client Four", "OIL-SHOP", ("GDY", "ROUTE-02", 1), [("OLEJ-001", 1, "2")]),
             ("AX-ORDER-0005", "GDA", "Demo Client Five", "GDA-FLEET", ("GDA", "ROUTE-02", 1), [("OLEJ-001", 1, "2")]),
@@ -476,6 +522,8 @@ class Command(BaseCommand):
                 ("GDY", "ROUTE-04", 1),
                 [("FILTR-001", 1, "3"), ("OLEJ-001", 2, "2")],
             ),
+            ("AX-ORDER-0006", "GDY", "Demo Client Six", "TARGET-TODAY", ("GDY", "ROUTE-01", 2), [("FILTR-001", 1, "1")]),
+            ("AX-ORDER-0007", "GDY", "Demo Client Seven", "TARGET-WEEK", ("GDY", "ROUTE-05", 1), [("OLEJ-001", 1, "1")]),
             (
                 "AX-SALE-RET-001",
                 "GDY",
@@ -607,6 +655,8 @@ class Command(BaseCommand):
             (("AX-ORDER-0005", 1), "GDA", "B-01-02", PickingTask.Status.OPEN),
             (("AX-ORDER-LABEL-TEST", 1), "GDY", "A-02-01", PickingTask.Status.OPEN),
             (("AX-ORDER-LABEL-TEST", 2), "GDY", "A-01-02", PickingTask.Status.OPEN),
+            (("AX-ORDER-0006", 1), "GDY", "A-01-01", PickingTask.Status.OPEN),
+            (("AX-ORDER-0007", 1), "GDY", "A-01-02", PickingTask.Status.OPEN),
         ]
 
         picking_tasks = {}
@@ -647,23 +697,37 @@ class Command(BaseCommand):
             (
                 "IBT-GDA-GDY-001",
                 "PAL-GDA-GDY-001",
+                InterBranchTransfer.Status.IN_TRANSIT,
+                TransferPallet.Status.IN_TRANSIT,
+                timezone.now(),
                 [("FILTR-001", "3"), ("OLEJ-001", "2")],
             ),
             (
                 "IBT-GDA-GDY-DISC-001",
                 "PAL-GDA-GDY-DISC-001",
+                InterBranchTransfer.Status.IN_TRANSIT,
+                TransferPallet.Status.IN_TRANSIT,
+                timezone.now(),
+                [("FILTR-001", "5"), ("OLEJ-001", "2")],
+            ),
+            (
+                "IBT-SHP-GDA-GDY-001",
+                "PAL-SHP-GDA-GDY-001",
+                InterBranchTransfer.Status.DRAFT,
+                TransferPallet.Status.IN_TRANSIT,
+                None,
                 [("FILTR-001", "5"), ("OLEJ-001", "2")],
             ),
         ]
         pallets = {}
-        for transfer_reference, pallet_code, manifest_data in pallet_specs:
+        for transfer_reference, pallet_code, transfer_status, pallet_status, released_at, manifest_data in pallet_specs:
             transfer, _ = InterBranchTransfer.objects.update_or_create(
                 reference=transfer_reference,
                 defaults={
                     "source_branch": branches["GDA"],
                     "destination_branch": branches["GDY"],
-                    "status": InterBranchTransfer.Status.IN_TRANSIT,
-                    "released_at": timezone.now(),
+                    "status": transfer_status,
+                    "released_at": released_at,
                     "completed_at": None,
                 },
             )
@@ -671,8 +735,8 @@ class Command(BaseCommand):
                 scan_code=pallet_code,
                 defaults={
                     "transfer": transfer,
-                    "status": TransferPallet.Status.IN_TRANSIT,
-                    "released_at": timezone.now(),
+                    "status": pallet_status,
+                    "released_at": released_at,
                     "receiving_started_at": None,
                     "received_at": None,
                 },
@@ -694,6 +758,221 @@ class Command(BaseCommand):
         )
 
         return pallets
+
+    def create_shipments(self, branches, orders, order_lines, route_runs, transfer_pallets):
+        now = timezone.now()
+        shipment_specs = [
+            {
+                "reference": "SHP-GDY-0001",
+                "order": "AX-ORDER-0001",
+                "branch": "GDY",
+                "route": ("GDY", "ROUTE-01", 1),
+                "shipment_type": Shipment.ShipmentType.CUSTOMER_DELIVERY,
+                "status": Shipment.Status.ACTIVE,
+                "document_status": Shipment.DocumentStatus.NOT_AVAILABLE,
+                "payment_method": "Account",
+                "delivery_name": "Demo Client One",
+                "external_notes": "Active customer shipment on an incomplete shared route.",
+            },
+            {
+                "reference": "SHP-GDY-0002",
+                "order": "AX-ORDER-0002",
+                "branch": "GDY",
+                "route": ("GDY", "ROUTE-01", 1),
+                "shipment_type": Shipment.ShipmentType.CUSTOMER_DELIVERY,
+                "status": Shipment.Status.PICKING,
+                "document_status": Shipment.DocumentStatus.NOT_AVAILABLE,
+                "payment_method": "Account",
+                "delivery_name": "Demo Client Two",
+                "external_notes": "Picking-in-progress shipment.",
+                "picked": True,
+            },
+            {
+                "reference": "SHP-GDY-0003",
+                "order": "AX-ORDER-0004",
+                "branch": "GDY",
+                "route": ("GDY", "ROUTE-02", 1),
+                "shipment_type": Shipment.ShipmentType.COURIER_DISPATCH,
+                "status": Shipment.Status.PREPARED,
+                "document_status": Shipment.DocumentStatus.PRINTED,
+                "payment_method": "Card",
+                "delivery_name": "Demo Client Four",
+                "external_notes": "Prepared shipment on a route ready to close.",
+                "prepared": True,
+            },
+            {
+                "reference": "SHP-GDY-0004",
+                "order": "AX-SALE-RET-001",
+                "branch": "GDY",
+                "route": ("GDY", "ROUTE-03", 1),
+                "shipment_type": Shipment.ShipmentType.CUSTOMER_DELIVERY,
+                "status": Shipment.Status.COMPLETED,
+                "document_status": Shipment.DocumentStatus.POSTED,
+                "payment_method": "Account",
+                "delivery_name": "Demo Return Customer One",
+                "external_notes": "Completed/dispatched historical shipment.",
+            },
+            {
+                "reference": "SHP-GDY-0005",
+                "order": "AX-SALE-RET-002",
+                "branch": "GDY",
+                "route": ("GDY", "ROUTE-03", 1),
+                "shipment_type": Shipment.ShipmentType.CUSTOMER_DELIVERY,
+                "status": Shipment.Status.CANCELLED,
+                "document_status": Shipment.DocumentStatus.NOT_AVAILABLE,
+                "payment_method": "Account",
+                "delivery_name": "Demo Return Customer Two",
+                "external_notes": "Cancelled demo shipment.",
+                "cancelled": True,
+            },
+            {
+                "reference": "SHP-GDA-GDY-0001",
+                "order": "AX-ORDER-0005",
+                "branch": "GDA",
+                "route": ("GDA", "ROUTE-02", 1),
+                "shipment_type": Shipment.ShipmentType.INTER_BRANCH,
+                "transfer_pallet": "PAL-SHP-GDA-GDY-001",
+                "status": Shipment.Status.PREPARED,
+                "document_status": Shipment.DocumentStatus.AVAILABLE,
+                "payment_method": "Inter-branch",
+                "delivery_name": "Magazyn Gdynia",
+                "external_notes": "Inter-branch shipment awaiting document posting.",
+                "prepared": True,
+            },
+            {
+                "reference": "SHP-GDA-GDY-0002",
+                "order": "AX-ORDER-0003",
+                "branch": "GDA",
+                "route": ("GDA", "ROUTE-01", 1),
+                "shipment_type": Shipment.ShipmentType.INTER_BRANCH,
+                "transfer_pallet": "PAL-GDA-GDY-001",
+                "status": Shipment.Status.DOCUMENTS_POSTED,
+                "document_status": Shipment.DocumentStatus.POSTED,
+                "payment_method": "Inter-branch",
+                "delivery_name": "Magazyn Gdynia",
+                "external_notes": "Inter-branch shipment with documents posted. Freight release is not implemented.",
+                "prepared": True,
+                "posted": True,
+            },
+            {
+                "reference": "SHP-GDY-0006",
+                "order": "AX-ORDER-LABEL-TEST",
+                "branch": "GDY",
+                "route": ("GDY", "ROUTE-04", 1),
+                "shipment_type": Shipment.ShipmentType.CUSTOMER_DELIVERY,
+                "status": Shipment.Status.ACTIVE,
+                "document_status": Shipment.DocumentStatus.NOT_AVAILABLE,
+                "payment_method": "Account",
+                "delivery_name": "Demo Client Label Test",
+                "external_notes": "Shipment that can be moved to another RouteRun.",
+            },
+            {
+                "reference": "SHP-GDY-0007",
+                "order": "AX-ORDER-0006",
+                "branch": "GDY",
+                "route": ("GDY", "ROUTE-01", 2),
+                "shipment_type": Shipment.ShipmentType.CUSTOMER_DELIVERY,
+                "status": Shipment.Status.ACTIVE,
+                "document_status": Shipment.DocumentStatus.NOT_AVAILABLE,
+                "payment_method": "Account",
+                "delivery_name": "Demo Client Six",
+                "external_notes": "Today's eligible route target shipment.",
+            },
+            {
+                "reference": "SHP-GDY-0008",
+                "order": "AX-ORDER-0007",
+                "branch": "GDY",
+                "route": ("GDY", "ROUTE-05", 1),
+                "shipment_type": Shipment.ShipmentType.CUSTOMER_DELIVERY,
+                "status": Shipment.Status.ACTIVE,
+                "document_status": Shipment.DocumentStatus.NOT_AVAILABLE,
+                "payment_method": "Account",
+                "delivery_name": "Demo Client Seven",
+                "external_notes": "Weekly eligible route target shipment.",
+            },
+        ]
+
+        shipments = {}
+        for spec in shipment_specs:
+            order = orders[spec["order"]]
+            transfer = None
+            if spec.get("transfer_pallet"):
+                transfer = transfer_pallets[spec["transfer_pallet"]].transfer
+            shipment, _ = Shipment.objects.update_or_create(
+                reference=spec["reference"],
+                defaults={
+                    "branch": branches[spec["branch"]],
+                    "order": order,
+                    "route_run": route_runs[spec["route"]],
+                    "inter_branch_transfer": transfer,
+                    "shipment_type": spec["shipment_type"],
+                    "status": spec["status"],
+                    "document_status": spec["document_status"],
+                    "source_system": "AX",
+                    "external_reference": f"AX-{spec['reference']}",
+                    "external_order_reference": order.external_reference,
+                    "external_status": "imported",
+                    "external_customer_account": order.customer_alias,
+                    "external_delivery_reference": f"DLV-{spec['reference']}",
+                    "external_notes": spec["external_notes"],
+                    "external_created_at": now - timedelta(hours=4),
+                    "external_updated_at": now - timedelta(hours=2),
+                    "customer_name": order.customer_name,
+                    "customer_alias": order.customer_alias,
+                    "recipient_account": order.customer_alias,
+                    "delivery_name": spec["delivery_name"],
+                    "delivery_address": "Demo delivery address",
+                    "delivery_date": order.requested_ship_date or timezone.localdate(),
+                    "payment_method": spec["payment_method"],
+                    "activated_at": now - timedelta(hours=3) if spec["status"] != Shipment.Status.PENDING_ACTIVATION else None,
+                    "picking_lists_posted_at": now - timedelta(hours=2) if spec["status"] not in [Shipment.Status.PENDING_ACTIVATION, Shipment.Status.CANCELLED] else None,
+                    "prepared_at": now - timedelta(minutes=30) if spec.get("prepared") else None,
+                    "cancelled_at": now - timedelta(minutes=45) if spec.get("cancelled") else None,
+                    "cancellation_reason": "Demo cancelled before dispatch." if spec.get("cancelled") else "",
+                    "documents_printed_at": now - timedelta(minutes=20) if spec["document_status"] in [Shipment.DocumentStatus.POSTED, Shipment.DocumentStatus.PRINTED] else None,
+                    "document_print_count": 1 if spec["document_status"] in [Shipment.DocumentStatus.POSTED, Shipment.DocumentStatus.PRINTED] else 0,
+                    "documents_posted_at": now - timedelta(minutes=10) if spec.get("posted") else None,
+                },
+            )
+            shipments[spec["reference"]] = shipment
+
+            order.route_run = route_runs[spec["route"]]
+            order.save(update_fields=["route_run", "updated_at"])
+
+            for line in order.lines.select_related("product"):
+                ShipmentLine.objects.update_or_create(
+                    shipment=shipment,
+                    line_number=line.line_number,
+                    defaults={
+                        "order_line": line,
+                        "product": line.product,
+                        "external_line_reference": f"{shipment.reference}-L{line.line_number:03d}",
+                        "ordered_quantity": line.quantity_ordered,
+                        "cancelled_quantity": line.quantity_ordered if spec.get("cancelled") else Decimal("0"),
+                        "delivery_date": shipment.delivery_date,
+                    },
+                )
+                tasks = PickingTask.objects.filter(order_line=line)
+                if spec.get("prepared"):
+                    tasks.update(
+                        status=PickingTask.Status.COMPLETED,
+                        quantity_to_pick=line.quantity_ordered,
+                        quantity_picked=line.quantity_ordered,
+                        quantity_prepared=line.quantity_ordered,
+                        shortage_quantity=Decimal("0"),
+                    )
+                elif spec.get("picked"):
+                    tasks.update(
+                        status=PickingTask.Status.PICKED,
+                        quantity_to_pick=line.quantity_ordered,
+                        quantity_picked=line.quantity_ordered,
+                        quantity_prepared=Decimal("0"),
+                        shortage_quantity=Decimal("0"),
+                    )
+                elif spec.get("cancelled"):
+                    tasks.update(status=PickingTask.Status.CANCELLED)
+
+        return shipments
 
     def create_stock_movements(self, branches, locations, products, inventory_items):
         movement_data = [

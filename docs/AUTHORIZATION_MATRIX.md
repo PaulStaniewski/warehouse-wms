@@ -50,6 +50,7 @@ Other operational routes inherit the authenticated default and then apply their 
 | Locations | Filtered by branch membership. Branch query parameters must match an allowed branch. | Location-changing commands validate the location branch server-side. |
 | Inventory items and location contents | Filtered by branch membership. | Stock-changing commands derive branch, product, and location from stored records and validate branch access. |
 | Orders, order lines, proformas, route runs | Filtered through owning branch or route branch. | Scanner and route commands validate route, order, task, and branch relationships. |
+| Shipments | Filtered by owning Shipment branch. Detail access through guessed IDs is constrained by the scoped queryset. Route Monitor aggregates assigned Shipments through the authoritative RouteRun relation. Route-change targets are server-filtered by branch, state, date scope, and current route exclusion. | Same-branch Workers and Leaders may activate, post picking lists, prepare, cancel eligible shipments, print/post supported documents, remove unpicked Shipment Line quantity, change eligible routes without providing a reason, close ready routes, and use controlled status changes. Post Documents is document-only and does not release freight or receiving visibility. Quantity removal is not a return and does not create inventory, StockMovement, Picking Shortage, or Sales Correction side effects. |
 | Stock movements | Filtered by movement branch. | Created by controlled workflow commands; client-provided before/after values are not authoritative. |
 | Stock adjustments | Branch-scoped register and detail. | Manual creation requires Leader in the target branch. Product and location must belong to that branch. |
 | External Return Documents | Filtered by document branch. Exact external-reference lookup does not leak another branch's document. | Same-branch Workers and Leaders may accept, reject, put on hold, and resolve on-hold quantities. The backend derives employee, branch, product, Returns Area, inventory before/after, and StockMovement. |
@@ -67,6 +68,7 @@ Other operational routes inherit the authenticated default and then apply their 
 | Area | Worker | Leader |
 | --- | --- | --- |
 | Dashboard, orders, inventory, products, locations, routes monitor, routes archive, event register | Read | Read |
+| Shipments | Read plus eligible command actions for same-branch operational shipments, including safe unpicked line-quantity removal | Same as Worker for the current command-center foundation |
 | Transport overview, transit, discrepancies, source reviews, reconciliations, replenishment, inventory exceptions, picking shortages | Read/allowed workflow visibility | Read plus eligible Leader actions where exposed |
 | Stock transfers | Read and workflow visibility according to branch involvement | Read and eligible branch actions |
 | Stock adjustments | Read; no manual create action | Read; manual create action |
@@ -100,6 +102,7 @@ Other operational routes inherit the authenticated default and then apply their 
 - `require_branch_access` is the standard branch membership check.
 - `leader_required=True` is used for Leader-only commands.
 - Returns and Sales Corrections intentionally do not use a Leader approval workflow. Worker and Leader authorization is identical for same-branch return/correction operations; accountability is recorded through authenticated employee attribution.
+- Shipments command actions derive actor and branch from authenticated backend state. The frontend command panel is convenience only; backend checks block wrong-branch shipments, target route substitution, destination-side document posting, line/shipment parent substitution, picked-quantity removal, final-state modification, and workflow-bypassing manual status changes.
 - `branch_codes_filter`, `branch_ids_filter`, `filter_branch_queryset`, and `filter_dual_branch_queryset` are used to constrain list/detail querysets.
 - Superusers are treated as Leaders across all branches by `membership_role`.
 - Staff users do not receive a bypass unless they are also superusers or have branch memberships.

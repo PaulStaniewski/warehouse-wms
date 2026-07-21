@@ -198,6 +198,282 @@ class OrderLine(TimestampedModel):
         return f"{self.order.external_reference} / {self.line_number}"
 
 
+class Shipment(TimestampedModel):
+    class Status(models.TextChoices):
+        PENDING_ACTIVATION = "pending_activation", "Pending activation"
+        ACTIVE = "active", "Active"
+        PICKING = "picking", "Picking"
+        PICKED = "picked", "Picked"
+        CONTROLLED = "controlled", "Controlled"
+        PREPARED = "prepared", "Prepared"
+        DOCUMENTS_POSTED = "documents_posted", "Documents posted"
+        READY_FOR_DISPATCH = "ready_for_dispatch", "Ready for dispatch"
+        DISPATCHED = "dispatched", "Dispatched"
+        COMPLETED = "completed", "Completed"
+        CANCELLED = "cancelled", "Cancelled"
+        EXCEPTION = "exception", "Exception"
+
+    class ShipmentType(models.TextChoices):
+        CUSTOMER_DELIVERY = "customer_delivery", "Customer delivery"
+        BRANCH_COLLECTION = "branch_collection", "Branch collection"
+        COURIER_DISPATCH = "courier_dispatch", "Courier dispatch"
+        INTER_BRANCH = "inter_branch", "Inter-branch transfer"
+
+    class DocumentStatus(models.TextChoices):
+        NOT_AVAILABLE = "not_available", "Not available"
+        AVAILABLE = "available", "Available"
+        PREVIEWED = "previewed", "Previewed"
+        PRINTED = "printed", "Printed"
+        POSTED = "posted", "Posted"
+        REQUIRES_REFRESH = "requires_refresh", "Requires refresh"
+
+    reference = models.CharField(max_length=128, unique=True)
+    branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="shipments")
+    order = models.OneToOneField(Order, on_delete=models.PROTECT, related_name="shipment")
+    route_run = models.ForeignKey(
+        RouteRun,
+        on_delete=models.PROTECT,
+        related_name="shipments",
+        blank=True,
+        null=True,
+    )
+    inter_branch_transfer = models.ForeignKey(
+        "InterBranchTransfer",
+        on_delete=models.PROTECT,
+        related_name="shipments",
+        blank=True,
+        null=True,
+    )
+    shipment_type = models.CharField(max_length=32, choices=ShipmentType.choices, default=ShipmentType.CUSTOMER_DELIVERY)
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.PENDING_ACTIVATION)
+    document_status = models.CharField(max_length=32, choices=DocumentStatus.choices, default=DocumentStatus.NOT_AVAILABLE)
+    source_system = models.CharField(max_length=64, default="AX")
+    external_reference = models.CharField(max_length=128)
+    external_order_reference = models.CharField(max_length=128, blank=True)
+    external_status = models.CharField(max_length=64, blank=True)
+    external_customer_account = models.CharField(max_length=128, blank=True)
+    external_delivery_reference = models.CharField(max_length=128, blank=True)
+    external_notes = models.TextField(blank=True)
+    external_created_at = models.DateTimeField(blank=True, null=True)
+    external_updated_at = models.DateTimeField(blank=True, null=True)
+    customer_name = models.CharField(max_length=255, blank=True)
+    customer_alias = models.CharField(max_length=128, blank=True)
+    recipient_account = models.CharField(max_length=128, blank=True)
+    delivery_name = models.CharField(max_length=255, blank=True)
+    delivery_address = models.TextField(blank=True)
+    delivery_date = models.DateField(blank=True, null=True)
+    payment_method = models.CharField(max_length=64, blank=True)
+    activated_at = models.DateTimeField(blank=True, null=True)
+    activated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="activated_shipments",
+        blank=True,
+        null=True,
+    )
+    picking_lists_posted_at = models.DateTimeField(blank=True, null=True)
+    picking_lists_posted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="posted_picking_list_shipments",
+        blank=True,
+        null=True,
+    )
+    prepared_at = models.DateTimeField(blank=True, null=True)
+    prepared_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="prepared_shipments",
+        blank=True,
+        null=True,
+    )
+    cancelled_at = models.DateTimeField(blank=True, null=True)
+    cancelled_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="cancelled_shipments",
+        blank=True,
+        null=True,
+    )
+    cancellation_reason = models.TextField(blank=True)
+    documents_printed_at = models.DateTimeField(blank=True, null=True)
+    documents_printed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="printed_shipment_documents",
+        blank=True,
+        null=True,
+    )
+    document_print_count = models.PositiveIntegerField(default=0)
+    documents_posted_at = models.DateTimeField(blank=True, null=True)
+    documents_posted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="posted_shipment_documents",
+        blank=True,
+        null=True,
+    )
+    picking_route_confirmed_at = models.DateTimeField(blank=True, null=True)
+    picking_route_confirmed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="confirmed_shipment_picking_routes",
+        blank=True,
+        null=True,
+    )
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["source_system", "external_reference"], name="unique_shipment_external_reference_per_source"),
+        ]
+        indexes = [
+            models.Index(fields=["branch", "status"]),
+            models.Index(fields=["branch", "delivery_date"]),
+            models.Index(fields=["route_run", "status"]),
+            models.Index(fields=["external_reference"]),
+            models.Index(fields=["customer_alias"]),
+            models.Index(fields=["document_status"]),
+        ]
+
+    def __str__(self) -> str:
+        return self.reference
+
+
+class ShipmentLine(TimestampedModel):
+    class ServiceStatus(models.TextChoices):
+        NOT_STARTED = "not_started", "Not started"
+        PICKING = "picking", "Picking"
+        PICKED = "picked", "Picked"
+        CONTROLLED = "controlled", "Controlled"
+        PREPARED = "prepared", "Prepared"
+        COMPLETED = "completed", "Completed"
+        SHORTAGE = "shortage", "Shortage"
+        CANCELLED = "cancelled", "Cancelled"
+
+    shipment = models.ForeignKey(Shipment, on_delete=models.CASCADE, related_name="lines")
+    order_line = models.OneToOneField(OrderLine, on_delete=models.PROTECT, related_name="shipment_line")
+    product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name="shipment_lines")
+    line_number = models.PositiveIntegerField()
+    external_line_reference = models.CharField(max_length=128, blank=True)
+    ordered_quantity = models.DecimalField(max_digits=12, decimal_places=3)
+    cancelled_quantity = models.DecimalField(max_digits=12, decimal_places=3, default=0)
+    delivery_date = models.DateField(blank=True, null=True)
+
+    class Meta:
+        ordering = ["shipment", "line_number"]
+        constraints = [
+            models.UniqueConstraint(fields=["shipment", "line_number"], name="unique_shipment_line_number"),
+            models.CheckConstraint(check=models.Q(ordered_quantity__gt=0), name="shipment_line_ordered_quantity_positive"),
+            models.CheckConstraint(check=models.Q(cancelled_quantity__gte=0), name="shipment_line_cancelled_non_negative"),
+        ]
+        indexes = [
+            models.Index(fields=["shipment"]),
+            models.Index(fields=["product"]),
+            models.Index(fields=["external_line_reference"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.shipment.reference} / {self.line_number}"
+
+
+class ShipmentLineQuantityAdjustment(TimestampedModel):
+    shipment = models.ForeignKey(Shipment, on_delete=models.CASCADE, related_name="line_quantity_adjustments")
+    shipment_line = models.ForeignKey(ShipmentLine, on_delete=models.CASCADE, related_name="quantity_adjustments")
+    quantity_removed = models.DecimalField(max_digits=12, decimal_places=3)
+    previous_effective_quantity = models.DecimalField(max_digits=12, decimal_places=3)
+    new_effective_quantity = models.DecimalField(max_digits=12, decimal_places=3)
+    adjusted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="shipment_line_quantity_adjustments",
+        blank=True,
+        null=True,
+    )
+    reason = models.TextField()
+    client_operation_id = models.CharField(max_length=128, unique=True, blank=True, null=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.CheckConstraint(check=models.Q(quantity_removed__gt=0), name="ship_line_adj_removed_positive"),
+            models.CheckConstraint(check=models.Q(previous_effective_quantity__gte=0), name="ship_line_adj_prev_non_negative"),
+            models.CheckConstraint(check=models.Q(new_effective_quantity__gte=0), name="ship_line_adj_new_non_negative"),
+        ]
+        indexes = [
+            models.Index(fields=["shipment", "created_at"], name="ship_line_adj_shipment_idx"),
+            models.Index(fields=["shipment_line", "created_at"], name="ship_line_adj_line_idx"),
+            models.Index(fields=["client_operation_id"], name="ship_line_adj_client_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.shipment.reference} / line {self.shipment_line.line_number} / -{self.quantity_removed}"
+
+
+class ShipmentRouteAssignment(TimestampedModel):
+    shipment = models.ForeignKey(Shipment, on_delete=models.CASCADE, related_name="route_assignments")
+    previous_route_run = models.ForeignKey(
+        RouteRun,
+        on_delete=models.PROTECT,
+        related_name="previous_shipment_assignments",
+        blank=True,
+        null=True,
+    )
+    new_route_run = models.ForeignKey(
+        RouteRun,
+        on_delete=models.PROTECT,
+        related_name="new_shipment_assignments",
+    )
+    changed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="shipment_route_assignments",
+        blank=True,
+        null=True,
+    )
+    reason = models.TextField(blank=True)
+    previous_route_snapshot = models.CharField(max_length=255, blank=True)
+    new_route_snapshot = models.CharField(max_length=255)
+    client_operation_id = models.CharField(max_length=128, unique=True, blank=True, null=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["shipment", "created_at"]),
+            models.Index(fields=["new_route_run"]),
+            models.Index(fields=["client_operation_id"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.shipment.reference} -> {self.new_route_snapshot}"
+
+
+class ShipmentStatusHistory(TimestampedModel):
+    shipment = models.ForeignKey(Shipment, on_delete=models.CASCADE, related_name="status_history")
+    previous_status = models.CharField(max_length=32, blank=True)
+    new_status = models.CharField(max_length=32)
+    changed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="shipment_status_changes",
+        blank=True,
+        null=True,
+    )
+    reason = models.TextField()
+    client_operation_id = models.CharField(max_length=128, unique=True, blank=True, null=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["shipment", "created_at"]),
+            models.Index(fields=["new_status"]),
+            models.Index(fields=["client_operation_id"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.shipment.reference}: {self.previous_status} -> {self.new_status}"
+
+
 class ReturnBatch(TimestampedModel):
     class Status(models.TextChoices):
         RECEIVED = "received", "Received"

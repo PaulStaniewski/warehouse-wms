@@ -527,6 +527,34 @@ def is_task_effectively_prepared(task: PickingTask) -> bool:
 
 
 def is_route_work_fully_prepared(route_run: RouteRun) -> bool:
+    from operations.models import Shipment
+
+    shipments = list(
+        Shipment.objects.filter(route_run=route_run)
+        .exclude(status=Shipment.Status.CANCELLED)
+        .prefetch_related("lines__order_line__picking_tasks__shortages")
+    )
+    if shipments:
+        for shipment in shipments:
+            if shipment.status not in {
+                Shipment.Status.PREPARED,
+                Shipment.Status.DOCUMENTS_POSTED,
+                Shipment.Status.READY_FOR_DISPATCH,
+                Shipment.Status.DISPATCHED,
+                Shipment.Status.COMPLETED,
+            }:
+                return False
+            for line in shipment.lines.all():
+                effective_quantity = line.ordered_quantity - line.cancelled_quantity
+                if effective_quantity <= 0:
+                    continue
+                tasks = list(line.order_line.picking_tasks.exclude(status=PickingTask.Status.CANCELLED))
+                if not tasks:
+                    return False
+                if not all(is_task_effectively_prepared(task) for task in tasks):
+                    return False
+        return True
+
     tasks = list(
         PickingTask.objects.prefetch_related("shortages")
         .filter(order_line__order__route_run=route_run)

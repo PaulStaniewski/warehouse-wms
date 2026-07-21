@@ -132,6 +132,156 @@ export type OrderLine = {
   source_location_name: string | null;
 };
 
+export type ShipmentCommandEligibility = {
+  enabled: boolean;
+  reason: string;
+};
+
+export type ShipmentLine = {
+  id: number;
+  shipment: number;
+  order_line: number;
+  line_number: number;
+  product: number;
+  product_sku: string;
+  product_name: string;
+  ordered_quantity: string;
+  original_ordered_quantity: string;
+  effective_quantity: string;
+  removed_quantity: string;
+  picked_quantity: string;
+  controlled_quantity: string;
+  prepared_quantity: string;
+  shortage_quantity: string;
+  maximum_removable_quantity: string;
+  can_remove_quantity: boolean;
+  remove_blocked_reason: string;
+  cancelled_quantity: string;
+  service_status: string;
+  source_location_code: string | null;
+  source_location_name: string | null;
+  delivery_date: string | null;
+  picking_pallet: string | null;
+  external_line_reference: string;
+  quantity_adjustments: ShipmentLineQuantityAdjustment[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type ShipmentLineQuantityAdjustment = {
+  id: number;
+  shipment: number;
+  shipment_line: number;
+  quantity_removed: string;
+  previous_effective_quantity: string;
+  new_effective_quantity: string;
+  adjusted_by: number | null;
+  adjusted_by_username: string | null;
+  reason: string;
+  created_at: string;
+};
+
+export type ShipmentRouteAssignment = {
+  id: number;
+  previous_route_run: number | null;
+  new_route_run: number;
+  previous_route_label: string;
+  new_route_label: string;
+  changed_by: number | null;
+  changed_by_username: string | null;
+  reason: string;
+  created_at: string;
+};
+
+export type ShipmentStatusHistory = {
+  id: number;
+  previous_status: string;
+  new_status: string;
+  changed_by: number | null;
+  changed_by_username: string | null;
+  reason: string;
+  created_at: string;
+};
+
+export type Shipment = {
+  id: number;
+  reference: string;
+  branch: number;
+  branch_code: string;
+  order: number;
+  order_reference: string;
+  route_run: number | null;
+  route_code: string | null;
+  route_name: string | null;
+  route_time: string | null;
+  cutoff_time: string | null;
+  route_status: string;
+  inter_branch_transfer: number | null;
+  transfer_reference: string | null;
+  destination_branch_code: string | null;
+  shipment_type: string;
+  status: string;
+  picking_status: string;
+  control_status: string;
+  document_status: string;
+  source_system: string;
+  external_reference: string;
+  external_order_reference: string;
+  external_status: string;
+  external_customer_account: string;
+  external_delivery_reference: string;
+  external_notes: string;
+  customer_name: string;
+  customer_alias: string;
+  recipient_account: string;
+  delivery_name: string;
+  delivery_address: string;
+  delivery_date: string | null;
+  payment_method: string;
+  line_count: number;
+  ordered_quantity: string;
+  picked_quantity: string;
+  prepared_quantity: string;
+  shortage_quantity: string;
+  progress_percent: number;
+  activated_at: string | null;
+  activated_by_username: string | null;
+  picking_lists_posted_at: string | null;
+  prepared_at: string | null;
+  prepared_by_username: string | null;
+  cancelled_at: string | null;
+  cancelled_by_username: string | null;
+  cancellation_reason: string;
+  documents_printed_at: string | null;
+  documents_printed_by_username: string | null;
+  document_print_count: number;
+  documents_posted_at: string | null;
+  documents_posted_by_username: string | null;
+  picking_route_confirmed_at: string | null;
+  external_created_at: string | null;
+  external_updated_at: string | null;
+  lines: ShipmentLine[];
+  route_assignments: ShipmentRouteAssignment[];
+  status_history: ShipmentStatusHistory[];
+  command_eligibility: Record<string, ShipmentCommandEligibility>;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ShipmentRouteTarget = {
+  id: number;
+  label: string;
+  operational_identifier: string;
+  branch_code: string;
+  route_code: string;
+  route_name: string;
+  service_date: string;
+  weekday: string;
+  departure_time: string;
+  status: string;
+  shipment_count: number;
+};
+
 export type PickingTask = {
   id: number;
   branch: number;

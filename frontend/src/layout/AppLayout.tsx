@@ -60,6 +60,7 @@ const wmsNavSections: NavSection[] = [
     label: "Operations",
     items: [
       { to: "/wms/discrepancy-actions", label: "Action Queue", icon: ListChecks },
+      { to: "/wms/shipments", label: "Shipments", icon: Truck },
       { to: "/wms/orders", label: "Orders", icon: ClipboardList },
       { to: "/wms/replenishment-requests", label: "Replenishment", icon: ArchiveRestore },
     ],
@@ -164,6 +165,7 @@ const wmsPageTitles: Array<[string, string]> = [
   ["/wms/replenishment-requests", "Replenishment Requests"],
   ["/wms/transit-investigations", "Transit Investigations"],
   ["/wms/discrepancy-actions", "Discrepancy Action Queue"],
+  ["/wms/shipments", "Shipments"],
   ["/wms/picking-shortages", "Picking Shortages"],
   ["/wms/route-runs", "Route Documents"],
   ["/wms/routes-monitor", "Route Monitor"],

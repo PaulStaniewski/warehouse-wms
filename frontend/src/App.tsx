@@ -90,6 +90,7 @@ const ScannerTasksPage = lazyNamed(() => import("./pages/ScannerTasksPage"), "Sc
 const SalesCorrectionDetailPage = lazyNamed(() => import("./pages/SalesCorrectionDetailPage"), "SalesCorrectionDetailPage");
 const SalesCorrectionNewPage = lazyNamed(() => import("./pages/SalesCorrectionNewPage"), "SalesCorrectionNewPage");
 const SalesCorrectionsPage = lazyNamed(() => import("./pages/SalesCorrectionsPage"), "SalesCorrectionsPage");
+const ShipmentsPage = lazyNamed(() => import("./pages/ShipmentsPage"), "ShipmentsPage");
 const SourceDiscrepancyReviewDetailPage = lazyNamed(
   () => import("./pages/SourceDiscrepancyReviewDetailPage"),
   "SourceDiscrepancyReviewDetailPage",
@@ -344,6 +345,8 @@ function App() {
             <Route path="wms/products" element={lazyRoute(<ProductsPage />)} />
             <Route path="wms/inventory" element={lazyRoute(<InventoryPage />)} />
             <Route path="wms/orders" element={lazyRoute(<OrdersPage />)} />
+            <Route path="wms/shipments" element={lazyRoute(<ShipmentsPage />)} />
+            <Route path="wms/shipments/:id" element={lazyRoute(<ShipmentsPage />)} />
             <Route path="wms/branches" element={lazyRoute(<BranchesPage />)} />
             <Route path="wms/branches/:id" element={lazyRoute(<BranchDetailPage />)} />
             <Route path="wms/locations" element={lazyRoute(<LocationsPage />)} />

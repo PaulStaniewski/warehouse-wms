@@ -59,6 +59,10 @@ from operations.models import (
     ScannerCustomerLabel,
     ScannerQuickTransferOperation,
     ScannerSession,
+    Shipment,
+    ShipmentLine,
+    ShipmentLineQuantityAdjustment,
+    ShipmentRouteAssignment,
     StockMovement,
     TransferDiscrepancy,
     TransferDiscrepancyItem,
@@ -323,6 +327,511 @@ class SalesCorrectionWorkflowTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["summary"]["completed_corrections"], 1)
         self.assertEqual(response.data["results"][0]["employee"], "COR_WORKER")
+
+
+class ShipmentCommandCenterTests(APITestCase):
+    def setUp(self):
+        self.branch = Branch.objects.create(code="SHP", name="Shipment Branch")
+        self.other_branch = Branch.objects.create(code="OTH", name="Other Shipment Branch")
+        self.destination_branch = Branch.objects.create(code="DST", name="Destination Branch")
+        self.worker = create_branch_user("SHP_WORKER", self.branch)
+        self.other_worker = create_branch_user("OTH_SHP_WORKER", self.other_branch)
+        self.destination_worker = create_branch_user("DST_WORKER", self.destination_branch)
+        self.product = Product.objects.create(sku="SHP-PROD", name="Shipment Product", barcode="777000000001")
+        self.location = Location.objects.create(branch=self.branch, code="A-01-01", name="A-01-01", location_type=Location.LocationType.STORAGE)
+        InventoryItem.objects.create(branch=self.branch, location=self.location, product=self.product, quantity_on_hand=Decimal("20"))
+        self.route = DeliveryRoute.objects.create(branch=self.branch, code="ROUTE-SHP", name="Shipment Route")
+        self.route_run = RouteRun.objects.create(
+            route=self.route,
+            service_date=timezone.localdate(),
+            run_number=1,
+            order_cutoff_time=time(8, 0),
+            sync_time=time(8, 30),
+            departure_time=time(10, 0),
+            status=RouteRun.Status.OPEN,
+        )
+        self.route_run_2 = RouteRun.objects.create(
+            route=self.route,
+            service_date=timezone.localdate() + timezone.timedelta(days=1),
+            run_number=1,
+            order_cutoff_time=time(8, 0),
+            sync_time=time(8, 30),
+            departure_time=time(11, 0),
+            status=RouteRun.Status.OPEN,
+        )
+        self.route_run_today_target = RouteRun.objects.create(
+            route=self.route,
+            service_date=timezone.localdate(),
+            run_number=2,
+            order_cutoff_time=time(9, 0),
+            sync_time=time(9, 30),
+            departure_time=time(12, 0),
+            status=RouteRun.Status.OPEN,
+        )
+        other_route = DeliveryRoute.objects.create(branch=self.other_branch, code="ROUTE-OTH", name="Other Route")
+        self.other_route_run = RouteRun.objects.create(
+            route=other_route,
+            service_date=timezone.localdate(),
+            run_number=1,
+            order_cutoff_time=time(8, 0),
+            sync_time=time(8, 30),
+            departure_time=time(10, 0),
+            status=RouteRun.Status.OPEN,
+        )
+        self.order = Order.objects.create(
+            branch=self.branch,
+            route_run=self.route_run,
+            external_reference="AX-SHP-001",
+            customer_name="Shipment Customer",
+            customer_alias="SHP-CUST",
+            status=Order.Status.IMPORTED,
+        )
+        self.order_line = OrderLine.objects.create(order=self.order, product=self.product, line_number=1, quantity_ordered=Decimal("3"))
+        self.shipment = Shipment.objects.create(
+            reference="SHP-TEST-001",
+            branch=self.branch,
+            order=self.order,
+            route_run=self.route_run,
+            source_system="AX",
+            external_reference="AX-SHP-EXT-001",
+            external_order_reference=self.order.external_reference,
+            customer_name=self.order.customer_name,
+            customer_alias=self.order.customer_alias,
+            delivery_date=timezone.localdate(),
+        )
+        ShipmentLine.objects.create(
+            shipment=self.shipment,
+            order_line=self.order_line,
+            product=self.product,
+            line_number=1,
+            ordered_quantity=self.order_line.quantity_ordered,
+            external_line_reference="AX-SHP-EXT-001-L1",
+        )
+
+    def login(self, user=None):
+        self.client.force_authenticate(user=user or self.worker)
+
+    def test_anonymous_shipments_are_denied(self):
+        response = self.client.get("/api/shipments/")
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_shipment_list_is_branch_scoped(self):
+        other_order = Order.objects.create(branch=self.other_branch, external_reference="AX-OTH-SHP", status=Order.Status.IMPORTED)
+        other_line = OrderLine.objects.create(order=other_order, product=self.product, line_number=1, quantity_ordered=Decimal("1"))
+        other_shipment = Shipment.objects.create(
+            reference="SHP-OTH-001",
+            branch=self.other_branch,
+            order=other_order,
+            source_system="AX",
+            external_reference="AX-OTH-SHP-EXT",
+        )
+        ShipmentLine.objects.create(shipment=other_shipment, order_line=other_line, product=self.product, line_number=1, ordered_quantity=Decimal("1"))
+        self.login()
+        response = self.client.get("/api/shipments/", {"branch": "SHP"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        references = {row["reference"] for row in response.data["results"]}
+        self.assertIn("SHP-TEST-001", references)
+        self.assertNotIn("SHP-OTH-001", references)
+
+    def test_shipment_detail_loads_by_actual_id_and_enforces_branch_scope(self):
+        self.login()
+        response = self.client.get(f"/api/shipments/{self.shipment.id}/", {"branch": "SHP"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["id"], self.shipment.id)
+        self.assertEqual(response.data["reference"], self.shipment.reference)
+
+        missing = self.client.get("/api/shipments/999999/", {"branch": "SHP"})
+        self.assertEqual(missing.status_code, status.HTTP_404_NOT_FOUND)
+
+        other_order = Order.objects.create(branch=self.other_branch, external_reference="AX-OTH-SHP-DETAIL", status=Order.Status.IMPORTED)
+        other_line = OrderLine.objects.create(order=other_order, product=self.product, line_number=1, quantity_ordered=Decimal("1"))
+        other_shipment = Shipment.objects.create(
+            reference="SHP-OTH-DETAIL",
+            branch=self.other_branch,
+            order=other_order,
+            source_system="AX",
+            external_reference="AX-OTH-SHP-DETAIL-EXT",
+        )
+        ShipmentLine.objects.create(shipment=other_shipment, order_line=other_line, product=self.product, line_number=1, ordered_quantity=Decimal("1"))
+
+        forbidden = self.client.get(f"/api/shipments/{other_shipment.id}/", {"branch": "OTH"})
+        self.assertEqual(forbidden.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_activation_records_actor_and_event(self):
+        self.login()
+        response = self.client.post(f"/api/shipments/{self.shipment.id}/activate/", {"client_operation_id": str(uuid.uuid4())}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.shipment.refresh_from_db()
+        self.assertEqual(self.shipment.status, Shipment.Status.ACTIVE)
+        self.assertEqual(self.shipment.activated_by, self.worker)
+        self.assertTrue(AuditLog.objects.filter(event_type="shipment_activated", reference=self.shipment.reference).exists())
+        replay = self.client.post(f"/api/shipments/{self.shipment.id}/activate/", {"client_operation_id": str(uuid.uuid4())}, format="json")
+        self.assertEqual(replay.status_code, status.HTTP_200_OK)
+
+    def test_post_picking_lists_creates_no_duplicate_tasks(self):
+        self.login()
+        self.shipment.status = Shipment.Status.ACTIVE
+        self.shipment.save(update_fields=["status", "updated_at"])
+        first = self.client.post(f"/api/shipments/{self.shipment.id}/post-picking-lists/", {"client_operation_id": str(uuid.uuid4())}, format="json")
+        second = self.client.post(f"/api/shipments/{self.shipment.id}/post-picking-lists/", {"client_operation_id": str(uuid.uuid4())}, format="json")
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(PickingTask.objects.filter(order_line=self.order_line).count(), 1)
+
+    def test_prepare_blocks_until_control_complete_then_succeeds(self):
+        self.login()
+        self.shipment.status = Shipment.Status.ACTIVE
+        self.shipment.save(update_fields=["status", "updated_at"])
+        self.client.post(f"/api/shipments/{self.shipment.id}/post-picking-lists/", {}, format="json")
+        blocked = self.client.post(f"/api/shipments/{self.shipment.id}/prepare/", {}, format="json")
+        self.assertEqual(blocked.status_code, status.HTTP_400_BAD_REQUEST)
+        task = PickingTask.objects.get(order_line=self.order_line)
+        task.quantity_picked = task.quantity_to_pick
+        task.quantity_prepared = task.quantity_to_pick
+        task.status = PickingTask.Status.COMPLETED
+        task.save(update_fields=["quantity_picked", "quantity_prepared", "status", "updated_at"])
+        prepared = self.client.post(f"/api/shipments/{self.shipment.id}/prepare/", {}, format="json")
+        self.assertEqual(prepared.status_code, status.HTTP_200_OK)
+        self.shipment.refresh_from_db()
+        self.assertEqual(self.shipment.status, Shipment.Status.PREPARED)
+
+    def test_cancel_requires_reason_and_preserves_history(self):
+        self.login()
+        self.shipment.status = Shipment.Status.ACTIVE
+        self.shipment.save(update_fields=["status", "updated_at"])
+        missing_reason = self.client.post(f"/api/shipments/{self.shipment.id}/cancel/", {"reason": ""}, format="json")
+        self.assertEqual(missing_reason.status_code, status.HTTP_400_BAD_REQUEST)
+        cancelled = self.client.post(f"/api/shipments/{self.shipment.id}/cancel/", {"reason": "Customer cancelled."}, format="json")
+        self.assertEqual(cancelled.status_code, status.HTTP_200_OK)
+        self.shipment.refresh_from_db()
+        self.assertEqual(self.shipment.status, Shipment.Status.CANCELLED)
+        self.assertEqual(self.shipment.cancellation_reason, "Customer cancelled.")
+
+    def test_post_documents_is_document_only_without_pallet_or_receiving_release(self):
+        transfer = InterBranchTransfer.objects.create(
+            reference="IBT-SHP-TEST",
+            source_branch=self.branch,
+            destination_branch=self.destination_branch,
+            status=InterBranchTransfer.Status.DRAFT,
+        )
+        pallet = TransferPallet.objects.create(transfer=transfer, scan_code="PAL-SHP-TEST", status=TransferPallet.Status.IN_TRANSIT)
+        self.shipment.shipment_type = Shipment.ShipmentType.INTER_BRANCH
+        self.shipment.inter_branch_transfer = transfer
+        self.shipment.status = Shipment.Status.PREPARED
+        self.shipment.document_status = Shipment.DocumentStatus.AVAILABLE
+        self.shipment.save(update_fields=["shipment_type", "inter_branch_transfer", "status", "document_status", "updated_at"])
+        self.client.force_authenticate(user=self.destination_worker)
+        forbidden = self.client.post(f"/api/shipments/{self.shipment.id}/post-documents/", {}, format="json")
+        self.assertEqual(forbidden.status_code, status.HTTP_404_NOT_FOUND)
+        self.login()
+        response = self.client.post(f"/api/shipments/{self.shipment.id}/post-documents/", {}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        transfer.refresh_from_db()
+        pallet.refresh_from_db()
+        self.shipment.refresh_from_db()
+        self.assertEqual(self.shipment.document_status, Shipment.DocumentStatus.POSTED)
+        self.assertEqual(transfer.status, InterBranchTransfer.Status.DRAFT)
+        self.assertEqual(pallet.status, TransferPallet.Status.IN_TRANSIT)
+        self.assertIsNone(pallet.released_at)
+        self.client.force_authenticate(user=self.destination_worker)
+        arrival = self.client.post("/api/scanner/inter-branch-arrivals/", {"pallet_code": "PAL-SHP-TEST"}, format="json")
+        self.assertNotEqual(arrival.status_code, status.HTTP_200_OK)
+
+    def test_change_route_records_history_and_rejects_wrong_branch(self):
+        self.login()
+        self.shipment.status = Shipment.Status.ACTIVE
+        self.shipment.save(update_fields=["status", "updated_at"])
+        wrong_branch = self.client.post(
+            f"/api/shipments/{self.shipment.id}/change-route/",
+            {"route_run": self.other_route_run.id},
+            format="json",
+        )
+        self.assertEqual(wrong_branch.status_code, status.HTTP_403_FORBIDDEN)
+        response = self.client.post(
+            f"/api/shipments/{self.shipment.id}/change-route/",
+            {"route_run": self.route_run_2.id, "client_operation_id": str(uuid.uuid4())},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.shipment.refresh_from_db()
+        self.order.refresh_from_db()
+        self.assertEqual(self.shipment.route_run, self.route_run_2)
+        self.assertEqual(self.order.route_run, self.route_run_2)
+        self.assertEqual(ShipmentRouteAssignment.objects.filter(shipment=self.shipment).count(), 1)
+        self.assertEqual(ShipmentRouteAssignment.objects.get(shipment=self.shipment).reason, "")
+
+    def test_route_targets_support_today_default_and_weekly_search(self):
+        self.login()
+        today = self.client.get(
+            "/api/shipments/route-targets/",
+            {"branch": "SHP", "exclude_route_run": self.route_run.id, "operational_date": timezone.localdate().isoformat()},
+        )
+        self.assertEqual(today.status_code, status.HTTP_200_OK)
+        today_ids = {row["id"] for row in today.data["results"]}
+        self.assertIn(self.route_run_today_target.id, today_ids)
+        self.assertNotIn(self.route_run_2.id, today_ids)
+
+        week = self.client.get(
+            "/api/shipments/route-targets/",
+            {
+                "branch": "SHP",
+                "exclude_route_run": self.route_run.id,
+                "operational_date": timezone.localdate().isoformat(),
+                "scope": "week",
+                "search": "ROUTE-SHP",
+            },
+        )
+        self.assertEqual(week.status_code, status.HTTP_200_OK)
+        week_ids = {row["id"] for row in week.data["results"]}
+        self.assertIn(self.route_run_today_target.id, week_ids)
+        self.assertIn(self.route_run_2.id, week_ids)
+        target = next(row for row in week.data["results"] if row["id"] == self.route_run_2.id)
+        self.assertEqual(target["operational_identifier"], "ROUTE-SHP")
+        self.assertTrue(target["weekday"])
+
+    def test_controlled_status_change_requires_allowed_transition(self):
+        self.login()
+        blocked = self.client.post(
+            f"/api/shipments/{self.shipment.id}/change-status/",
+            {"status": Shipment.Status.COMPLETED, "reason": "Bypass attempt."},
+            format="json",
+        )
+        self.assertEqual(blocked.status_code, status.HTTP_400_BAD_REQUEST)
+        allowed = self.client.post(
+            f"/api/shipments/{self.shipment.id}/change-status/",
+            {"status": Shipment.Status.ACTIVE, "reason": "Manual activation."},
+            format="json",
+        )
+        self.assertEqual(allowed.status_code, status.HTTP_200_OK)
+
+    def test_route_monitor_aggregates_assigned_shipments_and_change_route_updates_totals(self):
+        self.login()
+        self.shipment.status = Shipment.Status.ACTIVE
+        self.shipment.save(update_fields=["status", "updated_at"])
+        self.client.post(f"/api/shipments/{self.shipment.id}/post-picking-lists/", {}, format="json")
+        before = self.client.get("/api/route-runs/", {"branch_code": "SHP"})
+        source_row = next(row for row in before.data["results"] if row["id"] == self.route_run.id)
+        target_row = next(row for row in before.data["results"] if row["id"] == self.route_run_2.id)
+        self.assertEqual(source_row["order_lines_count"], 1)
+        self.assertEqual(target_row["order_lines_count"], 0)
+
+        response = self.client.post(
+            f"/api/shipments/{self.shipment.id}/change-route/",
+            {"route_run": self.route_run_2.id, "client_operation_id": str(uuid.uuid4())},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        after = self.client.get("/api/route-runs/", {"branch_code": "SHP"})
+        source_row = next(row for row in after.data["results"] if row["id"] == self.route_run.id)
+        target_row = next(row for row in after.data["results"] if row["id"] == self.route_run_2.id)
+        self.assertEqual(source_row["order_lines_count"], 0)
+        self.assertEqual(target_row["order_lines_count"], 1)
+        self.assertEqual(Shipment.objects.filter(reference=self.shipment.reference).count(), 1)
+
+    def test_close_route_requires_all_shipments_on_route_ready(self):
+        second_order = Order.objects.create(branch=self.branch, route_run=self.route_run, external_reference="AX-SHP-002", status=Order.Status.IMPORTED)
+        second_line = OrderLine.objects.create(order=second_order, product=self.product, line_number=1, quantity_ordered=Decimal("1"))
+        second_shipment = Shipment.objects.create(
+            reference="SHP-TEST-002",
+            branch=self.branch,
+            order=second_order,
+            route_run=self.route_run,
+            source_system="AX",
+            external_reference="AX-SHP-EXT-002",
+            status=Shipment.Status.ACTIVE,
+        )
+        ShipmentLine.objects.create(shipment=second_shipment, order_line=second_line, product=self.product, line_number=1, ordered_quantity=Decimal("1"))
+        task = PickingTask.objects.create(
+            branch=self.branch,
+            order_line=self.order_line,
+            source_location=self.location,
+            status=PickingTask.Status.COMPLETED,
+            quantity_to_pick=Decimal("3"),
+            quantity_picked=Decimal("3"),
+            quantity_prepared=Decimal("3"),
+        )
+        self.shipment.status = Shipment.Status.PREPARED
+        self.shipment.save(update_fields=["status", "updated_at"])
+        self.route_run.status = RouteRun.Status.READY_TO_CLOSE
+        self.route_run.documents_printed_at = timezone.now()
+        self.route_run.save(update_fields=["status", "documents_printed_at", "updated_at"])
+        self.login()
+        blocked = self.client.post(f"/api/shipments/{self.shipment.id}/close-route/", {}, format="json")
+        self.assertEqual(blocked.status_code, status.HTTP_400_BAD_REQUEST)
+        second_task = PickingTask.objects.create(
+            branch=self.branch,
+            order_line=second_line,
+            source_location=self.location,
+            status=PickingTask.Status.COMPLETED,
+            quantity_to_pick=Decimal("1"),
+            quantity_picked=Decimal("1"),
+            quantity_prepared=Decimal("1"),
+        )
+        second_shipment.status = Shipment.Status.PREPARED
+        second_shipment.save(update_fields=["status", "updated_at"])
+        allowed = self.client.post(f"/api/shipments/{self.shipment.id}/close-route/", {}, format="json")
+        self.assertEqual(allowed.status_code, status.HTTP_200_OK)
+        self.route_run.refresh_from_db()
+        second_shipment.refresh_from_db()
+        self.assertEqual(self.route_run.status, RouteRun.Status.CLOSED)
+        self.assertEqual(second_shipment.status, Shipment.Status.COMPLETED)
+        self.assertEqual(task.quantity_prepared, Decimal("3"))
+        self.assertEqual(second_task.quantity_prepared, Decimal("1"))
+
+    def test_remove_line_quantity_preserves_original_and_updates_effective_quantity(self):
+        self.login()
+        self.shipment.status = Shipment.Status.ACTIVE
+        self.shipment.save(update_fields=["status", "updated_at"])
+        line = self.shipment.lines.get()
+        response = self.client.post(
+            f"/api/shipments/{self.shipment.id}/lines/{line.id}/remove-quantity/",
+            {"quantity": "1", "reason": "Customer requested fewer units.", "client_operation_id": str(uuid.uuid4())},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        line.refresh_from_db()
+        self.assertEqual(line.ordered_quantity, Decimal("3"))
+        self.assertEqual(line.cancelled_quantity, Decimal("1"))
+        self.assertEqual(ShipmentLineQuantityAdjustment.objects.filter(shipment_line=line).count(), 1)
+        serialized_line = response.data["shipment"]["lines"][0]
+        self.assertEqual(serialized_line["original_ordered_quantity"], "3.000")
+        self.assertEqual(serialized_line["effective_quantity"], "2.000")
+        self.assertEqual(serialized_line["removed_quantity"], "1.000")
+
+    def test_remove_line_quantity_allows_final_unpicked_unit_without_inventory_or_return_effects(self):
+        self.login()
+        self.shipment.status = Shipment.Status.ACTIVE
+        self.shipment.save(update_fields=["status", "updated_at"])
+        line = self.shipment.lines.get()
+        task = PickingTask.objects.create(
+            branch=self.branch,
+            order_line=self.order_line,
+            source_location=self.location,
+            status=PickingTask.Status.OPEN,
+            quantity_to_pick=Decimal("3"),
+            quantity_picked=Decimal("0"),
+            quantity_prepared=Decimal("0"),
+        )
+        inventory_before = InventoryItem.objects.get(branch=self.branch, location=self.location, product=self.product).quantity_on_hand
+        stock_movements_before = StockMovement.objects.count()
+        returns_before = ReturnAction.objects.count()
+        corrections_before = SalesCorrection.objects.count()
+        shortages_before = PickingShortage.objects.count()
+        operation_id = str(uuid.uuid4())
+
+        response = self.client.post(
+            f"/api/shipments/{self.shipment.id}/lines/{line.id}/remove-quantity/",
+            {"quantity": "3", "reason": "Customer removed remaining units.", "client_operation_id": operation_id},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        line.refresh_from_db()
+        task.refresh_from_db()
+        inventory_after = InventoryItem.objects.get(branch=self.branch, location=self.location, product=self.product).quantity_on_hand
+        self.assertEqual(line.ordered_quantity, Decimal("3"))
+        self.assertEqual(line.cancelled_quantity, Decimal("3"))
+        self.assertEqual(task.quantity_to_pick, Decimal("3"))
+        self.assertEqual(task.status, PickingTask.Status.CANCELLED)
+        self.assertEqual(response.data["shipment"]["lines"][0]["effective_quantity"], "0.000")
+        self.assertEqual(response.data["shipment"]["lines"][0]["service_status"], ShipmentLine.ServiceStatus.CANCELLED)
+        self.assertEqual(inventory_after, inventory_before)
+        self.assertEqual(StockMovement.objects.count(), stock_movements_before)
+        self.assertEqual(ReturnAction.objects.count(), returns_before)
+        self.assertEqual(SalesCorrection.objects.count(), corrections_before)
+        self.assertEqual(PickingShortage.objects.count(), shortages_before)
+        self.assertTrue(AuditLog.objects.filter(event_type="shipment_line_quantity_removed", reference=self.shipment.reference).exists())
+
+        route_response = self.client.get("/api/route-runs/", {"branch_code": "SHP"})
+        source_row = next(row for row in route_response.data["results"] if row["id"] == self.route_run.id)
+        self.assertEqual(source_row["order_lines_count"], 0)
+
+        replay = self.client.post(
+            f"/api/shipments/{self.shipment.id}/lines/{line.id}/remove-quantity/",
+            {"quantity": "3", "reason": "Replay.", "client_operation_id": operation_id},
+            format="json",
+        )
+        self.assertEqual(replay.status_code, status.HTTP_200_OK)
+        self.assertEqual(ShipmentLineQuantityAdjustment.objects.filter(shipment_line=line).count(), 1)
+
+        conflict = self.client.post(
+            f"/api/shipments/{self.shipment.id}/lines/{line.id}/remove-quantity/",
+            {"quantity": "1", "reason": "Conflicting replay.", "client_operation_id": operation_id},
+            format="json",
+        )
+        self.assertEqual(conflict.status_code, status.HTTP_400_BAD_REQUEST)
+
+        zero_effective = self.client.post(
+            f"/api/shipments/{self.shipment.id}/lines/{line.id}/remove-quantity/",
+            {"quantity": "0.001", "reason": "No quantity remains.", "client_operation_id": str(uuid.uuid4())},
+            format="json",
+        )
+        self.assertEqual(zero_effective.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_remove_line_quantity_cannot_remove_picked_quantity_or_wrong_parent(self):
+        self.login()
+        self.shipment.status = Shipment.Status.ACTIVE
+        self.shipment.save(update_fields=["status", "updated_at"])
+        line = self.shipment.lines.get()
+        PickingTask.objects.create(
+            branch=self.branch,
+            order_line=self.order_line,
+            source_location=self.location,
+            status=PickingTask.Status.PICKED,
+            quantity_to_pick=Decimal("3"),
+            quantity_picked=Decimal("2"),
+            quantity_prepared=Decimal("0"),
+        )
+        blocked = self.client.post(
+            f"/api/shipments/{self.shipment.id}/lines/{line.id}/remove-quantity/",
+            {"quantity": "2", "reason": "Too much."},
+            format="json",
+        )
+        self.assertEqual(blocked.status_code, status.HTTP_400_BAD_REQUEST)
+        other_order = Order.objects.create(branch=self.branch, external_reference="AX-SHP-003", status=Order.Status.IMPORTED)
+        other_line = OrderLine.objects.create(order=other_order, product=self.product, line_number=1, quantity_ordered=Decimal("1"))
+        other_shipment = Shipment.objects.create(reference="SHP-TEST-003", branch=self.branch, order=other_order, external_reference="AX-SHP-EXT-003")
+        other_shipment_line = ShipmentLine.objects.create(
+            shipment=other_shipment,
+            order_line=other_line,
+            product=self.product,
+            line_number=1,
+            ordered_quantity=Decimal("1"),
+        )
+        mismatch = self.client.post(
+            f"/api/shipments/{self.shipment.id}/lines/{other_shipment_line.id}/remove-quantity/",
+            {"quantity": "1", "reason": "Mismatch."},
+            format="json",
+        )
+        self.assertEqual(mismatch.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_trusted_localhost_origin_can_post_shipment_action_but_untrusted_origin_is_rejected(self):
+        csrf_client = APIClient(enforce_csrf_checks=True)
+        csrf_client.login(username=self.worker.username, password="demo12345")
+        session_response = csrf_client.get("/api/auth/session/")
+        token = csrf_client.cookies["csrftoken"].value
+        trusted = csrf_client.post(
+            f"/api/shipments/{self.shipment.id}/activate/",
+            {"client_operation_id": str(uuid.uuid4())},
+            format="json",
+            HTTP_ORIGIN="http://localhost:3000",
+            HTTP_X_CSRFTOKEN=token,
+        )
+        self.assertEqual(session_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(trusted.status_code, status.HTTP_200_OK)
+
+        other_order = Order.objects.create(branch=self.branch, external_reference="AX-SHP-004", status=Order.Status.IMPORTED)
+        other_line = OrderLine.objects.create(order=other_order, product=self.product, line_number=1, quantity_ordered=Decimal("1"))
+        other_shipment = Shipment.objects.create(reference="SHP-TEST-004", branch=self.branch, order=other_order, external_reference="AX-SHP-EXT-004")
+        ShipmentLine.objects.create(shipment=other_shipment, order_line=other_line, product=self.product, line_number=1, ordered_quantity=Decimal("1"))
+        untrusted = csrf_client.post(
+            f"/api/shipments/{other_shipment.id}/activate/",
+            {"client_operation_id": str(uuid.uuid4())},
+            format="json",
+            HTTP_ORIGIN="http://evil.example",
+            HTTP_X_CSRFTOKEN=token,
+        )
+        self.assertEqual(untrusted.status_code, status.HTTP_403_FORBIDDEN)
 
 
 class BranchMembershipAuthorizationTests(APITestCase):

@@ -1,6 +1,7 @@
 import re
 from decimal import Decimal
 
+from django.db import models
 from django.utils import timezone
 from rest_framework import serializers
 
@@ -26,7 +27,13 @@ from operations.models import (
     RouteRun,
     SalesCorrection,
     SalesCorrectionLine,
+    Shipment,
+    ShipmentLine,
+    ShipmentLineQuantityAdjustment,
+    ShipmentRouteAssignment,
+    ShipmentStatusHistory,
     StockMovement,
+    TransferPallet,
     TransferDiscrepancy,
     TransferDiscrepancyItem,
     TransferDiscrepancyManualReconciliationDecision,
@@ -37,6 +44,14 @@ from operations.models import (
     TransferDiscrepancySourceStockVerification,
     TransferDiscrepancySourceReview,
     TransferDiscrepancyTransitInvestigation,
+)
+from operations.shipment_services import (
+    derive_shipment_line_status,
+    derive_shipment_operational_statuses,
+    shipment_line_effective_quantity,
+    shipment_line_max_removable_quantity,
+    shipment_line_task_totals,
+    shipment_picking_totals,
 )
 from operations.services import (
     discrepancy_line_remaining,
@@ -72,11 +87,11 @@ class RouteRunSerializer(serializers.ModelSerializer):
     route_name = serializers.CharField(source="route.name", read_only=True)
     branch = serializers.IntegerField(source="route.branch_id", read_only=True)
     branch_code = serializers.CharField(source="route.branch.code", read_only=True)
-    orders_count = serializers.IntegerField(read_only=True)
-    order_lines_count = serializers.IntegerField(read_only=True)
-    picked_lines_count = serializers.IntegerField(read_only=True)
-    pending_lines_count = serializers.IntegerField(read_only=True)
-    has_pending_work = serializers.BooleanField(read_only=True)
+    orders_count = serializers.SerializerMethodField()
+    order_lines_count = serializers.SerializerMethodField()
+    picked_lines_count = serializers.SerializerMethodField()
+    pending_lines_count = serializers.SerializerMethodField()
+    has_pending_work = serializers.SerializerMethodField()
     is_urgent = serializers.BooleanField(read_only=True)
     is_selectable = serializers.BooleanField(read_only=True)
     total_picking_tasks = serializers.SerializerMethodField()
@@ -90,15 +105,62 @@ class RouteRunSerializer(serializers.ModelSerializer):
     is_late = serializers.SerializerMethodField()
     close_result = serializers.SerializerMethodField()
 
+    def _get_shipments(self, obj: RouteRun):
+        cache_name = "_monitor_shipments"
+        if not hasattr(obj, cache_name):
+            setattr(obj, cache_name, list(obj.shipments.exclude(status=Shipment.Status.CANCELLED).prefetch_related("lines__order_line__picking_tasks")))
+        return getattr(obj, cache_name)
+
+    def _get_shipment_lines(self, obj: RouteRun):
+        shipments = self._get_shipments(obj)
+        return [line for shipment in shipments for line in shipment.lines.all()]
+
     def _get_picking_tasks(self, obj: RouteRun):
         cache_name = "_monitor_picking_tasks"
         if not hasattr(obj, cache_name):
             setattr(
                 obj,
                 cache_name,
-                list(PickingTask.objects.filter(order_line__order__route_run=obj)),
+                list(
+                    PickingTask.objects.filter(
+                        models.Q(order_line__shipment_line__shipment__route_run=obj)
+                        | models.Q(order_line__order__route_run=obj, order_line__shipment_line__isnull=True)
+                    )
+                    .exclude(status=PickingTask.Status.CANCELLED)
+                    .exclude(order_line__shipment_line__shipment__status=Shipment.Status.CANCELLED)
+                    .distinct()
+                ),
             )
         return getattr(obj, cache_name)
+
+    def get_orders_count(self, obj: RouteRun) -> int:
+        shipments = self._get_shipments(obj)
+        if shipments:
+            return len({shipment.order_id for shipment in shipments})
+        return obj.orders.count()
+
+    def get_order_lines_count(self, obj: RouteRun) -> int:
+        shipment_lines = self._get_shipment_lines(obj)
+        if shipment_lines:
+            return sum(1 for line in shipment_lines if shipment_line_effective_quantity(line) > 0)
+        return OrderLine.objects.filter(order__route_run=obj).count()
+
+    def get_picked_lines_count(self, obj: RouteRun) -> int:
+        shipment_lines = self._get_shipment_lines(obj)
+        if shipment_lines:
+            count = 0
+            for line in shipment_lines:
+                effective_quantity = shipment_line_effective_quantity(line)
+                if effective_quantity > 0 and shipment_line_task_totals(line)["picked"] >= effective_quantity:
+                    count += 1
+            return count
+        return OrderLine.objects.filter(order__route_run=obj, quantity_picked__gte=models.F("quantity_ordered")).count()
+
+    def get_pending_lines_count(self, obj: RouteRun) -> int:
+        return max(self.get_order_lines_count(obj) - self.get_picked_lines_count(obj), 0)
+
+    def get_has_pending_work(self, obj: RouteRun) -> bool:
+        return self.get_pending_lines_count(obj) > 0
 
     def get_total_picking_tasks(self, obj: RouteRun) -> int:
         return len(self._get_picking_tasks(obj))
@@ -563,6 +625,389 @@ class CorrectionActivityReportSerializer(serializers.Serializer):
     returns_location_code = serializers.CharField(allow_blank=True)
     stock_movement = serializers.IntegerField(allow_null=True)
     summary = serializers.DictField()
+
+
+class ShipmentRouteAssignmentSerializer(serializers.ModelSerializer):
+    changed_by_username = serializers.CharField(source="changed_by.username", read_only=True)
+    previous_route_label = serializers.SerializerMethodField()
+    new_route_label = serializers.SerializerMethodField()
+
+    def get_previous_route_label(self, obj: ShipmentRouteAssignment) -> str:
+        return obj.previous_route_snapshot
+
+    def get_new_route_label(self, obj: ShipmentRouteAssignment) -> str:
+        return obj.new_route_snapshot
+
+    class Meta:
+        model = ShipmentRouteAssignment
+        fields = [
+            "id",
+            "previous_route_run",
+            "new_route_run",
+            "previous_route_label",
+            "new_route_label",
+            "changed_by",
+            "changed_by_username",
+            "reason",
+            "created_at",
+        ]
+
+
+class ShipmentStatusHistorySerializer(serializers.ModelSerializer):
+    changed_by_username = serializers.CharField(source="changed_by.username", read_only=True)
+
+    class Meta:
+        model = ShipmentStatusHistory
+        fields = [
+            "id",
+            "previous_status",
+            "new_status",
+            "changed_by",
+            "changed_by_username",
+            "reason",
+            "created_at",
+        ]
+
+
+class ShipmentLineQuantityAdjustmentSerializer(serializers.ModelSerializer):
+    adjusted_by_username = serializers.CharField(source="adjusted_by.username", read_only=True)
+
+    class Meta:
+        model = ShipmentLineQuantityAdjustment
+        fields = [
+            "id",
+            "shipment",
+            "shipment_line",
+            "quantity_removed",
+            "previous_effective_quantity",
+            "new_effective_quantity",
+            "adjusted_by",
+            "adjusted_by_username",
+            "reason",
+            "created_at",
+        ]
+
+
+class ShipmentLineSerializer(serializers.ModelSerializer):
+    product_sku = serializers.CharField(source="product.sku", read_only=True)
+    product_name = serializers.CharField(source="product.name", read_only=True)
+    original_ordered_quantity = serializers.SerializerMethodField()
+    effective_quantity = serializers.SerializerMethodField()
+    removed_quantity = serializers.SerializerMethodField()
+    picked_quantity = serializers.SerializerMethodField()
+    controlled_quantity = serializers.SerializerMethodField()
+    prepared_quantity = serializers.SerializerMethodField()
+    shortage_quantity = serializers.SerializerMethodField()
+    maximum_removable_quantity = serializers.SerializerMethodField()
+    can_remove_quantity = serializers.SerializerMethodField()
+    remove_blocked_reason = serializers.SerializerMethodField()
+    service_status = serializers.SerializerMethodField()
+    source_location_code = serializers.SerializerMethodField()
+    source_location_name = serializers.SerializerMethodField()
+    picking_pallet = serializers.SerializerMethodField()
+    quantity_adjustments = ShipmentLineQuantityAdjustmentSerializer(many=True, read_only=True)
+
+    def _tasks(self, obj: ShipmentLine):
+        cache_name = "_shipment_line_tasks"
+        if not hasattr(obj, cache_name):
+            setattr(obj, cache_name, list(obj.order_line.picking_tasks.select_related("source_location").all()))
+        return getattr(obj, cache_name)
+
+    def get_picked_quantity(self, obj: ShipmentLine) -> str:
+        return str(sum((task.quantity_picked for task in self._tasks(obj)), Decimal("0")))
+
+    def get_original_ordered_quantity(self, obj: ShipmentLine) -> str:
+        return str(obj.ordered_quantity)
+
+    def get_effective_quantity(self, obj: ShipmentLine) -> str:
+        return str(shipment_line_effective_quantity(obj))
+
+    def get_removed_quantity(self, obj: ShipmentLine) -> str:
+        return str(obj.cancelled_quantity)
+
+    def get_controlled_quantity(self, obj: ShipmentLine) -> str:
+        return str(sum((task.quantity_prepared for task in self._tasks(obj)), Decimal("0")))
+
+    def get_prepared_quantity(self, obj: ShipmentLine) -> str:
+        return str(sum((task.quantity_prepared for task in self._tasks(obj)), Decimal("0")))
+
+    def get_shortage_quantity(self, obj: ShipmentLine) -> str:
+        return str(sum((task.shortage_quantity for task in self._tasks(obj)), Decimal("0")))
+
+    def get_maximum_removable_quantity(self, obj: ShipmentLine) -> str:
+        return str(shipment_line_max_removable_quantity(obj))
+
+    def get_can_remove_quantity(self, obj: ShipmentLine) -> bool:
+        return shipment_line_max_removable_quantity(obj) > 0 and obj.shipment.status not in {
+            Shipment.Status.DOCUMENTS_POSTED,
+            Shipment.Status.DISPATCHED,
+            Shipment.Status.COMPLETED,
+            Shipment.Status.CANCELLED,
+        }
+
+    def get_remove_blocked_reason(self, obj: ShipmentLine) -> str:
+        if obj.shipment.status in {
+            Shipment.Status.DOCUMENTS_POSTED,
+            Shipment.Status.DISPATCHED,
+            Shipment.Status.COMPLETED,
+            Shipment.Status.CANCELLED,
+        }:
+            return "Shipment is no longer eligible for quantity removal."
+        if shipment_line_max_removable_quantity(obj) <= 0:
+            return "No unpicked quantity remains removable."
+        return ""
+
+    def get_service_status(self, obj: ShipmentLine) -> str:
+        return derive_shipment_line_status(obj)
+
+    def get_source_location_code(self, obj: ShipmentLine) -> str | None:
+        task = next(iter(self._tasks(obj)), None)
+        return task.source_location.code if task else None
+
+    def get_source_location_name(self, obj: ShipmentLine) -> str | None:
+        task = next(iter(self._tasks(obj)), None)
+        return task.source_location.name if task else None
+
+    def get_picking_pallet(self, obj: ShipmentLine) -> str | None:
+        return None
+
+    class Meta:
+        model = ShipmentLine
+        fields = [
+            "id",
+            "shipment",
+            "order_line",
+            "line_number",
+            "product",
+            "product_sku",
+            "product_name",
+            "ordered_quantity",
+            "original_ordered_quantity",
+            "effective_quantity",
+            "removed_quantity",
+            "picked_quantity",
+            "controlled_quantity",
+            "prepared_quantity",
+            "shortage_quantity",
+            "maximum_removable_quantity",
+            "can_remove_quantity",
+            "remove_blocked_reason",
+            "cancelled_quantity",
+            "service_status",
+            "source_location_code",
+            "source_location_name",
+            "delivery_date",
+            "picking_pallet",
+            "external_line_reference",
+            "quantity_adjustments",
+            "created_at",
+            "updated_at",
+        ]
+
+
+class ShipmentSerializer(serializers.ModelSerializer):
+    branch_code = serializers.CharField(source="branch.code", read_only=True)
+    order_reference = serializers.CharField(source="order.external_reference", read_only=True)
+    route_code = serializers.CharField(source="route_run.route.code", read_only=True, allow_null=True)
+    route_name = serializers.CharField(source="route_run.route.name", read_only=True, allow_null=True)
+    route_time = serializers.TimeField(source="route_run.departure_time", read_only=True, allow_null=True)
+    cutoff_time = serializers.TimeField(source="route_run.order_cutoff_time", read_only=True, allow_null=True)
+    route_status = serializers.SerializerMethodField()
+    picking_status = serializers.SerializerMethodField()
+    control_status = serializers.SerializerMethodField()
+    line_count = serializers.SerializerMethodField()
+    ordered_quantity = serializers.SerializerMethodField()
+    picked_quantity = serializers.SerializerMethodField()
+    prepared_quantity = serializers.SerializerMethodField()
+    shortage_quantity = serializers.SerializerMethodField()
+    progress_percent = serializers.SerializerMethodField()
+    transfer_reference = serializers.CharField(source="inter_branch_transfer.reference", read_only=True, allow_null=True)
+    destination_branch_code = serializers.CharField(source="inter_branch_transfer.destination_branch.code", read_only=True, allow_null=True)
+    activated_by_username = serializers.CharField(source="activated_by.username", read_only=True)
+    prepared_by_username = serializers.CharField(source="prepared_by.username", read_only=True)
+    cancelled_by_username = serializers.CharField(source="cancelled_by.username", read_only=True)
+    documents_printed_by_username = serializers.CharField(source="documents_printed_by.username", read_only=True)
+    documents_posted_by_username = serializers.CharField(source="documents_posted_by.username", read_only=True)
+    lines = ShipmentLineSerializer(many=True, read_only=True)
+    route_assignments = ShipmentRouteAssignmentSerializer(many=True, read_only=True)
+    status_history = ShipmentStatusHistorySerializer(many=True, read_only=True)
+    command_eligibility = serializers.SerializerMethodField()
+
+    def _statuses(self, obj: Shipment) -> dict:
+        cache_name = "_shipment_statuses"
+        if not hasattr(obj, cache_name):
+            setattr(obj, cache_name, derive_shipment_operational_statuses(obj))
+        return getattr(obj, cache_name)
+
+    def _totals(self, obj: Shipment) -> dict[str, Decimal]:
+        cache_name = "_shipment_totals"
+        if not hasattr(obj, cache_name):
+            setattr(obj, cache_name, shipment_picking_totals(obj))
+        return getattr(obj, cache_name)
+
+    def get_route_status(self, obj: Shipment) -> str:
+        return self._statuses(obj)["route_status"]
+
+    def get_picking_status(self, obj: Shipment) -> str:
+        return self._statuses(obj)["picking_status"]
+
+    def get_control_status(self, obj: Shipment) -> str:
+        return self._statuses(obj)["control_status"]
+
+    def get_line_count(self, obj: Shipment) -> int:
+        return obj.lines.count()
+
+    def get_ordered_quantity(self, obj: Shipment) -> str:
+        return str(sum((shipment_line_effective_quantity(line) for line in obj.lines.all()), Decimal("0")))
+
+    def get_picked_quantity(self, obj: Shipment) -> str:
+        return str(self._totals(obj)["quantity_picked"])
+
+    def get_prepared_quantity(self, obj: Shipment) -> str:
+        return str(self._totals(obj)["quantity_prepared"])
+
+    def get_shortage_quantity(self, obj: Shipment) -> str:
+        return str(self._totals(obj)["shortage_quantity"])
+
+    def get_progress_percent(self, obj: Shipment) -> float:
+        totals = self._totals(obj)
+        required = totals["quantity_to_pick"] - totals["shortage_quantity"]
+        if required <= 0:
+            return 0
+        return round(float((totals["quantity_picked"] / required) * 100), 1)
+
+    def _eligibility(self, enabled: bool, reason: str = "") -> dict:
+        return {"enabled": enabled, "reason": reason}
+
+    def get_command_eligibility(self, obj: Shipment) -> dict:
+        statuses = self._statuses(obj)
+        terminal = obj.status in {
+            Shipment.Status.DISPATCHED,
+            Shipment.Status.COMPLETED,
+            Shipment.Status.CANCELLED,
+        }
+        return {
+            "activate": self._eligibility(
+                obj.status == Shipment.Status.PENDING_ACTIVATION,
+                "" if obj.status == Shipment.Status.PENDING_ACTIVATION else "Only pending shipments can be activated.",
+            ),
+            "post_picking_lists": self._eligibility(
+                obj.status in [Shipment.Status.ACTIVE, Shipment.Status.PICKING],
+                "" if obj.status in [Shipment.Status.ACTIVE, Shipment.Status.PICKING] else "Shipment must be active.",
+            ),
+            "prepare": self._eligibility(
+                statuses["picking_status"] == "completed" and statuses["control_status"] == "completed" and not terminal,
+                "Picking and control must be completed first.",
+            ),
+            "cancel": self._eligibility(
+                obj.status not in [Shipment.Status.DISPATCHED, Shipment.Status.COMPLETED, Shipment.Status.CANCELLED]
+                and obj.documents_posted_at is None
+                and not (obj.route_run and obj.route_run.status == RouteRun.Status.CLOSED),
+                "Shipment is no longer safely cancellable.",
+            ),
+            "print_documents": self._eligibility(
+                obj.document_status != Shipment.DocumentStatus.NOT_AVAILABLE and obj.status != Shipment.Status.CANCELLED,
+                "Documents are not available.",
+            ),
+            "post_documents": self._eligibility(
+                obj.shipment_type == Shipment.ShipmentType.INTER_BRANCH
+                and obj.status == Shipment.Status.PREPARED
+                and obj.documents_posted_at is None,
+                "Inter-branch shipment must be prepared and not already document-posted.",
+            ),
+            "confirm_picking_route": self._eligibility(
+                obj.route_run is not None and not terminal,
+                "Shipment must have an open route.",
+            ),
+            "close_route": self._eligibility(
+                obj.route_run is not None and obj.route_run.status == RouteRun.Status.READY_TO_CLOSE,
+                "Route must be ready to close.",
+            ),
+            "change_route": self._eligibility(
+                obj.route_run is not None and not terminal and obj.documents_posted_at is None,
+                "Route can be changed before terminal dispatch or posted documents.",
+            ),
+            "change_status": self._eligibility(
+                obj.status
+                in [
+                    Shipment.Status.PENDING_ACTIVATION,
+                    Shipment.Status.ACTIVE,
+                    Shipment.Status.PICKING,
+                    Shipment.Status.PICKED,
+                    Shipment.Status.CONTROLLED,
+                    Shipment.Status.EXCEPTION,
+                ],
+                "No manual transition is available.",
+            ),
+            "proforma": self._eligibility(bool(obj.order_id), "No source order is available."),
+        }
+
+    class Meta:
+        model = Shipment
+        fields = [
+            "id",
+            "reference",
+            "branch",
+            "branch_code",
+            "order",
+            "order_reference",
+            "route_run",
+            "route_code",
+            "route_name",
+            "route_time",
+            "cutoff_time",
+            "route_status",
+            "inter_branch_transfer",
+            "transfer_reference",
+            "destination_branch_code",
+            "shipment_type",
+            "status",
+            "picking_status",
+            "control_status",
+            "document_status",
+            "source_system",
+            "external_reference",
+            "external_order_reference",
+            "external_status",
+            "external_customer_account",
+            "external_delivery_reference",
+            "external_notes",
+            "customer_name",
+            "customer_alias",
+            "recipient_account",
+            "delivery_name",
+            "delivery_address",
+            "delivery_date",
+            "payment_method",
+            "line_count",
+            "ordered_quantity",
+            "picked_quantity",
+            "prepared_quantity",
+            "shortage_quantity",
+            "progress_percent",
+            "activated_at",
+            "activated_by_username",
+            "picking_lists_posted_at",
+            "prepared_at",
+            "prepared_by_username",
+            "cancelled_at",
+            "cancelled_by_username",
+            "cancellation_reason",
+            "documents_printed_at",
+            "documents_printed_by_username",
+            "document_print_count",
+            "documents_posted_at",
+            "documents_posted_by_username",
+            "picking_route_confirmed_at",
+            "external_created_at",
+            "external_updated_at",
+            "lines",
+            "route_assignments",
+            "status_history",
+            "command_eligibility",
+            "created_at",
+            "updated_at",
+        ]
 
 
 class PickingTaskSerializer(serializers.ModelSerializer):

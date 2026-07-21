@@ -1,4 +1,4 @@
-import { useMutation, useQueries, useQuery } from "@tanstack/react-query";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import axios from "axios";
 
 import { apiClient, getHealth, getList } from "./client";
@@ -46,6 +46,8 @@ import type {
   ScannerTaskStartResponse,
   SalesCorrection,
   SalesHistoryCandidate,
+  Shipment,
+  ShipmentRouteTarget,
   StockMovement,
   TransportOverview,
   TransferDiscrepancy,
@@ -441,6 +443,214 @@ export function useOrders(branch?: string) {
   return useQuery({
     queryKey: ["orders", branch],
     queryFn: () => getList<Order>(`/orders/${branch ? `?branch=${branch}` : ""}`),
+  });
+}
+
+export type ShipmentListFilters = {
+  branch?: string;
+  customer?: string;
+  deliveryDate?: string;
+  externalReference?: string;
+  ordering?: string;
+  page?: number;
+  paymentMethod?: string;
+  pickingStatus?: string;
+  route?: string;
+  search?: string;
+  shipmentStatus?: string;
+};
+
+function shipmentFilterParams(filters: ShipmentListFilters = {}) {
+  const params = new URLSearchParams();
+  if (filters.branch) params.set("branch", filters.branch);
+  if (filters.search) params.set("search", filters.search);
+  if (filters.shipmentStatus) params.set("shipment_status", filters.shipmentStatus);
+  if (filters.pickingStatus) params.set("picking_status", filters.pickingStatus);
+  if (filters.route) params.set("route", filters.route);
+  if (filters.deliveryDate) params.set("delivery_date", filters.deliveryDate);
+  if (filters.customer) params.set("customer", filters.customer);
+  if (filters.paymentMethod) params.set("payment_method", filters.paymentMethod);
+  if (filters.externalReference) params.set("external_reference", filters.externalReference);
+  if (filters.ordering) params.set("ordering", filters.ordering);
+  if (filters.page && filters.page > 1) params.set("page", String(filters.page));
+  return params;
+}
+
+export function useShipments(filters: ShipmentListFilters = {}) {
+  return useQuery({
+    enabled: Boolean(filters.branch),
+    queryKey: ["shipments", filters],
+    queryFn: () => getList<Shipment>(`/shipments/?${shipmentFilterParams(filters).toString()}`),
+  });
+}
+
+export function useShipment(shipmentId?: string | number | null, branch?: string) {
+  return useQuery({
+    enabled: Boolean(shipmentId),
+    queryKey: ["shipment", shipmentId, branch],
+    queryFn: async () => {
+      const params = new URLSearchParams();
+      if (branch) params.set("branch", branch);
+      const suffix = params.toString() ? `?${params.toString()}` : "";
+      const response = await apiClient.get<Shipment>(`/shipments/${shipmentId}/${suffix}`);
+      return response.data;
+    },
+  });
+}
+
+export function useShipmentRouteTargets({
+  branch,
+  currentRouteRun,
+  operationalDate,
+  scope = "today",
+  search = "",
+}: {
+  branch?: string;
+  currentRouteRun?: number | null;
+  operationalDate?: string | null;
+  scope?: "today" | "week";
+  search?: string;
+}) {
+  return useQuery({
+    enabled: Boolean(branch),
+    queryKey: ["shipment-route-targets", branch, currentRouteRun, operationalDate, scope, search],
+    queryFn: async () => {
+      const params = new URLSearchParams();
+      if (branch) params.set("branch", branch);
+      if (currentRouteRun) params.set("exclude_route_run", String(currentRouteRun));
+      if (operationalDate) params.set("operational_date", operationalDate);
+      if (scope) params.set("scope", scope);
+      if (search) params.set("search", search);
+      const response = await apiClient.get<{ results: ShipmentRouteTarget[] }>(`/shipments/route-targets/?${params.toString()}`);
+      return response.data;
+    },
+  });
+}
+
+type ShipmentCommandPayload = {
+  id: number;
+  action: string;
+  payload?: Record<string, unknown>;
+};
+
+function useShipmentCommand() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ action, id, payload = {} }: ShipmentCommandPayload) => {
+      const response = await apiClient.post<{ message: string; shipment: Shipment }>(`/shipments/${id}/${action}/`, payload);
+      return response.data;
+    },
+    onSuccess: (data) => {
+      void queryClient.invalidateQueries({ queryKey: ["shipments"] });
+      void queryClient.invalidateQueries({ queryKey: ["shipment", data.shipment.id] });
+      void queryClient.invalidateQueries({ queryKey: ["route-runs"] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard-count"] });
+      void queryClient.invalidateQueries({ queryKey: ["audit-logs"] });
+      void queryClient.invalidateQueries({ queryKey: ["transport-overview"] });
+      void queryClient.invalidateQueries({ queryKey: ["picking-tasks"] });
+      void queryClient.invalidateQueries({ queryKey: ["scanner-inter-branch-arrivals"] });
+    },
+  });
+}
+
+export function useActivateShipment() {
+  const mutation = useShipmentCommand();
+  return { ...mutation, mutateAsync: (id: number) => mutation.mutateAsync({ id, action: "activate", payload: { client_operation_id: crypto.randomUUID() } }) };
+}
+
+export function usePostShipmentPickingLists() {
+  const mutation = useShipmentCommand();
+  return { ...mutation, mutateAsync: (id: number) => mutation.mutateAsync({ id, action: "post-picking-lists", payload: { client_operation_id: crypto.randomUUID() } }) };
+}
+
+export function usePrepareShipment() {
+  const mutation = useShipmentCommand();
+  return { ...mutation, mutateAsync: (id: number) => mutation.mutateAsync({ id, action: "prepare" }) };
+}
+
+export function useCancelShipment() {
+  const mutation = useShipmentCommand();
+  return { ...mutation, mutateAsync: (id: number, reason: string) => mutation.mutateAsync({ id, action: "cancel", payload: { reason } }) };
+}
+
+export function usePrintShipmentDocuments() {
+  const mutation = useShipmentCommand();
+  return { ...mutation, mutateAsync: (id: number) => mutation.mutateAsync({ id, action: "print-documents", payload: { printer: "WMS-DEMO" } }) };
+}
+
+export function usePostShipmentDocuments() {
+  const mutation = useShipmentCommand();
+  return { ...mutation, mutateAsync: (id: number) => mutation.mutateAsync({ id, action: "post-documents" }) };
+}
+
+export function useConfirmShipmentPickingRoute() {
+  const mutation = useShipmentCommand();
+  return { ...mutation, mutateAsync: (id: number) => mutation.mutateAsync({ id, action: "confirm-picking-route" }) };
+}
+
+export function usePrintShipmentProforma() {
+  const mutation = useShipmentCommand();
+  return { ...mutation, mutateAsync: (id: number) => mutation.mutateAsync({ id, action: "print-proforma" }) };
+}
+
+export function useCloseShipmentRoute() {
+  const mutation = useShipmentCommand();
+  return { ...mutation, mutateAsync: (id: number) => mutation.mutateAsync({ id, action: "close-route" }) };
+}
+
+export function useChangeShipmentRoute() {
+  const mutation = useShipmentCommand();
+  return {
+    ...mutation,
+    mutateAsync: (id: number, routeRun: number) =>
+      mutation.mutateAsync({
+        id,
+        action: "change-route",
+        payload: { route_run: routeRun, client_operation_id: crypto.randomUUID() },
+      }),
+  };
+}
+
+export function useChangeShipmentStatus() {
+  const mutation = useShipmentCommand();
+  return {
+    ...mutation,
+    mutateAsync: (id: number, nextStatus: string, reason: string) =>
+      mutation.mutateAsync({
+        id,
+        action: "change-status",
+        payload: { status: nextStatus, reason, client_operation_id: crypto.randomUUID() },
+      }),
+  };
+}
+
+export function useRemoveShipmentLineQuantity() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      id,
+      lineId,
+      quantity,
+      reason,
+    }: {
+      id: number;
+      lineId: number;
+      quantity: string;
+      reason: string;
+    }) => {
+      const response = await apiClient.post<{ message: string; shipment: Shipment; line_id: number; adjustment_id: number }>(
+        `/shipments/${id}/lines/${lineId}/remove-quantity/`,
+        { quantity, reason, client_operation_id: crypto.randomUUID() },
+      );
+      return response.data;
+    },
+    onSuccess: (data) => {
+      void queryClient.invalidateQueries({ queryKey: ["shipments"] });
+      void queryClient.invalidateQueries({ queryKey: ["shipment", data.shipment.id] });
+      void queryClient.invalidateQueries({ queryKey: ["route-runs"] });
+      void queryClient.invalidateQueries({ queryKey: ["picking-tasks"] });
+      void queryClient.invalidateQueries({ queryKey: ["audit-logs"] });
+    },
   });
 }
 

@@ -112,6 +112,11 @@ Useful demo references:
 - External Return Document: `ZW1103872`
 - Returns Area location: `RETURNS`
 - Completed sales for Sales Corrections: `AX-SALE-RET-001`, `AX-SALE-RET-002`
+- Shipments Command Center: `SHP-GDY-0001`, `SHP-GDY-0002`, `SHP-GDY-0003`, `SHP-GDY-0006`, `SHP-GDY-0007`, `SHP-GDY-0008`, `SHP-GDA-GDY-0001`, `SHP-GDA-GDY-0002`
+- Inter-branch shipment awaiting document-only posting: `SHP-GDA-GDY-0001`
+- Route Monitor and Shipments share the same RouteRun demo data. `SHP-GDY-0001` and `SHP-GDY-0002` are assigned to one incomplete route; `SHP-GDY-0003` is on a route ready to close; `SHP-GDY-0006` can be moved to today's `SHP-GDY-0007` route or the weekly `SHP-GDY-0008` route.
+- Change Route defaults to today's eligible routes and can expand to the current operational week. Route changes do not require a reason.
+- Shipment line quantity removal can be tested on active/unpicked demo shipments. Removed unpicked quantity is not a return: it creates history only, does not mutate inventory, does not create a StockMovement, and does not create a Sales Correction. Picked or controlled quantities are intentionally blocked from silent removal. Removing the final unpicked unit leaves a zero-effective historical line and cancels inactive picking work.
 
 Create Django migrations:
 
