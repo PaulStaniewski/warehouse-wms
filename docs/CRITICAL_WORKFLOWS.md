@@ -33,7 +33,8 @@ The project still uses the existing monolithic operations test module. No test p
 | Picking shortage and Control | Branch Worker, Control Worker, Branch Leader, unrelated branch Worker | Partial picking, shortage challenge/report, replenishment request creation, picked-goods control, Leader-only shortage follow-up rejection for Worker, duplicate shortage replay, branch isolation | Picking Shortages, Inventory Exceptions, Route Run detail, Current Events |
 | External Return Documents | Branch Worker, Branch Leader, unrelated branch Worker | Exact external-reference lookup, partial accept/reject/on-hold actions, on-hold resolution, idempotent action replay, branch isolation | Return document detail, Returns Area inventory, Stock Movements, Current Events |
 | Sales Corrections | Branch Worker, Branch Leader, unrelated branch Worker | Completed-sales search, correction draft creation, line add/update/remove, confirmation, idempotent confirmation replay, over-correction guard, branch isolation | Sales Correction detail, Correction Activity Report, Returns Area inventory, Stock Movements, Current Events |
-| Shipments Command Center | Branch Worker, destination branch Worker, unrelated branch Worker | Shipment list/detail, activation, picking-work posting, preparation guard, cancellation, document-only posting, route change, route aggregation, line quantity removal, controlled status change, branch isolation | Shipment detail, Route assignments, Route Monitor, line adjustment history, Current Events |
+| Shipments Command Center | Branch Worker, destination branch Worker, unrelated branch Worker | Shipment list/detail, activation, picking-work posting, preparation guard, cancellation, document-only posting, route change, scheduled-slot assignment, route aggregation, line quantity removal, controlled status change, branch isolation | Shipment detail, Route assignments, Route Monitor, line adjustment history, Current Events |
+| Dynamic Route Rounds | Branch Worker, Branch Leader | Demand-created RouteRuns, recurring route schedules, cutoff/departure snapshots, dispatch-wave capacity and minimum-gap validation, scheduled-slot Change Route targets, one-off timing overrides | Route Schedule Editor, Route Monitor active workload buckets, Shipments route target picker |
 
 ## Authorization Coverage
 
@@ -119,6 +120,15 @@ Exact replay returns the original completed StockMovement response with `replaye
 
 The backend checks for an existing operation inside the transaction, locks inventory rows in deterministic order, rechecks the operation after locks, creates the unique operation record before mutation, updates inventory once, creates one StockMovement and one AuditLog, and links the completed operation to the movement. This is protected by `CriticalQuickTransferConcurrencyTests`.
 
+## Dynamic Route Rounds
+
+`CriticalDynamicRouteRoundIntegrationTests` protects the scheduling contract behind Shipments and Route Monitor. Recurring `RouteRoundSchedule` rows describe weekday route slots; assigning a Shipment to a schedule slot creates the `RouteRun` only when demand exists. The created run stores cutoff, planned departure, dispatch wave, and operational identifier snapshots, so later schedule edits preserve historical executions.
+
+The assignment rules use the shipment creation/request time against the schedule cutoff. A shipment at or before cutoff can use the current round. Later work rolls to the next eligible round, or to the next operational day when no later round remains. Closed, cancelled, dispatched, and current runs are not eligible route-change targets.
+
+Branch dispatch policy validation rejects more active routes than the configured maximum per wave and rejects departure gaps smaller than the configured minimum between different waves. Leaders can edit schedules and dispatch policy in `/wms/route-schedules`; Workers can read the schedule surface but cannot mutate it. RouteRun one-off timing overrides are Leader-only and recorded in `RouteRunOverrideHistory`.
+
+Route Monitor and Shipments share the same data: active monitor rows are non-empty active RouteRuns with active Shipment workload. Empty future runs are omitted from the active board. Line buckets are derived from effective ShipmentLine quantity and PickingTask progress, so removed zero-effective lines no longer inflate route workload.
 ## Existing Specialized Coverage
 
 ## Returns And Sales Corrections

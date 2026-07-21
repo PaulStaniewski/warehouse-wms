@@ -52,6 +52,8 @@ from operations.models import (
     PickingTaskReallocation,
     ReplenishmentRequest,
     ReturnAction,
+    BranchDispatchPolicy,
+    RouteRoundSchedule,
     RouteRun,
     SalesCorrection,
     SalesCorrectionLine,
@@ -79,6 +81,8 @@ from operations.models import (
     TransferPalletArrival,
     TransferPalletItem,
 )
+from operations.route_services import assign_shipment_to_route_run, aware_datetime, create_route_run_from_schedule, override_route_run, validate_dispatch_schedule
+from operations.serializers import RouteRunSerializer
 from operations.services import recalculate_route_readiness, reconciliation_route_for_finding, route_close_result
 from warehouse.models import Branch, InventoryItem, Location, Product
 
@@ -586,7 +590,7 @@ class ShipmentCommandCenterTests(APITestCase):
         self.assertIn(self.route_run_today_target.id, week_ids)
         self.assertIn(self.route_run_2.id, week_ids)
         target = next(row for row in week.data["results"] if row["id"] == self.route_run_2.id)
-        self.assertEqual(target["operational_identifier"], "ROUTE-SHP")
+        self.assertTrue(target["operational_identifier"].startswith("ROUTE-SHP_"))
         self.assertTrue(target["weekday"])
 
     def test_controlled_status_change_requires_allowed_transition(self):
@@ -611,9 +615,9 @@ class ShipmentCommandCenterTests(APITestCase):
         self.client.post(f"/api/shipments/{self.shipment.id}/post-picking-lists/", {}, format="json")
         before = self.client.get("/api/route-runs/", {"branch_code": "SHP"})
         source_row = next(row for row in before.data["results"] if row["id"] == self.route_run.id)
-        target_row = next(row for row in before.data["results"] if row["id"] == self.route_run_2.id)
+        before_ids = {row["id"] for row in before.data["results"]}
         self.assertEqual(source_row["order_lines_count"], 1)
-        self.assertEqual(target_row["order_lines_count"], 0)
+        self.assertNotIn(self.route_run_2.id, before_ids)
 
         response = self.client.post(
             f"/api/shipments/{self.shipment.id}/change-route/",
@@ -622,9 +626,9 @@ class ShipmentCommandCenterTests(APITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         after = self.client.get("/api/route-runs/", {"branch_code": "SHP"})
-        source_row = next(row for row in after.data["results"] if row["id"] == self.route_run.id)
+        after_ids = {row["id"] for row in after.data["results"]}
         target_row = next(row for row in after.data["results"] if row["id"] == self.route_run_2.id)
-        self.assertEqual(source_row["order_lines_count"], 0)
+        self.assertNotIn(self.route_run.id, after_ids)
         self.assertEqual(target_row["order_lines_count"], 1)
         self.assertEqual(Shipment.objects.filter(reference=self.shipment.reference).count(), 1)
 
@@ -9661,6 +9665,39 @@ class RouteRunLifecycleTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(response.data["is_late"])
 
+    def test_attention_status_boundaries_prioritize_cutoff_then_departure(self):
+        cutoff_at = timezone.now().replace(microsecond=0) + timezone.timedelta(hours=1)
+        departure_at = cutoff_at + timezone.timedelta(minutes=10)
+        self.route_run.cutoff_at = cutoff_at
+        self.route_run.planned_departure_at = departure_at
+        serializer = RouteRunSerializer(self.route_run)
+
+        with patch.object(RouteRunSerializer, "get_prepared_line_bucket_count", return_value=0), patch.object(
+            RouteRunSerializer, "get_total_active_lines", return_value=1
+        ):
+            with patch("operations.serializers.timezone.now", return_value=cutoff_at - timezone.timedelta(microseconds=1)):
+                self.assertEqual(serializer.get_attention_status(self.route_run), "neutral")
+            with patch("operations.serializers.timezone.now", return_value=cutoff_at):
+                self.assertEqual(serializer.get_attention_status(self.route_run), "cutoff_warning")
+            with patch("operations.serializers.timezone.now", return_value=departure_at):
+                self.assertEqual(serializer.get_attention_status(self.route_run), "delayed")
+
+    def test_ready_attention_status_is_green_window_only(self):
+        cutoff_at = timezone.now().replace(microsecond=0) + timezone.timedelta(hours=1)
+        departure_at = cutoff_at + timezone.timedelta(minutes=10)
+        self.route_run.cutoff_at = cutoff_at
+        self.route_run.planned_departure_at = departure_at
+        serializer = RouteRunSerializer(self.route_run)
+
+        with patch.object(RouteRunSerializer, "get_prepared_line_bucket_count", return_value=1), patch.object(
+            RouteRunSerializer, "get_total_active_lines", return_value=1
+        ):
+            with patch("operations.serializers.timezone.now", return_value=cutoff_at - timezone.timedelta(microseconds=1)):
+                self.assertEqual(serializer.get_attention_status(self.route_run), "neutral")
+            with patch("operations.serializers.timezone.now", return_value=cutoff_at):
+                self.assertEqual(serializer.get_attention_status(self.route_run), "ready")
+            with patch("operations.serializers.timezone.now", return_value=departure_at):
+                self.assertEqual(serializer.get_attention_status(self.route_run), "delayed")
     def test_print_documents_rejects_unfinished_route(self):
         response = self.print_documents()
 
@@ -9771,3 +9808,271 @@ class RouteRunLifecycleTests(APITestCase):
         self.assertFalse(response.data["is_late"])
         self.assertEqual(response.data["close_result"], "unknown")
         self.assertEqual(route_close_result(self.route_run), "unknown")
+
+class CriticalDynamicRouteRoundIntegrationTests(APITestCase):
+    def setUp(self):
+        self.branch = Branch.objects.create(code="DRR", name="Dynamic Route Branch")
+        self.other_branch = Branch.objects.create(code="DRO", name="Other Dynamic Branch")
+        self.worker = create_branch_user("DRR_WORKER", self.branch)
+        self.leader = create_branch_user("DRR_LEADER", self.branch, UserBranchMembership.Role.LEADER)
+        self.other_worker = create_branch_user("DRO_WORKER", self.other_branch)
+        self.product = Product.objects.create(sku="DRR-PROD", name="Dynamic Product", barcode="661100000001")
+        self.route = DeliveryRoute.objects.create(branch=self.branch, code="115/2", name="Dynamic Route 2")
+        self.other_route = DeliveryRoute.objects.create(branch=self.other_branch, code="115/9", name="Other Dynamic Route")
+        BranchDispatchPolicy.objects.create(branch=self.branch, max_routes_per_wave=3, min_wave_gap_minutes=10)
+        self.service_date = timezone.localdate()
+        self.schedule_1 = RouteRoundSchedule.objects.create(
+            route=self.route,
+            weekday=self.service_date.weekday(),
+            round_number=1,
+            cutoff_time=time(6, 50),
+            departure_time=time(7, 0),
+            dispatch_wave="07:00",
+        )
+        self.schedule_2 = RouteRoundSchedule.objects.create(
+            route=self.route,
+            weekday=self.service_date.weekday(),
+            round_number=2,
+            cutoff_time=time(10, 50),
+            departure_time=time(11, 0),
+            dispatch_wave="11:00",
+        )
+
+    def login(self, user=None):
+        self.client.force_authenticate(user=user or self.worker)
+
+    def at_time(self, value):
+        return timezone.make_aware(datetime.combine(self.service_date, value), timezone.get_current_timezone())
+
+    def test_route_schedule_editor_endpoints_filter_by_branch_code(self):
+        BranchDispatchPolicy.objects.create(branch=self.other_branch, max_routes_per_wave=2, min_wave_gap_minutes=15)
+        RouteRoundSchedule.objects.create(
+            route=self.other_route,
+            weekday=self.service_date.weekday(),
+            round_number=1,
+            cutoff_time=time(7, 50),
+            departure_time=time(8, 0),
+            dispatch_wave="08:00",
+        )
+        self.login(self.worker)
+
+        endpoints = [
+            ("/api/delivery-routes/", "branch_code"),
+            ("/api/branch-dispatch-policies/", "branch_code"),
+            ("/api/route-round-schedules/", "branch_code"),
+        ]
+        for endpoint, branch_field in endpoints:
+            with self.subTest(endpoint=endpoint):
+                response = self.client.get(endpoint, {"branch": self.branch.code})
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                self.assertTrue(response.data["results"])
+                self.assertEqual({row[branch_field] for row in response.data["results"]}, {self.branch.code})
+
+                unknown = self.client.get(endpoint, {"branch": "UNKNOWN"})
+                self.assertEqual(unknown.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertIn("branch", unknown.data)
+
+                unauthorized = self.client.get(endpoint, {"branch": self.other_branch.code})
+                self.assertEqual(unauthorized.status_code, status.HTTP_403_FORBIDDEN)
+
+    def create_unassigned_shipment(self, suffix, status_value=Shipment.Status.ACTIVE, document_status=Shipment.DocumentStatus.NOT_AVAILABLE):
+        order = Order.objects.create(
+            branch=self.branch,
+            external_reference=f"AX-DRR-{suffix}",
+            customer_name="Dynamic Customer",
+            customer_alias=f"DRR-{suffix}",
+            status=Order.Status.IMPORTED,
+        )
+        order_line = OrderLine.objects.create(order=order, product=self.product, line_number=1, quantity_ordered=Decimal("2"))
+        shipment = Shipment.objects.create(
+            reference=f"SHP-DRR-{suffix}",
+            branch=self.branch,
+            order=order,
+            shipment_type=Shipment.ShipmentType.CUSTOMER_DELIVERY,
+            status=status_value,
+            document_status=document_status,
+            source_system="AX",
+            external_reference=f"EXT-DRR-{suffix}",
+            external_order_reference=order.external_reference,
+            customer_name=order.customer_name,
+            customer_alias=order.customer_alias,
+            delivery_date=self.service_date,
+        )
+        line = ShipmentLine.objects.create(
+            shipment=shipment,
+            order_line=order_line,
+            product=self.product,
+            line_number=1,
+            ordered_quantity=order_line.quantity_ordered,
+            delivery_date=self.service_date,
+        )
+        task = PickingTask.objects.create(
+            branch=self.branch,
+            order_line=order_line,
+            source_location=Location.objects.create(
+                branch=self.branch,
+                code=f"DRR-{suffix}",
+                name=f"DRR-{suffix}",
+                location_type=Location.LocationType.PICKING,
+            ),
+            status=PickingTask.Status.OPEN,
+            quantity_to_pick=order_line.quantity_ordered,
+        )
+        return shipment, line, task
+
+    def test_cutoff_assignment_creates_and_reuses_demand_runs(self):
+        self.assertEqual(RouteRun.objects.count(), 0)
+        shipment_1, _line_1, _task_1 = self.create_unassigned_shipment("001")
+        run_1 = assign_shipment_to_route_run(shipment_1, self.route, self.at_time(time(6, 49)))
+        self.assertIsNotNone(run_1)
+        self.assertEqual(run_1.run_number, 1)
+        self.assertEqual(run_1.operational_identifier, f"115/2_{run_1.operational_identifier.split('_')[1]}")
+
+        shipment_2, _line_2, _task_2 = self.create_unassigned_shipment("002")
+        run_again = assign_shipment_to_route_run(shipment_2, self.route, self.at_time(time(6, 50)))
+        self.assertEqual(run_again.id, run_1.id)
+        self.assertEqual(RouteRun.objects.count(), 1)
+
+        shipment_3, _line_3, _task_3 = self.create_unassigned_shipment("003")
+        run_2 = assign_shipment_to_route_run(shipment_3, self.route, self.at_time(time(6, 50, 1)))
+        self.assertEqual(run_2.run_number, 2)
+        self.assertEqual(RouteRun.objects.count(), 2)
+
+    def test_closed_first_round_does_not_create_next_round_until_later_shipment(self):
+        shipment_1, _line_1, _task_1 = self.create_unassigned_shipment("004")
+        run_1 = assign_shipment_to_route_run(shipment_1, self.route, self.at_time(time(6, 40)))
+        run_1.status = RouteRun.Status.CLOSED
+        run_1.closed_at = self.at_time(time(6, 45))
+        run_1.save(update_fields=["status", "closed_at", "updated_at"])
+        self.assertFalse(RouteRun.objects.filter(run_number=2).exists())
+
+        shipment_2, _line_2, _task_2 = self.create_unassigned_shipment("005")
+        run_2 = assign_shipment_to_route_run(shipment_2, self.route, self.at_time(time(6, 46)))
+        self.assertEqual(run_2.run_number, 2)
+
+    def test_inactive_schedule_and_next_operational_day(self):
+        self.schedule_2.is_active = False
+        self.schedule_2.save(update_fields=["is_active", "updated_at"])
+        next_day = self.service_date + timezone.timedelta(days=1)
+        RouteRoundSchedule.objects.create(
+            route=self.route,
+            weekday=next_day.weekday(),
+            round_number=1,
+            cutoff_time=time(6, 50),
+            departure_time=time(7, 0),
+            dispatch_wave="07:00",
+        )
+        shipment, _line, _task = self.create_unassigned_shipment("006")
+        run = assign_shipment_to_route_run(shipment, self.route, self.at_time(time(6, 51)))
+        self.assertEqual(run.service_date, next_day)
+        self.assertEqual(run.run_number, 1)
+
+    def test_dispatch_wave_capacity_and_gap_validation(self):
+        routes = [DeliveryRoute.objects.create(branch=self.branch, code=f"115/W{i}", name=f"Wave {i}") for i in range(4)]
+        for index, route in enumerate(routes[:3], start=10):
+            RouteRoundSchedule.objects.create(
+                route=route,
+                weekday=self.service_date.weekday(),
+                round_number=1,
+                cutoff_time=time(6, 50),
+                departure_time=time(7, 0),
+                dispatch_wave="07:00",
+            )
+        with self.assertRaises(Exception):
+            validate_dispatch_schedule(self.branch)
+
+        RouteRoundSchedule.objects.filter(route__in=routes[:3]).delete()
+        RouteRoundSchedule.objects.create(
+            route=routes[0],
+            weekday=self.service_date.weekday(),
+            round_number=1,
+            cutoff_time=time(7, 0),
+            departure_time=time(7, 10),
+            dispatch_wave="07:10",
+        )
+        with self.assertRaises(Exception):
+            RouteRoundSchedule.objects.create(
+                route=routes[1],
+                weekday=self.service_date.weekday(),
+                round_number=1,
+                cutoff_time=time(7, 5),
+                departure_time=time(7, 15),
+                dispatch_wave="07:15",
+            )
+            validate_dispatch_schedule(self.branch)
+
+    def test_schedule_slot_change_route_creates_run_on_demand(self):
+        shipment, _line, _task = self.create_unassigned_shipment("007", document_status=Shipment.DocumentStatus.PRINTED)
+        run_1 = assign_shipment_to_route_run(shipment, self.route, self.at_time(time(6, 40)))
+        self.login(self.leader)
+        targets = self.client.get("/api/shipments/route-targets/", {"branch": self.branch.code, "scope": "today"})
+        self.assertEqual(targets.status_code, status.HTTP_200_OK)
+        schedule_target = next(row for row in targets.data["results"] if row["target_type"] == "schedule_slot" and row["schedule"] == self.schedule_2.id)
+        response = self.client.post(
+            f"/api/shipments/{shipment.id}/change-route/",
+            {"schedule": schedule_target["schedule"], "operational_date": schedule_target["service_date"], "client_operation_id": str(uuid.uuid4())},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        shipment.refresh_from_db()
+        self.assertEqual(shipment.route_run.run_number, 2)
+        self.assertEqual(shipment.document_status, Shipment.DocumentStatus.REQUIRES_REFRESH)
+
+    def test_route_monitor_uses_active_shipments_and_line_buckets(self):
+        shipment, line, task = self.create_unassigned_shipment("008")
+        route_run = assign_shipment_to_route_run(shipment, self.route, self.at_time(time(6, 40)))
+        empty_run, _created = create_route_run_from_schedule(self.schedule_2, self.service_date)
+        task.quantity_picked = Decimal("2")
+        task.status = PickingTask.Status.PICKED
+        task.save(update_fields=["quantity_picked", "status", "updated_at"])
+        self.login()
+        response = self.client.get("/api/route-runs/", {"branch_code": self.branch.code})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        ids = [row["id"] for row in response.data["results"]]
+        self.assertIn(route_run.id, ids)
+        self.assertNotIn(empty_run.id, ids)
+        row = next(item for item in response.data["results"] if item["id"] == route_run.id)
+        self.assertEqual(row["total_active_lines"], 1)
+        self.assertEqual(row["picked_line_bucket_count"], 1)
+        self.assertEqual(row["unstarted_lines_count"], 0)
+
+    def test_route_monitor_excludes_closed_and_cancelled_runs(self):
+        shipment, _line, _task = self.create_unassigned_shipment("009")
+        route_run = assign_shipment_to_route_run(shipment, self.route, self.at_time(time(6, 40)))
+        self.login()
+
+        for inactive_status in (RouteRun.Status.CLOSED, RouteRun.Status.CANCELLED):
+            route_run.status = inactive_status
+            route_run.save(update_fields=["status", "updated_at"])
+            response = self.client.get("/api/route-runs/", {"branch_code": self.branch.code})
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            self.assertNotIn(route_run.id, [row["id"] for row in response.data["results"]])
+    def test_route_run_override_is_leader_only_and_rejects_closed_runs(self):
+        run, _created = create_route_run_from_schedule(self.schedule_1, self.service_date)
+        with self.assertRaises(Exception):
+            override_route_run(
+                self.worker,
+                run,
+                cutoff_at=self.at_time(time(7, 20)),
+                planned_departure_at=self.at_time(time(7, 30)),
+                dispatch_wave="07:30",
+            )
+        updated, history = override_route_run(
+            self.leader,
+            run,
+            cutoff_at=self.at_time(time(7, 20)),
+            planned_departure_at=self.at_time(time(7, 30)),
+            dispatch_wave="07:30",
+        )
+        self.assertEqual(updated.dispatch_wave, "07:30")
+        self.assertEqual(history.previous_dispatch_wave, "07:00")
+        updated.status = RouteRun.Status.CLOSED
+        updated.save(update_fields=["status", "updated_at"])
+        with self.assertRaises(Exception):
+            override_route_run(
+                self.leader,
+                updated,
+                cutoff_at=self.at_time(time(8, 20)),
+                planned_departure_at=self.at_time(time(8, 30)),
+                dispatch_wave="08:30",
+            )

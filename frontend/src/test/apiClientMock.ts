@@ -5,6 +5,8 @@ import type { PaginatedResponse } from "../types/api";
 export const mockApiClient = {
   get: vi.fn(),
   post: vi.fn(),
+  patch: vi.fn(),
+  put: vi.fn(),
 };
 
 export const mockGetHealth = vi.fn(async () => ({ status: "ok" }));
@@ -28,6 +30,8 @@ export const mockGetList = vi.fn(async <T,>(path: string): Promise<PaginatedResp
 export function resetApiClientMock() {
   mockApiClient.get.mockReset();
   mockApiClient.post.mockReset();
+  mockApiClient.patch.mockReset();
+  mockApiClient.put.mockReset();
   mockGetHealth.mockClear();
   mockGetList.mockClear();
 }

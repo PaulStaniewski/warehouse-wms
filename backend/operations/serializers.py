@@ -1,4 +1,5 @@
 import re
+from datetime import datetime
 from decimal import Decimal
 
 from django.db import models
@@ -11,6 +12,7 @@ from operations.models import (
     CycleCountLocation,
     CycleCountRecount,
     CycleCountSession,
+    BranchDispatchPolicy,
     DeliveryRoute,
     ExternalReturnDocument,
     ExternalReturnDocumentLine,
@@ -18,13 +20,16 @@ from operations.models import (
     OrderLine,
     PickingShortage,
     PickingShortageAllocation,
+    PickingTaskClaim,
     PickingTaskReallocation,
     PickingTask,
     ReplenishmentRequest,
     ReturnAction,
     ReturnBatch,
     ReturnLine,
+    RouteRoundSchedule,
     RouteRun,
+    RouteRunOverrideHistory,
     SalesCorrection,
     SalesCorrectionLine,
     Shipment,
@@ -82,6 +87,60 @@ class DeliveryRouteSerializer(serializers.ModelSerializer):
         ]
 
 
+class BranchDispatchPolicySerializer(serializers.ModelSerializer):
+    branch_code = serializers.CharField(source="branch.code", read_only=True)
+
+    class Meta:
+        model = BranchDispatchPolicy
+        fields = [
+            "id",
+            "branch",
+            "branch_code",
+            "max_routes_per_wave",
+            "min_wave_gap_minutes",
+            "created_at",
+            "updated_at",
+        ]
+
+
+class RouteRoundScheduleSerializer(serializers.ModelSerializer):
+    branch = serializers.IntegerField(source="route.branch_id", read_only=True)
+    branch_code = serializers.CharField(source="route.branch.code", read_only=True)
+    route_code = serializers.CharField(source="route.code", read_only=True)
+    route_name = serializers.CharField(source="route.name", read_only=True)
+    weekday_label = serializers.CharField(source="get_weekday_display", read_only=True)
+
+    class Meta:
+        model = RouteRoundSchedule
+        fields = [
+            "id",
+            "route",
+            "route_code",
+            "route_name",
+            "branch",
+            "branch_code",
+            "weekday",
+            "weekday_label",
+            "round_number",
+            "cutoff_time",
+            "departure_time",
+            "dispatch_wave",
+            "operational_label",
+            "is_active",
+            "created_at",
+            "updated_at",
+        ]
+
+
+    def validate(self, attrs):
+        cutoff_time = attrs.get("cutoff_time", getattr(self.instance, "cutoff_time", None))
+        departure_time = attrs.get("departure_time", getattr(self.instance, "departure_time", None))
+        dispatch_wave = attrs.get("dispatch_wave", getattr(self.instance, "dispatch_wave", ""))
+        if cutoff_time and departure_time and cutoff_time >= departure_time:
+            raise serializers.ValidationError("Cutoff must be before departure.")
+        if not str(dispatch_wave or "").strip():
+            raise serializers.ValidationError("Dispatch wave is required.")
+        return attrs
 class RouteRunSerializer(serializers.ModelSerializer):
     route_code = serializers.CharField(source="route.code", read_only=True)
     route_name = serializers.CharField(source="route.name", read_only=True)
@@ -104,6 +163,20 @@ class RouteRunSerializer(serializers.ModelSerializer):
     is_ready_to_close = serializers.SerializerMethodField()
     is_late = serializers.SerializerMethodField()
     close_result = serializers.SerializerMethodField()
+    cutoff_at = serializers.DateTimeField(read_only=True)
+    planned_departure_at = serializers.DateTimeField(read_only=True)
+    operational_identifier = serializers.SerializerMethodField()
+    dispatch_wave = serializers.CharField(read_only=True)
+    active_workers_count = serializers.SerializerMethodField()
+    unstarted_lines_count = serializers.SerializerMethodField()
+    started_lines_count = serializers.SerializerMethodField()
+    picked_line_bucket_count = serializers.SerializerMethodField()
+    prepared_line_bucket_count = serializers.SerializerMethodField()
+    total_active_lines = serializers.SerializerMethodField()
+    attention_status = serializers.SerializerMethodField()
+    attention_reason = serializers.SerializerMethodField()
+    minutes_to_departure = serializers.SerializerMethodField()
+    minutes_after_cutoff = serializers.SerializerMethodField()
 
     def _get_shipments(self, obj: RouteRun):
         cache_name = "_monitor_shipments"
@@ -113,7 +186,7 @@ class RouteRunSerializer(serializers.ModelSerializer):
 
     def _get_shipment_lines(self, obj: RouteRun):
         shipments = self._get_shipments(obj)
-        return [line for shipment in shipments for line in shipment.lines.all()]
+        return [line for shipment in shipments for line in shipment.lines.all() if shipment_line_effective_quantity(line) > 0]
 
     def _get_picking_tasks(self, obj: RouteRun):
         cache_name = "_monitor_picking_tasks"
@@ -140,19 +213,25 @@ class RouteRunSerializer(serializers.ModelSerializer):
         return obj.orders.count()
 
     def get_order_lines_count(self, obj: RouteRun) -> int:
-        shipment_lines = self._get_shipment_lines(obj)
-        if shipment_lines:
-            return sum(1 for line in shipment_lines if shipment_line_effective_quantity(line) > 0)
+        shipments = self._get_shipments(obj)
+        if shipments:
+            return sum(
+                1
+                for shipment in shipments
+                for line in shipment.lines.all()
+                if shipment_line_effective_quantity(line) > 0
+            )
         return OrderLine.objects.filter(order__route_run=obj).count()
 
     def get_picked_lines_count(self, obj: RouteRun) -> int:
-        shipment_lines = self._get_shipment_lines(obj)
-        if shipment_lines:
+        shipments = self._get_shipments(obj)
+        if shipments:
             count = 0
-            for line in shipment_lines:
-                effective_quantity = shipment_line_effective_quantity(line)
-                if effective_quantity > 0 and shipment_line_task_totals(line)["picked"] >= effective_quantity:
-                    count += 1
+            for shipment in shipments:
+                for line in shipment.lines.all():
+                    effective_quantity = shipment_line_effective_quantity(line)
+                    if effective_quantity > 0 and shipment_line_task_totals(line)["picked"] >= effective_quantity:
+                        count += 1
             return count
         return OrderLine.objects.filter(order__route_run=obj, quantity_picked__gte=models.F("quantity_ordered")).count()
 
@@ -179,6 +258,57 @@ class RouteRunSerializer(serializers.ModelSerializer):
 
     def get_completed_picking_tasks(self, obj: RouteRun) -> int:
         return sum(task.status == PickingTask.Status.COMPLETED for task in self._get_picking_tasks(obj))
+
+    def _line_bucket(self, line) -> str:
+        totals = shipment_line_task_totals(line)
+        effective_quantity = shipment_line_effective_quantity(line)
+        if totals["prepared"] >= effective_quantity:
+            return "prepared"
+        if totals["picked"] >= effective_quantity:
+            return "picked"
+        if totals["picked"] > 0 or any(task.status == PickingTask.Status.IN_PROGRESS for task in line.order_line.picking_tasks.exclude(status=PickingTask.Status.CANCELLED)):
+            return "started"
+        return "unstarted"
+
+    def _line_buckets(self, obj: RouteRun) -> dict[str, int]:
+        cache_name = "_monitor_line_buckets"
+        if not hasattr(obj, cache_name):
+            buckets = {"unstarted": 0, "started": 0, "picked": 0, "prepared": 0}
+            for line in self._get_shipment_lines(obj):
+                buckets[self._line_bucket(line)] += 1
+            setattr(obj, cache_name, buckets)
+        return getattr(obj, cache_name)
+
+    def get_active_workers_count(self, obj: RouteRun) -> int:
+        task_ids = [task.id for task in self._get_picking_tasks(obj)]
+        if not task_ids:
+            return 0
+        return (
+            PickingTaskClaim.objects.filter(
+                picking_task_id__in=task_ids,
+                status=PickingTaskClaim.Status.CLAIMED,
+                cart_work_participant__status="active",
+            )
+            .values("cart_work_participant__user_id")
+            .distinct()
+            .count()
+        )
+
+    def get_unstarted_lines_count(self, obj: RouteRun) -> int:
+        return self._line_buckets(obj)["unstarted"]
+
+    def get_started_lines_count(self, obj: RouteRun) -> int:
+        return self._line_buckets(obj)["started"]
+
+    def get_picked_line_bucket_count(self, obj: RouteRun) -> int:
+        return self._line_buckets(obj)["picked"]
+
+    def get_prepared_line_bucket_count(self, obj: RouteRun) -> int:
+        return self._line_buckets(obj)["prepared"]
+
+    def get_total_active_lines(self, obj: RouteRun) -> int:
+        buckets = self._line_buckets(obj)
+        return sum(buckets.values())
 
     def get_progress_percent(self, obj: RouteRun) -> float:
         tasks = self._get_picking_tasks(obj)
@@ -216,6 +346,51 @@ class RouteRunSerializer(serializers.ModelSerializer):
     def get_close_result(self, obj: RouteRun) -> str:
         return route_close_result(obj)
 
+    def get_operational_identifier(self, obj: RouteRun) -> str:
+        if obj.operational_identifier:
+            return obj.operational_identifier
+        return f"{obj.route.code}-{obj.run_number}"
+
+    def _cutoff_dt(self, obj: RouteRun):
+        if obj.cutoff_at:
+            return obj.cutoff_at
+        return timezone.make_aware(datetime.combine(obj.service_date, obj.order_cutoff_time), timezone.get_current_timezone())
+
+    def _departure_dt(self, obj: RouteRun):
+        if obj.planned_departure_at:
+            return obj.planned_departure_at
+        return timezone.make_aware(datetime.combine(obj.service_date, obj.departure_time), timezone.get_current_timezone())
+
+    def get_minutes_to_departure(self, obj: RouteRun) -> int:
+        return round((self._departure_dt(obj) - timezone.now()).total_seconds() / 60)
+
+    def get_minutes_after_cutoff(self, obj: RouteRun) -> int:
+        return round((timezone.now() - self._cutoff_dt(obj)).total_seconds() / 60)
+
+    def get_attention_status(self, obj: RouteRun) -> str:
+        if obj.status in {RouteRun.Status.CLOSED, RouteRun.Status.CANCELLED, RouteRun.Status.DISPATCHED}:
+            return "muted"
+        now = timezone.now()
+        if now < self._cutoff_dt(obj):
+            return "neutral"
+        if now >= self._departure_dt(obj):
+            return "delayed"
+        if self.get_prepared_line_bucket_count(obj) >= self.get_total_active_lines(obj):
+            return "ready"
+        return "cutoff_warning"
+
+    def get_attention_reason(self, obj: RouteRun) -> str:
+        status = self.get_attention_status(obj)
+        if status == "neutral":
+            return "Cutoff has not passed."
+        if status == "ready":
+            return "All active work is prepared."
+        if status == "cutoff_warning":
+            return "Cutoff has passed and work remains before departure."
+        if status == "delayed":
+            return "Departure time has been reached."
+        return "Route run is no longer active."
+
     class Meta:
         model = RouteRun
         fields = [
@@ -230,6 +405,10 @@ class RouteRunSerializer(serializers.ModelSerializer):
             "order_cutoff_time",
             "sync_time",
             "departure_time",
+            "cutoff_at",
+            "planned_departure_at",
+            "dispatch_wave",
+            "operational_identifier",
             "status",
             "orders_count",
             "order_lines_count",
@@ -243,6 +422,16 @@ class RouteRunSerializer(serializers.ModelSerializer):
             "in_progress_picking_tasks",
             "picked_picking_tasks",
             "completed_picking_tasks",
+            "active_workers_count",
+            "unstarted_lines_count",
+            "started_lines_count",
+            "picked_line_bucket_count",
+            "prepared_line_bucket_count",
+            "total_active_lines",
+            "attention_status",
+            "attention_reason",
+            "minutes_to_departure",
+            "minutes_after_cutoff",
             "progress_percent",
             "last_activity_at",
             "is_ready_to_close",

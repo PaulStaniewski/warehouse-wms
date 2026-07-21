@@ -28,6 +28,8 @@ from operations.models import (
     ReturnAction,
     ReturnBatch,
     ReturnLine,
+    BranchDispatchPolicy,
+    RouteRoundSchedule,
     RouteRun,
     SalesCorrection,
     SalesCorrectionLine,
@@ -55,6 +57,7 @@ from operations.models import (
     TransferPalletArrival,
     TransferPalletItem,
 )
+from operations.route_services import operational_identifier
 from warehouse.models import Branch, InventoryItem, Location, Product
 
 
@@ -381,8 +384,8 @@ class Command(BaseCommand):
         def as_time(delta: timedelta):
             return (now + delta).time().replace(microsecond=0)
 
-        def as_datetime(value):
-            return timezone.make_aware(datetime.combine(today, value), timezone.get_current_timezone())
+        def as_datetime(day, value):
+            return timezone.make_aware(datetime.combine(day, value), timezone.get_current_timezone())
 
         run_data = [
             (
@@ -471,7 +474,21 @@ class Command(BaseCommand):
         for branch_code, route_code, run_number, day_offset, cutoff_time, sync_time, departure_time, status in run_data:
             route = delivery_routes[(branch_code, route_code)]
             service_date = today + timedelta(days=day_offset)
-            departure_at = as_datetime(departure_time)
+            BranchDispatchPolicy.objects.get_or_create(branch=route.branch)
+            schedule, _ = RouteRoundSchedule.objects.update_or_create(
+                route=route,
+                weekday=service_date.weekday(),
+                round_number=run_number,
+                defaults={
+                    "cutoff_time": cutoff_time,
+                    "departure_time": departure_time,
+                    "dispatch_wave": departure_time.strftime("%H:%M"),
+                    "operational_label": "",
+                    "is_active": True,
+                },
+            )
+            cutoff_at = as_datetime(service_date, cutoff_time)
+            departure_at = as_datetime(service_date, departure_time)
             ready_at = None
             documents_printed_at = None
             closed_at = None
@@ -488,9 +505,14 @@ class Command(BaseCommand):
                 service_date=service_date,
                 run_number=run_number,
                 defaults={
+                    "schedule": schedule,
                     "order_cutoff_time": cutoff_time,
                     "sync_time": sync_time,
                     "departure_time": departure_time,
+                    "cutoff_at": cutoff_at,
+                    "planned_departure_at": departure_at,
+                    "dispatch_wave": schedule.dispatch_wave,
+                    "operational_identifier": operational_identifier(route, service_date, run_number),
                     "status": status,
                     "ready_at": ready_at,
                     "documents_printed_at": documents_printed_at,

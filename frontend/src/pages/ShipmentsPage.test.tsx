@@ -131,28 +131,46 @@ function mockShipmentsApi(rows = [shipment()]) {
           results: [
             {
               id: 99,
+              target_type: "route_run",
+              route_run: 99,
+              schedule: null,
+              creates_route_run: false,
               label: "ROUTE-02 / 2026-07-20 / run 1 / 12:00:00",
               operational_identifier: "ROUTE-02",
               branch_code: "GDY",
+              route: 2,
               route_code: "ROUTE-02",
               route_name: "Gdynia Noon",
               service_date: "2026-07-20",
               weekday: "Monday",
+              round_number: 1,
+              cutoff_at: "2026-07-20T10:50:00Z",
+              planned_departure_at: "2026-07-20T12:00:00Z",
               departure_time: "12:00:00",
+              dispatch_wave: "12:00",
               status: "open",
               shipment_count: 1,
             },
             {
-              id: 100,
+              id: "schedule-100-2026-07-22",
+              target_type: "schedule_slot",
+              route_run: null,
+              schedule: 100,
+              creates_route_run: true,
               label: "ROUTE-05 / 2026-07-22 / run 1 / 15:00:00",
               operational_identifier: "ROUTE-05",
               branch_code: "GDY",
+              route: 5,
               route_code: "ROUTE-05",
               route_name: "Gdynia Week Route",
               service_date: "2026-07-22",
               weekday: "Wednesday",
+              round_number: 1,
+              cutoff_at: "2026-07-22T14:50:00Z",
+              planned_departure_at: "2026-07-22T15:00:00Z",
               departure_time: "15:00:00",
-              status: "open",
+              dispatch_wave: "15:00",
+              status: "scheduled",
               shipment_count: 0,
             },
           ],
@@ -253,10 +271,26 @@ describe("ShipmentsPage", () => {
 
     expect(screen.getByRole("button", { name: "Working..." })).toBeDisabled();
     expect(mockApiClient.post).toHaveBeenCalledTimes(1);
-    expect(mockApiClient.post).toHaveBeenCalledWith("/shipments/1/change-route/", expect.not.objectContaining({ reason: expect.anything() }));
+    expect(mockApiClient.post).toHaveBeenCalledWith("/shipments/1/change-route/", expect.objectContaining({ route_run: 99 }));
   });
 
-  it("selects shipment lines and removes unpicked quantity through the dialog", async () => {
+
+  it("submits schedule-slot route targets with operational date", async () => {
+    const user = userEvent.setup();
+    mockShipmentsApi();
+
+    renderWithProviders(<App />, { route: "/wms/shipments" });
+
+    await user.click(await screen.findByRole("button", { name: /Change Route/i }));
+    await user.click(screen.getByLabelText("Today only"));
+    await user.selectOptions(screen.getByLabelText("Target route"), "schedule-100-2026-07-22");
+    await user.click(screen.getByRole("button", { name: "Change Route" }));
+
+    await waitFor(() => expect(mockApiClient.post).toHaveBeenCalledWith(
+      "/shipments/1/change-route/",
+      expect.objectContaining({ schedule: 100, operational_date: "2026-07-22" }),
+    ));
+  });  it("selects shipment lines and removes unpicked quantity through the dialog", async () => {
     const user = userEvent.setup();
     mockShipmentsApi();
 

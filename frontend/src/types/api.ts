@@ -82,6 +82,48 @@ export type Order = {
   requested_ship_date: string | null;
 };
 
+export type DeliveryRoute = {
+  id: number;
+  branch: number;
+  branch_code: string;
+  code: string;
+  name: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type BranchDispatchPolicy = {
+  id: number;
+  branch: number;
+  branch_code: string;
+  max_routes_per_wave: number;
+  min_wave_gap_minutes: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type RouteRoundSchedule = {
+  id: number;
+  route: number;
+  route_code: string;
+  route_name: string;
+  branch: number;
+  branch_code: string;
+  weekday: number;
+  weekday_label: string;
+  round_number: number;
+  cutoff_time: string;
+  departure_time: string;
+  dispatch_wave: string;
+  operational_label: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type RouteRunAttentionStatus = "neutral" | "cutoff_warning" | "ready" | "delayed" | "muted";
+
 export type RouteRun = {
   id: number;
   route: number;
@@ -94,6 +136,10 @@ export type RouteRun = {
   order_cutoff_time: string;
   sync_time: string;
   departure_time: string;
+  cutoff_at: string | null;
+  planned_departure_at: string | null;
+  dispatch_wave: string;
+  operational_identifier: string;
   status: string;
   orders_count: number;
   order_lines_count: number;
@@ -107,6 +153,16 @@ export type RouteRun = {
   in_progress_picking_tasks: number;
   picked_picking_tasks: number;
   completed_picking_tasks: number;
+  active_workers_count: number;
+  unstarted_lines_count: number;
+  started_lines_count: number;
+  picked_line_bucket_count: number;
+  prepared_line_bucket_count: number;
+  total_active_lines: number;
+  attention_status: RouteRunAttentionStatus;
+  attention_reason: string;
+  minutes_to_departure: number;
+  minutes_after_cutoff: number;
   progress_percent: number;
   last_activity_at: string | null;
   is_ready_to_close: boolean;
@@ -269,15 +325,24 @@ export type Shipment = {
 };
 
 export type ShipmentRouteTarget = {
-  id: number;
+  id: number | string;
+  target_type: "route_run" | "schedule_slot";
+  route_run: number | null;
+  schedule: number | null;
+  creates_route_run: boolean;
   label: string;
   operational_identifier: string;
   branch_code: string;
+  route: number;
   route_code: string;
   route_name: string;
   service_date: string;
   weekday: string;
+  round_number: number;
+  cutoff_at: string | null;
+  planned_departure_at: string | null;
   departure_time: string;
+  dispatch_wave: string;
   status: string;
   shipment_count: number;
 };

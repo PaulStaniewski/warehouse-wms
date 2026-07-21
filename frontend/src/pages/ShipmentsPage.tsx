@@ -39,7 +39,7 @@ import {
 import { DataState } from "../components/DataState";
 import { PageHeader } from "../components/PageHeader";
 import { StatusBadge } from "../components/StatusBadge";
-import type { Shipment, ShipmentLine } from "../types/api";
+import type { Shipment, ShipmentLine, ShipmentRouteTarget } from "../types/api";
 
 const SHIPMENT_STATUSES = [
   "",
@@ -102,6 +102,10 @@ function statusTone(value: string): "ok" | "error" | "loading" {
   if (["completed", "prepared", "controlled", "posted", "documents_posted"].includes(value)) return "ok";
   if (["cancelled", "exception", "shortage", "blocked"].includes(value)) return "error";
   return "loading";
+}
+
+function targetById(targets: ShipmentRouteTarget[], id: string) {
+  return targets.find((target) => String(target.id) === id) ?? null;
 }
 
 function errorMessage(error: unknown) {
@@ -661,7 +665,12 @@ export function ShipmentsPage() {
               setDialogError("Target route is required.");
               return;
             }
-            void runAction(() => changeRoute.mutateAsync(selectedShipment.id, Number(selectedRoute)));
+            const target = targetById(routeTargets.data?.results ?? [], selectedRoute);
+            if (!target) {
+              setDialogError("Selected route target is no longer available.");
+              return;
+            }
+            void runAction(() => changeRoute.mutateAsync(selectedShipment.id, target));
           }}
           submitLabel="Change Route"
           title={`Change route for ${selectedShipment.reference}`}
@@ -684,8 +693,8 @@ export function ShipmentsPage() {
             <select autoFocus onChange={(event) => setSelectedRoute(event.target.value)} required value={selectedRoute}>
               <option value="">Select route</option>
               {(routeTargets.data?.results ?? []).map((route) => (
-                <option key={route.id} value={route.id}>
-                  {route.operational_identifier} / {route.weekday} {route.service_date} / {route.departure_time} / {route.branch_code} / {route.shipment_count} shipment(s)
+                <option key={route.id} value={String(route.id)}>
+                  {route.operational_identifier} / {route.weekday} {route.service_date} / {route.departure_time} / {route.dispatch_wave || "No wave"} / {route.creates_route_run ? "creates run" : `${route.shipment_count} shipment(s)`}
                 </option>
               ))}
             </select>

@@ -4,11 +4,13 @@ import axios from "axios";
 import { apiClient, getHealth, getList } from "./client";
 import type {
   Branch,
+  BranchDispatchPolicy,
   BranchMembership,
   AuditLog,
   CorrectionActivityResponse,
   CycleCountSession,
   CycleCountReviewQueueResponse,
+  DeliveryRoute,
   InventoryExceptionSummary,
   InventoryItem,
   InterBranchArrivalResponse,
@@ -23,6 +25,7 @@ import type {
   ReturnDocument,
   ReturnBatch,
   ReplenishmentRequest,
+  RouteRoundSchedule,
   RouteRun,
   ScannerContentsResponse,
   ScannerCycleCountRecount,
@@ -73,6 +76,13 @@ type DashboardCountParams = {
   key: string;
   statuses?: string[];
 };
+
+export function doNotRetryDeterministicHttpErrors(failureCount: number, error: unknown) {
+  if (axios.isAxiosError(error) && [400, 401, 403, 404].includes(error.response?.status ?? 0)) {
+    return false;
+  }
+  return failureCount < 1;
+}
 
 function buildCountPath(endpoint: string, branch?: string, status?: string, branchParam = "branch") {
   const params = new URLSearchParams();
@@ -602,12 +612,20 @@ export function useChangeShipmentRoute() {
   const mutation = useShipmentCommand();
   return {
     ...mutation,
-    mutateAsync: (id: number, routeRun: number) =>
-      mutation.mutateAsync({
-        id,
-        action: "change-route",
-        payload: { route_run: routeRun, client_operation_id: crypto.randomUUID() },
-      }),
+    mutateAsync: (id: number, target: ShipmentRouteTarget) => {
+      const payload =
+        target.target_type === "schedule_slot"
+          ? {
+              schedule: target.schedule,
+              operational_date: target.service_date,
+              client_operation_id: crypto.randomUUID(),
+            }
+          : {
+              route_run: target.route_run,
+              client_operation_id: crypto.randomUUID(),
+            };
+      return mutation.mutateAsync({ id, action: "change-route", payload });
+    },
   };
 }
 
@@ -963,6 +981,124 @@ export function useRouteRuns(branch?: number | string) {
   });
 }
 
+export function useDeliveryRoutes(branch?: string) {
+  return useQuery({
+    enabled: Boolean(branch),
+    queryKey: ["delivery-routes", branch],
+    queryFn: () => getList<DeliveryRoute>(`/delivery-routes/${branch ? `?branch=${branch}` : ""}`),
+    retry: doNotRetryDeterministicHttpErrors,
+  });
+}
+
+export function useRouteRoundSchedules(branch?: string) {
+  return useQuery({
+    enabled: Boolean(branch),
+    queryKey: ["route-round-schedules", branch],
+    queryFn: () => getList<RouteRoundSchedule>(`/route-round-schedules/${branch ? `?branch=${branch}` : ""}`),
+    retry: doNotRetryDeterministicHttpErrors,
+  });
+}
+
+export function useBranchDispatchPolicies(branch?: string) {
+  return useQuery({
+    enabled: Boolean(branch),
+    queryKey: ["branch-dispatch-policies", branch],
+    queryFn: () => getList<BranchDispatchPolicy>(`/branch-dispatch-policies/${branch ? `?branch=${branch}` : ""}`),
+    retry: doNotRetryDeterministicHttpErrors,
+  });
+}
+
+export function useSaveBranchDispatchPolicy() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (payload: {
+      branch: number;
+      id?: number;
+      maxRoutesPerWave: number;
+      minWaveGapMinutes: number;
+    }) => {
+      const body = {
+        branch: payload.branch,
+        max_routes_per_wave: payload.maxRoutesPerWave,
+        min_wave_gap_minutes: payload.minWaveGapMinutes,
+      };
+      const response = payload.id
+        ? await apiClient.patch<BranchDispatchPolicy>(`/branch-dispatch-policies/${payload.id}/`, body)
+        : await apiClient.post<BranchDispatchPolicy>("/branch-dispatch-policies/", body);
+      return response.data;
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["branch-dispatch-policies"] });
+      void queryClient.invalidateQueries({ queryKey: ["route-round-schedules"] });
+    },
+  });
+}
+
+export function useCreateRouteRoundSchedule() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (payload: {
+      route: number;
+      weekday: number;
+      roundNumber: number;
+      cutoffTime: string;
+      departureTime: string;
+      dispatchWave: string;
+      operationalLabel?: string;
+      isActive: boolean;
+    }) => {
+      const response = await apiClient.post<RouteRoundSchedule>("/route-round-schedules/", {
+        route: payload.route,
+        weekday: payload.weekday,
+        round_number: payload.roundNumber,
+        cutoff_time: payload.cutoffTime,
+        departure_time: payload.departureTime,
+        dispatch_wave: payload.dispatchWave,
+        operational_label: payload.operationalLabel ?? "",
+        is_active: payload.isActive,
+      });
+      return response.data;
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["route-round-schedules"] });
+      void queryClient.invalidateQueries({ queryKey: ["audit-logs"] });
+    },
+  });
+}
+
+export function useUpdateRouteRoundSchedule() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (payload: {
+      id: number;
+      route: number;
+      weekday: number;
+      roundNumber: number;
+      cutoffTime: string;
+      departureTime: string;
+      dispatchWave: string;
+      operationalLabel?: string;
+      isActive: boolean;
+    }) => {
+      const response = await apiClient.put<RouteRoundSchedule>(`/route-round-schedules/${payload.id}/`, {
+        route: payload.route,
+        weekday: payload.weekday,
+        round_number: payload.roundNumber,
+        cutoff_time: payload.cutoffTime,
+        departure_time: payload.departureTime,
+        dispatch_wave: payload.dispatchWave,
+        operational_label: payload.operationalLabel ?? "",
+        is_active: payload.isActive,
+      });
+      return response.data;
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["route-round-schedules"] });
+      void queryClient.invalidateQueries({ queryKey: ["audit-logs"] });
+    },
+  });
+}
+
 export function useRouteRun(routeRunId?: string) {
   return useQuery({
     enabled: Boolean(routeRunId),
@@ -999,6 +1135,37 @@ export function useCloseRouteRun() {
         `/route-runs/${routeRunId}/close/`,
       );
       return response.data;
+    },
+  });
+}
+
+export function useOverrideRouteRunTimes() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      cutoffAt,
+      dispatchWave,
+      plannedDepartureAt,
+      routeRunId,
+    }: {
+      cutoffAt: string;
+      dispatchWave: string;
+      plannedDepartureAt: string;
+      routeRunId: number;
+    }) => {
+      const response = await apiClient.post<{ message: string; route_run: RouteRun }>(
+        `/route-runs/${routeRunId}/override-times/`,
+        {
+          cutoff_at: cutoffAt,
+          planned_departure_at: plannedDepartureAt,
+          dispatch_wave: dispatchWave,
+        },
+      );
+      return response.data;
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["route-runs"] });
+      void queryClient.invalidateQueries({ queryKey: ["audit-logs"] });
     },
   });
 }

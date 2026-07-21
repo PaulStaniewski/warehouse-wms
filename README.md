@@ -116,6 +116,9 @@ Useful demo references:
 - Inter-branch shipment awaiting document-only posting: `SHP-GDA-GDY-0001`
 - Route Monitor and Shipments share the same RouteRun demo data. `SHP-GDY-0001` and `SHP-GDY-0002` are assigned to one incomplete route; `SHP-GDY-0003` is on a route ready to close; `SHP-GDY-0006` can be moved to today's `SHP-GDY-0007` route or the weekly `SHP-GDY-0008` route.
 - Change Route defaults to today's eligible routes and can expand to the current operational week. Route changes do not require a reason.
+- Dynamic route rounds are schedule-driven. `RouteRoundSchedule` defines recurring weekday route slots with cutoff, departure, dispatch wave, and round number. Shipment route changes can target an existing RouteRun or a scheduled slot; scheduled slots create the RouteRun on demand when the shipment is assigned.
+- RouteRun stores cutoff/departure snapshots (`cutoff_at`, `planned_departure_at`, `dispatch_wave`, `operational_identifier`) so later schedule edits do not rewrite historical route runs. Route Monitor uses active Shipment workload and hides empty route runs from the active board.
+- Route Schedule Editor is available at `/wms/route-schedules` for branch Leaders. It validates maximum routes per dispatch wave and minimum departure gaps between waves.
 - Shipment line quantity removal can be tested on active/unpicked demo shipments. Removed unpicked quantity is not a return: it creates history only, does not mutate inventory, does not create a StockMovement, and does not create a Sales Correction. Picked or controlled quantities are intentionally blocked from silent removal. Removing the final unpicked unit leaves a zero-effective historical line and cancels inactive picking work.
 
 Create Django migrations:

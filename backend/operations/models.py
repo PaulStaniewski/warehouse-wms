@@ -43,6 +43,52 @@ class DeliveryRoute(TimestampedModel):
         return f"{self.branch.code} / {self.code} - {self.name}"
 
 
+class BranchDispatchPolicy(TimestampedModel):
+    branch = models.OneToOneField(Branch, on_delete=models.PROTECT, related_name="dispatch_policy")
+    max_routes_per_wave = models.PositiveIntegerField(default=3)
+    min_wave_gap_minutes = models.PositiveIntegerField(default=10)
+
+    class Meta:
+        verbose_name_plural = "branch dispatch policies"
+
+    def __str__(self) -> str:
+        return f"{self.branch.code} dispatch policy"
+
+
+class RouteRoundSchedule(TimestampedModel):
+    class Weekday(models.IntegerChoices):
+        MONDAY = 0, "Monday"
+        TUESDAY = 1, "Tuesday"
+        WEDNESDAY = 2, "Wednesday"
+        THURSDAY = 3, "Thursday"
+        FRIDAY = 4, "Friday"
+        SATURDAY = 5, "Saturday"
+        SUNDAY = 6, "Sunday"
+
+    route = models.ForeignKey(DeliveryRoute, on_delete=models.PROTECT, related_name="round_schedules")
+    weekday = models.PositiveSmallIntegerField(choices=Weekday.choices)
+    round_number = models.PositiveIntegerField()
+    cutoff_time = models.TimeField()
+    departure_time = models.TimeField()
+    dispatch_wave = models.CharField(max_length=32)
+    operational_label = models.CharField(max_length=64, blank=True)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["route__branch__code", "weekday", "departure_time", "route__code", "round_number"]
+        constraints = [
+            models.UniqueConstraint(fields=["route", "weekday", "round_number"], name="unique_route_round_schedule"),
+            models.CheckConstraint(check=models.Q(cutoff_time__lt=models.F("departure_time")), name="route_round_cutoff_before_departure"),
+        ]
+        indexes = [
+            models.Index(fields=["route", "weekday", "is_active"]),
+            models.Index(fields=["weekday", "dispatch_wave"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.route.code} / {self.get_weekday_display()} / round {self.round_number}"
+
+
 class RouteRun(TimestampedModel):
     class Status(models.TextChoices):
         OPEN = "open", "Open"
@@ -54,11 +100,16 @@ class RouteRun(TimestampedModel):
         CANCELLED = "cancelled", "Cancelled"
 
     route = models.ForeignKey(DeliveryRoute, on_delete=models.PROTECT, related_name="runs")
+    schedule = models.ForeignKey(RouteRoundSchedule, on_delete=models.PROTECT, related_name="route_runs", blank=True, null=True)
     service_date = models.DateField()
     run_number = models.PositiveIntegerField()
     order_cutoff_time = models.TimeField()
     sync_time = models.TimeField()
     departure_time = models.TimeField()
+    cutoff_at = models.DateTimeField(blank=True, null=True)
+    planned_departure_at = models.DateTimeField(blank=True, null=True)
+    dispatch_wave = models.CharField(max_length=32, blank=True)
+    operational_identifier = models.CharField(max_length=96, blank=True)
     status = models.CharField(max_length=32, choices=Status.choices, default=Status.OPEN)
     ready_at = models.DateTimeField(blank=True, null=True)
     documents_printed_at = models.DateTimeField(blank=True, null=True)
@@ -76,6 +127,8 @@ class RouteRun(TimestampedModel):
             models.Index(fields=["route", "service_date"]),
             models.Index(fields=["status"]),
             models.Index(fields=["service_date", "departure_time"]),
+            models.Index(fields=["operational_identifier"]),
+            models.Index(fields=["dispatch_wave"]),
             models.Index(fields=["closed_at"]),
         ]
 
@@ -139,6 +192,26 @@ class RouteRun(TimestampedModel):
         ).filter(pending_lines__gt=0)
 
         return not any(run.is_urgent for run in urgent_exists) or self.is_urgent
+
+
+class RouteRunOverrideHistory(TimestampedModel):
+    route_run = models.ForeignKey(RouteRun, on_delete=models.CASCADE, related_name="override_history")
+    changed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, related_name="route_run_overrides", blank=True, null=True)
+    previous_cutoff_at = models.DateTimeField(blank=True, null=True)
+    new_cutoff_at = models.DateTimeField(blank=True, null=True)
+    previous_planned_departure_at = models.DateTimeField(blank=True, null=True)
+    new_planned_departure_at = models.DateTimeField(blank=True, null=True)
+    previous_dispatch_wave = models.CharField(max_length=32, blank=True)
+    new_dispatch_wave = models.CharField(max_length=32, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["route_run", "created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.route_run_id} override at {self.created_at}"
 
 
 class Order(TimestampedModel):

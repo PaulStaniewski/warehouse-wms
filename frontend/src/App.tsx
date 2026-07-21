@@ -60,6 +60,7 @@ const ReturnsPage = lazyNamed(() => import("./pages/ReturnsPage"), "ReturnsPage"
 const RouteArchivePage = lazyNamed(() => import("./pages/RouteArchivePage"), "RouteArchivePage");
 const RouteDocumentsPage = lazyNamed(() => import("./pages/RouteDocumentsPage"), "RouteDocumentsPage");
 const RouteMonitorPage = lazyNamed(() => import("./pages/RouteMonitorPage"), "RouteMonitorPage");
+const RouteSchedulesPage = lazyNamed(() => import("./pages/RouteSchedulesPage"), "RouteSchedulesPage");
 const ScannerContentsPage = lazyNamed(() => import("./pages/ScannerContentsPage"), "ScannerContentsPage");
 const ScannerControlPage = lazyNamed(() => import("./pages/ScannerControlPage"), "ScannerControlPage");
 const ScannerCycleCountDetailPage = lazyNamed(
@@ -368,6 +369,7 @@ function App() {
             <Route path="wms/cycle-counts/:id" element={lazyRoute(<CycleCountDetailPage />)} />
             <Route path="wms/transport-overview" element={lazyRoute(<TransportOverviewPage />)} />
             <Route path="wms/routes-monitor" element={lazyRoute(<RouteMonitorPage />)} />
+            <Route path="wms/route-schedules" element={lazyRoute(<RouteSchedulesPage />)} />
             <Route path="wms/routes/archive" element={lazyRoute(<RouteArchivePage />)} />
             <Route path="wms/discrepancy-actions" element={lazyRoute(<DiscrepancyActionQueuePage />)} />
             <Route path="wms/replenishment-requests" element={lazyRoute(<ReplenishmentRequestsPage />)} />

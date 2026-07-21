@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { AlertTriangle, Clock3, RefreshCw } from "lucide-react";
+import { AlertTriangle, CalendarClock, Clock3, RefreshCw } from "lucide-react";
 
 import { useActiveBranch } from "../api/ActiveBranchContext";
 import { useCloseRouteRun, useInterBranchMMTasks, usePrintRouteDocuments, useRouteRuns } from "../api/queries";
@@ -13,7 +13,11 @@ function formatStatus(status: string) {
   return status.replaceAll("_", " ");
 }
 
-function formatTime(value: string) {
+function formatTime(value: string | null | undefined) {
+  if (!value) return "-";
+  if (value.includes("T")) {
+    return new Date(value).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+  }
   return value.slice(0, 5);
 }
 
@@ -42,44 +46,14 @@ function getMmStatusLabel(task: InterBranchMMTask) {
   return task.status === "receiving" || task.put_away_units > 0 ? "Receiving" : "Waiting for receiving";
 }
 
-function isClosed(run: RouteRun) {
-  return ["closed", "dispatched", "cancelled"].includes(run.status);
+function needsAttention(run: RouteRun) {
+  return ["cutoff_warning", "ready", "delayed"].includes(run.attention_status);
 }
 
-function isDelayed(run: RouteRun, now: Date) {
-  if (isClosed(run) || run.is_ready_to_close || !run.has_pending_work) {
-    return false;
-  }
-
-  const departureAt = new Date(`${run.service_date}T${run.departure_time}`);
-  return departureAt.getTime() < now.getTime();
-}
-
-function needsAttention(run: RouteRun, now: Date) {
-  if (isDelayed(run, now)) {
-    return false;
-  }
-
-  return run.is_urgent || (run.has_pending_work && ["syncing", "picking", "ready_to_close"].includes(run.status));
-}
-
-function getRowTone(run: RouteRun, now: Date) {
-  if (run.is_ready_to_close) {
-    return run.is_late || isDelayed(run, now) ? "delayed" : "complete";
-  }
-
-  if (isDelayed(run, now)) {
-    return "delayed";
-  }
-
-  if (needsAttention(run, now)) {
-    return "attention";
-  }
-
-  if (isClosed(run) || run.progress_percent >= 100) {
-    return "complete";
-  }
-
+function getRowTone(run: RouteRun) {
+  if (run.attention_status === "delayed") return "delayed";
+  if (run.attention_status === "cutoff_warning") return "attention";
+  if (run.attention_status === "ready") return "complete";
   return "normal";
 }
 
@@ -192,12 +166,10 @@ function MMTasksSection({ tasks }: { tasks: InterBranchMMTask[] }) {
 }
 
 function RouteList({
-  now,
   onSelect,
   rows,
   selectedRouteRunId,
 }: {
-  now: Date;
   onSelect: (run: RouteRun) => void;
   rows: RouteRun[];
   selectedRouteRunId?: number;
@@ -206,17 +178,17 @@ function RouteList({
     <div className="monitor-route-list">
       <div className="monitor-route-head">
         <span>Route</span>
-        <span>AKT</span>
+        <span>Active</span>
         <span>Lines</span>
         <span>Started</span>
         <span>Picked</span>
         <span>Prepared</span>
-        <span>Progress</span>
+        <span>Cutoff</span>
         <span>Departure</span>
       </div>
 
       {rows.map((run) => {
-        const tone = getRowTone(run, now);
+        const tone = getRowTone(run);
 
         return (
           <button
@@ -228,17 +200,19 @@ function RouteList({
             type="button"
           >
             <div className="monitor-route-name">
-              <strong>{run.route_code}</strong>
+              <strong>{run.operational_identifier || run.route_code}</strong>
               <span>{run.route_name}</span>
-              <small>{formatStatus(run.status)}</small>
+              <small>{formatStatus(run.status)} / {run.attention_reason}</small>
             </div>
-            <div className="monitor-count monitor-count--active">{run.open_picking_tasks}</div>
-            <div className="monitor-count">{run.order_lines_count}</div>
-            <div className="monitor-count">{run.in_progress_picking_tasks}</div>
-            <div className="monitor-count">{run.picked_picking_tasks}</div>
-            <div className="monitor-count">{run.completed_picking_tasks}</div>
-            <ProgressCell run={run} />
-            <div className="monitor-departure">{formatTime(run.departure_time)}</div>
+            <div className="monitor-count monitor-count--active">{run.active_workers_count}</div>
+            <div className="monitor-count" title={`${run.total_active_lines} total active lines`}>
+              {run.unstarted_lines_count}
+            </div>
+            <div className="monitor-count">{run.started_lines_count}</div>
+            <div className="monitor-count">{run.picked_line_bucket_count}</div>
+            <div className="monitor-count">{run.prepared_line_bucket_count}</div>
+            <div className="monitor-departure">{formatTime(run.cutoff_at || run.order_cutoff_time)}</div>
+            <div className="monitor-departure">{formatTime(run.planned_departure_at || run.departure_time)}</div>
           </button>
         );
       })}
@@ -256,11 +230,12 @@ export function RouteMonitorPage() {
   const printDocuments = usePrintRouteDocuments();
   const closeRouteRun = useCloseRouteRun();
   const rows = routeRuns.data?.results ?? [];
-  const delayedRows = rows.filter((run) => isDelayed(run, now));
-  const attentionRows = rows.filter((run) => needsAttention(run, now));
-  const routesToClose = [...delayedRows, ...attentionRows]
+  const delayedRows = rows.filter((run) => run.attention_status === "delayed");
+  const warningRows = rows.filter((run) => run.attention_status === "cutoff_warning");
+  const routesToClose = rows
+    .filter((run) => needsAttention(run))
     .filter((run, index, list) => list.findIndex((item) => item.id === run.id) === index)
-    .sort((left, right) => left.departure_time.localeCompare(right.departure_time));
+    .sort((left, right) => (left.planned_departure_at || left.departure_time).localeCompare(right.planned_departure_at || right.departure_time));
 
   useEffect(() => {
     const clock = window.setInterval(() => setNow(new Date()), 1000);
@@ -332,6 +307,10 @@ export function RouteMonitorPage() {
               <RefreshCw size={16} />
               Refresh
             </button>
+            <Link className="monitor-refresh-button" to="/wms/route-schedules">
+              <CalendarClock size={16} />
+              Schedule
+            </Link>
           </div>
         }
       />
@@ -347,10 +326,10 @@ export function RouteMonitorPage() {
               <p>Viewing branch: {activeBranch?.code ?? "..."}</p>
               <strong>{activeBranch?.name ?? "No branch selected"}</strong>
             </div>
-            {(attentionRows.length > 0 || delayedRows.length > 0) && (
+            {(warningRows.length > 0 || delayedRows.length > 0) && (
               <div className="monitor-priority-banner">
                 <AlertTriangle size={18} />
-                <span>{delayedRows.length} delayed / {attentionRows.length} need attention</span>
+                <span>{delayedRows.length} delayed / {warningRows.length} cutoff warnings</span>
               </div>
             )}
           </header>
@@ -361,7 +340,6 @@ export function RouteMonitorPage() {
                 <div className="state-box">No route runs found.</div>
               ) : (
                 <RouteList
-                  now={now}
                   onSelect={setSelectedRouteRun}
                   rows={rows}
                   selectedRouteRunId={selectedRouteRun?.id}
@@ -393,10 +371,10 @@ export function RouteMonitorPage() {
                       <li key={run.id}>
                         <div>
                           <strong>{run.route_code}</strong>
-                          <span>{formatTime(run.departure_time)}</span>
+                          <span>{formatTime(run.planned_departure_at || run.departure_time)}</span>
                         </div>
                         <small>
-                          AKT {run.open_picking_tasks} / {run.order_lines_count} lines
+                          Active {run.active_workers_count} / {run.total_active_lines} lines
                         </small>
                         <ProgressCell run={run} />
                       </li>

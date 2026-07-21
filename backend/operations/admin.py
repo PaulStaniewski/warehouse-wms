@@ -2,6 +2,7 @@ from django.contrib import admin
 
 from operations.models import (
     AuditLog,
+    BranchDispatchPolicy,
     CartPickedItem,
     CartWorkParticipant,
     CartWorkSession,
@@ -24,7 +25,9 @@ from operations.models import (
     ReturnAction,
     ReturnBatch,
     ReturnLine,
+    RouteRoundSchedule,
     RouteRun,
+    RouteRunOverrideHistory,
     SalesCorrection,
     SalesCorrectionLine,
     ScannerCart,
@@ -65,12 +68,27 @@ class DeliveryRouteAdmin(admin.ModelAdmin):
     search_fields = ["code", "name", "branch__code", "branch__name"]
 
 
+@admin.register(BranchDispatchPolicy)
+class BranchDispatchPolicyAdmin(admin.ModelAdmin):
+    list_display = ["branch", "max_routes_per_wave", "min_wave_gap_minutes", "updated_at"]
+    search_fields = ["branch__code", "branch__name"]
+
+
+@admin.register(RouteRoundSchedule)
+class RouteRoundScheduleAdmin(admin.ModelAdmin):
+    list_display = ["route", "weekday", "round_number", "cutoff_time", "departure_time", "dispatch_wave", "is_active"]
+    list_filter = ["route__branch", "weekday", "dispatch_wave", "is_active"]
+    search_fields = ["route__code", "route__name", "operational_label"]
+
+
 @admin.register(RouteRun)
 class RouteRunAdmin(admin.ModelAdmin):
     list_display = [
+        "operational_identifier",
         "route",
         "service_date",
         "run_number",
+        "dispatch_wave",
         "departure_time",
         "status",
         "orders_count",
@@ -79,7 +97,14 @@ class RouteRunAdmin(admin.ModelAdmin):
         "is_selectable",
     ]
     list_filter = ["status", "service_date", "route__branch", "route"]
-    search_fields = ["route__code", "route__name", "route__branch__code"]
+    search_fields = ["operational_identifier", "route__code", "route__name", "route__branch__code"]
+
+
+@admin.register(RouteRunOverrideHistory)
+class RouteRunOverrideHistoryAdmin(admin.ModelAdmin):
+    list_display = ["route_run", "changed_by", "previous_dispatch_wave", "new_dispatch_wave", "created_at"]
+    list_filter = ["route_run__route__branch", "created_at"]
+    search_fields = ["route_run__operational_identifier", "changed_by__username"]
 
 
 @admin.register(Order)

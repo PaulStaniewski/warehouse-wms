@@ -1,0 +1,176 @@
+import { screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { beforeEach, describe, expect, it } from "vitest";
+
+import App from "../App";
+import { mockApiClient } from "../test/apiClientMock";
+import { authSession, branchMembership, paginated } from "../test/fixtures";
+import { renderWithProviders, setViewport } from "../test/render";
+
+function routeRun(overrides = {}) {
+  return {
+    id: 501,
+    route: 41,
+    branch: 1,
+    route_code: "115/2",
+    route_name: "Dynamic Route 2",
+    branch_code: "GDY",
+    service_date: "2026-07-21",
+    run_number: 1,
+    order_cutoff_time: "06:50:00",
+    sync_time: "06:50:00",
+    departure_time: "07:00:00",
+    cutoff_at: "2026-07-21T04:50:00Z",
+    planned_departure_at: "2026-07-21T05:00:00Z",
+    dispatch_wave: "07:00",
+    operational_identifier: "115/2_Wt-1",
+    status: "open",
+    orders_count: 2,
+    order_lines_count: 4,
+    picked_lines_count: 2,
+    pending_lines_count: 2,
+    has_pending_work: true,
+    is_urgent: false,
+    is_selectable: true,
+    total_picking_tasks: 4,
+    open_picking_tasks: 1,
+    in_progress_picking_tasks: 1,
+    picked_picking_tasks: 1,
+    completed_picking_tasks: 1,
+    active_workers_count: 2,
+    unstarted_lines_count: 1,
+    started_lines_count: 1,
+    picked_line_bucket_count: 1,
+    prepared_line_bucket_count: 1,
+    total_active_lines: 4,
+    attention_status: "cutoff_warning",
+    attention_reason: "Cutoff has passed and work remains before departure.",
+    minutes_to_departure: 8,
+    minutes_after_cutoff: 2,
+    progress_percent: 50,
+    last_activity_at: null,
+    is_ready_to_close: false,
+    is_late: false,
+    close_result: "unknown",
+    ready_at: null,
+    documents_printed_at: null,
+    closed_at: null,
+    ...overrides,
+  };
+}
+
+function mockBaseApi(routeRuns = [routeRun()]) {
+  mockApiClient.get.mockImplementation(async (path: string) => {
+    if (path === "/auth/session/") return { data: authSession("GDY_LEADER") };
+    if (path === "/me/branch-memberships/") return { data: [branchMembership("leader", "GDY")] };
+    if (path.startsWith("/route-runs/")) return { data: paginated(routeRuns) };
+    if (path.startsWith("/mm-tasks/")) return { data: paginated([]) };
+    if (path.startsWith("/delivery-routes/")) {
+      return { data: paginated([{ id: 41, branch: 1, branch_code: "GDY", code: "115/2", name: "Dynamic Route 2", is_active: true, created_at: "", updated_at: "" }]) };
+    }
+    if (path.startsWith("/route-round-schedules/")) {
+      return {
+        data: paginated([
+          {
+            id: 71,
+            route: 41,
+            route_code: "115/2",
+            route_name: "Dynamic Route 2",
+            branch: 1,
+            branch_code: "GDY",
+            weekday: 1,
+            weekday_label: "Tuesday",
+            round_number: 1,
+            cutoff_time: "06:50:00",
+            departure_time: "07:00:00",
+            dispatch_wave: "07:00",
+            operational_label: "",
+            is_active: true,
+            created_at: "",
+            updated_at: "",
+          },
+        ]),
+      };
+    }
+    if (path.startsWith("/branch-dispatch-policies/")) {
+      return { data: paginated([{ id: 9, branch: 1, branch_code: "GDY", max_routes_per_wave: 3, min_wave_gap_minutes: 10, created_at: "", updated_at: "" }]) };
+    }
+    return { data: paginated([]) };
+  });
+}
+
+describe("Route operations pages", () => {
+  beforeEach(() => {
+    setViewport(false);
+    mockBaseApi();
+    mockApiClient.post.mockResolvedValue({ data: {} });
+    mockApiClient.patch.mockResolvedValue({ data: {} });
+    mockApiClient.put.mockResolvedValue({ data: {} });
+  });
+
+  it("renders Route Monitor with route buckets and attention state", async () => {
+    renderWithProviders(<App />, { route: "/wms/routes-monitor" });
+
+    expect(await screen.findByText("115/2_Wt-1", {}, { timeout: 5000 })).toBeInTheDocument();
+    expect(screen.getByText("Active")).toBeInTheDocument();
+    expect(screen.getByText("Lines")).toBeInTheDocument();
+    expect(screen.getByText("Started")).toBeInTheDocument();
+    expect(screen.getByText("Picked")).toBeInTheDocument();
+    expect(screen.getByText("Prepared")).toBeInTheDocument();
+    expect(screen.getByText("Cutoff")).toBeInTheDocument();
+    expect(screen.getAllByText(/Cutoff has passed/i).length).toBeGreaterThan(0);
+  });
+
+  it("renders neutral, cutoff warning, ready, and delayed route tones", async () => {
+    mockBaseApi([
+      routeRun({ id: 501, operational_identifier: "ROUTE-neutral", attention_status: "neutral", attention_reason: "Cutoff has not passed.", is_ready_to_close: false }),
+      routeRun({ id: 502, operational_identifier: "ROUTE-warning", attention_status: "cutoff_warning", is_ready_to_close: false }),
+      routeRun({ id: 503, operational_identifier: "ROUTE-ready", attention_status: "ready", attention_reason: "All active work is prepared.", is_ready_to_close: true }),
+      routeRun({ id: 504, operational_identifier: "ROUTE-delayed-ready", attention_status: "delayed", attention_reason: "Departure time has been reached.", is_ready_to_close: true }),
+    ]);
+
+    renderWithProviders(<App />, { route: "/wms/routes-monitor" });
+
+    expect((await screen.findByText("ROUTE-neutral")).closest("button")).toHaveClass("monitor-route-row--normal");
+    expect(screen.getByText("ROUTE-warning").closest("button")).toHaveClass("monitor-route-row--attention");
+    expect(screen.getByText("ROUTE-ready").closest("button")).toHaveClass("monitor-route-row--complete");
+    expect(screen.getByText("ROUTE-delayed-ready").closest("button")).toHaveClass("monitor-route-row--delayed");
+    expect(screen.getByText("1 delayed / 1 cutoff warnings")).toBeInTheDocument();
+  });
+  it("renders Route Schedule Editor and saves policy changes", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<App />, { route: "/wms/route-schedules" });
+
+    expect(await screen.findByRole("heading", { name: "Dispatch policy" })).toBeInTheDocument();
+    expect((await screen.findAllByText(/Dynamic Route 2/)).length).toBeGreaterThan(0);
+    await user.clear(screen.getByLabelText("Maximum routes per wave"));
+    await user.type(screen.getByLabelText("Maximum routes per wave"), "2");
+    await user.click(screen.getByRole("button", { name: /Save policy/i }));
+
+    await waitFor(() => expect(mockApiClient.patch).toHaveBeenCalledWith(
+      "/branch-dispatch-policies/9/",
+      expect.objectContaining({ max_routes_per_wave: 2, min_wave_gap_minutes: 10 }),
+    ));
+  });
+
+  it("submits a new route schedule slot", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<App />, { route: "/wms/route-schedules" });
+
+    await screen.findByLabelText("Round");
+    await user.clear(screen.getByLabelText("Round"));
+    await user.type(screen.getByLabelText("Round"), "2");
+    await user.clear(screen.getByLabelText("Cutoff"));
+    await user.type(screen.getByLabelText("Cutoff"), "10:50");
+    await user.clear(screen.getByLabelText("Departure"));
+    await user.type(screen.getByLabelText("Departure"), "11:00");
+    await user.clear(screen.getByLabelText("Wave"));
+    await user.type(screen.getByLabelText("Wave"), "11:00");
+    await user.click(screen.getByRole("button", { name: /Add schedule/i }));
+
+    await waitFor(() => expect(mockApiClient.post).toHaveBeenCalledWith(
+      "/route-round-schedules/",
+      expect.objectContaining({ route: 41, round_number: 2, cutoff_time: "10:50", departure_time: "11:00", dispatch_wave: "11:00" }),
+    ));
+  });
+});

@@ -1,3 +1,4 @@
+from datetime import datetime
 from decimal import Decimal
 
 import django_filters
@@ -9,7 +10,7 @@ from django.utils.dateparse import parse_date
 from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.pagination import PageNumberPagination
-from rest_framework.exceptions import PermissionDenied
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.viewsets import ModelViewSet, ReadOnlyModelViewSet, ViewSet
@@ -24,6 +25,7 @@ from accounts.authorization import (
 from accounts.models import UserBranchMembership
 from operations.models import (
     AuditLog,
+    BranchDispatchPolicy,
     CycleCountLine,
     CycleCountLocation,
     CycleCountRecount,
@@ -41,7 +43,9 @@ from operations.models import (
     ReturnAction,
     ReturnBatch,
     ReturnLine,
+    RouteRoundSchedule,
     RouteRun,
+    RouteRunOverrideHistory,
     SalesCorrection,
     SalesCorrectionLine,
     Shipment,
@@ -63,6 +67,7 @@ from operations.models import (
 )
 from operations.serializers import (
     AuditLogSerializer,
+    BranchDispatchPolicySerializer,
     CycleCountLocationSerializer,
     CycleCountRecountSerializer,
     CycleCountReviewQueueItemSerializer,
@@ -78,6 +83,7 @@ from operations.serializers import (
     ReplenishmentRequestSerializer,
     ReturnBatchSerializer,
     ReturnLineSerializer,
+    RouteRoundScheduleSerializer,
     RouteRunSerializer,
     SalesCorrectionSerializer,
     SalesHistoryCandidateSerializer,
@@ -90,6 +96,14 @@ from operations.serializers import (
     TransferDiscrepancySourceStockVerificationSerializer,
     TransferDiscrepancySourceReviewSerializer,
     TransferDiscrepancyTransitInvestigationSerializer,
+)
+from operations.route_services import (
+    aware_datetime,
+    create_route_run_from_schedule,
+    manual_change_shipment_route,
+    override_route_run,
+    operational_identifier,
+    validate_dispatch_schedule,
 )
 from operations.shipment_services import (
     activate_shipment,
@@ -169,6 +183,17 @@ def filter_branch_queryset(queryset, request, field_prefix: str, param_name: str
     return queryset.filter(**{f"{code_field}__in": branch_codes_filter(request.user, requested)})
 
 
+def filter_branch_code_queryset(queryset, request, field_prefix: str, param_name: str = "branch"):
+    requested = request.query_params.get(param_name, "").strip()
+    if requested:
+        if requested.isdigit():
+            if not Branch.objects.filter(pk=int(requested)).exists():
+                raise ValidationError({param_name: ["Unknown branch."]})
+        elif not Branch.objects.filter(code__iexact=requested).exists():
+            raise ValidationError({param_name: ["Unknown branch code."]})
+    return filter_branch_queryset(queryset, request, field_prefix, param_name)
+
+
 def filter_dual_branch_queryset(queryset, request, source_path: str, destination_path: str):
     if not request.user.is_authenticated:
         return queryset
@@ -239,12 +264,78 @@ class RouteRunFilter(django_filters.FilterSet):
 class DeliveryRouteViewSet(ReadOnlyModelViewSet):
     queryset = DeliveryRoute.objects.select_related("branch")
     serializer_class = DeliveryRouteSerializer
-    filterset_fields = ["branch", "code", "is_active"]
+    filterset_fields = ["code", "is_active"]
     search_fields = ["code", "name", "branch__code", "branch__name"]
     ordering_fields = ["branch__code", "code", "name", "created_at", "updated_at"]
 
     def get_queryset(self):
-        return filter_branch_queryset(super().get_queryset(), self.request, "branch")
+        return filter_branch_code_queryset(super().get_queryset(), self.request, "branch")
+
+
+class BranchDispatchPolicyViewSet(ModelViewSet):
+    queryset = BranchDispatchPolicy.objects.select_related("branch")
+    serializer_class = BranchDispatchPolicySerializer
+
+    def get_queryset(self):
+        return filter_branch_code_queryset(super().get_queryset(), self.request, "branch")
+
+    def perform_create(self, serializer):
+        branch = serializer.validated_data["branch"]
+        require_branch_access(self.request.user, branch, leader_required=True)
+        serializer.save()
+
+    def perform_update(self, serializer):
+        branch = serializer.instance.branch
+        require_branch_access(self.request.user, branch, leader_required=True)
+        instance = serializer.save()
+        validate_dispatch_schedule(instance.branch)
+
+
+class RouteRoundScheduleViewSet(ModelViewSet):
+    queryset = RouteRoundSchedule.objects.select_related("route", "route__branch")
+    serializer_class = RouteRoundScheduleSerializer
+    filterset_fields = ["route", "weekday", "is_active", "dispatch_wave"]
+    search_fields = ["route__code", "route__name", "operational_label", "dispatch_wave"]
+    ordering_fields = ["weekday", "departure_time", "route__code", "round_number"]
+
+    def get_queryset(self):
+        return filter_branch_code_queryset(super().get_queryset(), self.request, "route__branch")
+
+    def perform_create(self, serializer):
+        route = serializer.validated_data["route"]
+        require_branch_access(self.request.user, route.branch, leader_required=True)
+        instance = serializer.save()
+        try:
+            validate_dispatch_schedule(route.branch)
+        except Exception:
+            instance.delete()
+            raise
+        AuditLog.objects.create(
+            actor=self.request.user,
+            action_type=AuditLog.ActionType.CREATE,
+            event_type="route_schedule_created",
+            branch=route.branch,
+            reference=route.code,
+            entity_name="RouteRoundSchedule",
+            entity_id=str(instance.id),
+            message=f"{self.request.user.username} created a route round schedule for {route.code}.",
+        )
+
+    def perform_update(self, serializer):
+        route = serializer.validated_data.get("route", serializer.instance.route)
+        require_branch_access(self.request.user, route.branch, leader_required=True)
+        instance = serializer.save()
+        validate_dispatch_schedule(instance.route.branch)
+        AuditLog.objects.create(
+            actor=self.request.user,
+            action_type=AuditLog.ActionType.UPDATE,
+            event_type="route_schedule_changed",
+            branch=instance.route.branch,
+            reference=instance.route.code,
+            entity_name="RouteRoundSchedule",
+            entity_id=str(instance.id),
+            message=f"{self.request.user.username} changed a route round schedule for {instance.route.code}.",
+        )
 
 
 class OrderLineFilter(django_filters.FilterSet):
@@ -293,7 +384,11 @@ class ReplenishmentRequestFilter(django_filters.FilterSet):
 
 
 class RouteRunViewSet(ReadOnlyModelViewSet):
-    queryset = RouteRun.objects.select_related("route", "route__branch")
+    queryset = RouteRun.objects.select_related("route", "route__branch", "schedule").prefetch_related(
+        "shipments",
+        "shipments__lines",
+        "shipments__lines__order_line__picking_tasks",
+    )
     serializer_class = RouteRunSerializer
     filterset_class = RouteRunFilter
     search_fields = ["route__code", "route__name", "route__branch__code"]
@@ -303,8 +398,43 @@ class RouteRunViewSet(ReadOnlyModelViewSet):
         queryset = super().get_queryset()
         queryset = filter_branch_queryset(queryset, self.request, "route__branch")
         if self.action == "list":
-            return queryset.exclude(status=RouteRun.Status.CLOSED)
+            return (
+                queryset.exclude(status__in=[RouteRun.Status.CLOSED, RouteRun.Status.CANCELLED, RouteRun.Status.DISPATCHED])
+                .filter(shipments__status__in=[
+                    Shipment.Status.PENDING_ACTIVATION,
+                    Shipment.Status.ACTIVE,
+                    Shipment.Status.PICKING,
+                    Shipment.Status.PICKED,
+                    Shipment.Status.CONTROLLED,
+                    Shipment.Status.PREPARED,
+                    Shipment.Status.DOCUMENTS_POSTED,
+                    Shipment.Status.READY_FOR_DISPATCH,
+                    Shipment.Status.EXCEPTION,
+                ])
+                .distinct()
+            )
         return queryset
+
+    @action(detail=True, methods=["post"], url_path="override-times")
+    def override_times(self, request, pk=None):
+        route_run = self.get_object()
+        try:
+            cutoff_at = datetime.fromisoformat(str(request.data.get("cutoff_at", "")))
+            departure_at = datetime.fromisoformat(str(request.data.get("planned_departure_at", "")))
+        except ValueError:
+            return Response({"detail": "cutoff_at and planned_departure_at must be ISO datetimes."}, status=status.HTTP_400_BAD_REQUEST)
+        if timezone.is_naive(cutoff_at):
+            cutoff_at = timezone.make_aware(cutoff_at, timezone.get_current_timezone())
+        if timezone.is_naive(departure_at):
+            departure_at = timezone.make_aware(departure_at, timezone.get_current_timezone())
+        route_run, _history = override_route_run(
+            request.user,
+            route_run,
+            cutoff_at=cutoff_at,
+            planned_departure_at=departure_at,
+            dispatch_wave=str(request.data.get("dispatch_wave", "")).strip(),
+        )
+        return Response({"message": "Route run timing updated.", "route_run": self.get_serializer(route_run).data})
 
     @action(detail=False, methods=["get"])
     def archive(self, request):
@@ -956,25 +1086,81 @@ class ShipmentViewSet(ReadOnlyModelViewSet):
                 models.Q(route__code__icontains=search)
                 | models.Q(route__name__icontains=search)
                 | models.Q(route__branch__code__icontains=search)
+                | models.Q(operational_identifier__icontains=search)
             )
 
         queryset = queryset.annotate(active_shipment_count=models.Count("shipments", filter=~models.Q(shipments__status=Shipment.Status.CANCELLED)))
         data = [
             {
                 "id": route_run.id,
+                "target_type": "route_run",
+                "route_run": route_run.id,
+                "schedule": route_run.schedule_id,
+                "creates_route_run": False,
                 "label": f"{route_run.route.code} / {route_run.service_date} / run {route_run.run_number} / {route_run.departure_time}",
-                "operational_identifier": route_run.route.code,
+                "operational_identifier": route_run.operational_identifier or operational_identifier(route_run.route, route_run.service_date, route_run.run_number),
                 "branch_code": route_run.route.branch.code,
+                "route": route_run.route_id,
                 "route_code": route_run.route.code,
                 "route_name": route_run.route.name,
                 "service_date": route_run.service_date,
                 "weekday": route_run.service_date.strftime("%A"),
+                "round_number": route_run.run_number,
+                "cutoff_at": route_run.cutoff_at,
+                "planned_departure_at": route_run.planned_departure_at,
                 "departure_time": route_run.departure_time,
+                "dispatch_wave": route_run.dispatch_wave,
                 "status": route_run.status,
                 "shipment_count": route_run.active_shipment_count,
             }
             for route_run in queryset.order_by("service_date", "departure_time", "route__code", "run_number")[:100]
         ]
+        existing_keys = {(row["route"], row["service_date"], row["round_number"]) for row in data}
+        if scope == "week":
+            week_start = operational_date - timezone.timedelta(days=operational_date.weekday())
+            date_range = [week_start + timezone.timedelta(days=offset) for offset in range(7)]
+        else:
+            date_range = [operational_date]
+        schedules = RouteRoundSchedule.objects.select_related("route", "route__branch").filter(is_active=True)
+        schedules = filter_branch_queryset(schedules, request, "route__branch")
+        if branch_value:
+            schedules = schedules.filter(models.Q(route__branch_id=branch_value) if branch_value.isdigit() else models.Q(route__branch__code__iexact=branch_value))
+        if search:
+            schedules = schedules.filter(
+                models.Q(route__code__icontains=search)
+                | models.Q(route__name__icontains=search)
+                | models.Q(operational_label__icontains=search)
+            )
+        for day in date_range:
+            for schedule in schedules.filter(weekday=day.weekday()).order_by("departure_time", "route__code", "round_number"):
+                key = (schedule.route_id, day, schedule.round_number)
+                if key in existing_keys:
+                    continue
+                identifier = operational_identifier(schedule.route, day, schedule.round_number)
+                data.append(
+                    {
+                        "id": f"schedule-{schedule.id}-{day.isoformat()}",
+                        "target_type": "schedule_slot",
+                        "route_run": None,
+                        "schedule": schedule.id,
+                        "creates_route_run": True,
+                        "label": f"{identifier} / {day} / {schedule.departure_time}",
+                        "operational_identifier": identifier,
+                        "branch_code": schedule.route.branch.code,
+                        "route": schedule.route_id,
+                        "route_code": schedule.route.code,
+                        "route_name": schedule.route.name,
+                        "service_date": day,
+                        "weekday": day.strftime("%A"),
+                        "round_number": schedule.round_number,
+                        "cutoff_at": aware_datetime(day, schedule.cutoff_time),
+                        "planned_departure_at": aware_datetime(day, schedule.departure_time),
+                        "departure_time": schedule.departure_time,
+                        "dispatch_wave": schedule.dispatch_wave,
+                        "status": "scheduled",
+                        "shipment_count": 0,
+                    }
+                )
         return Response({"results": data})
 
     @action(detail=True, methods=["post"])
@@ -1052,15 +1238,30 @@ class ShipmentViewSet(ReadOnlyModelViewSet):
     @action(detail=True, methods=["post"], url_path="change-route")
     def change_route(self, request, pk=None):
         route_run_id = request.data.get("route_run")
-        if not route_run_id:
-            return Response({"detail": "route_run is required."}, status=status.HTTP_400_BAD_REQUEST)
-        shipment, replayed = change_shipment_route(
-            request.user,
-            self.get_object().id,
-            route_run_id,
-            str(request.data.get("reason", "")),
-            request.data.get("client_operation_id"),
-        )
+        schedule_id = request.data.get("schedule")
+        if not route_run_id and not schedule_id:
+            return Response({"detail": "route_run or schedule is required."}, status=status.HTTP_400_BAD_REQUEST)
+        shipment = self.get_object()
+        if schedule_id:
+            operational_date = parse_date(str(request.data.get("operational_date", "")))
+            if operational_date is None:
+                return Response({"detail": "operational_date is required for schedule targets."}, status=status.HTTP_400_BAD_REQUEST)
+            schedule = get_object_or_404(RouteRoundSchedule.objects.select_related("route", "route__branch"), pk=schedule_id)
+            shipment, replayed = manual_change_shipment_route(
+                request.user,
+                shipment,
+                schedule=schedule,
+                operational_date=operational_date,
+                client_operation_id=request.data.get("client_operation_id"),
+            )
+        else:
+            route_run = get_object_or_404(RouteRun.objects.select_related("route", "route__branch"), pk=route_run_id)
+            shipment, replayed = manual_change_shipment_route(
+                request.user,
+                shipment,
+                route_run=route_run,
+                client_operation_id=request.data.get("client_operation_id"),
+            )
         return Response({"message": "Shipment already uses this route." if replayed else "Shipment route changed.", "shipment": self.get_serializer(shipment).data})
 
     @action(detail=True, methods=["post"], url_path="change-status")

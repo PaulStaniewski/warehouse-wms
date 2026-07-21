@@ -3,6 +3,7 @@ from rest_framework.routers import DefaultRouter
 from accounts.viewsets import AuthLoginView, AuthLogoutView, AuthSessionView, CurrentUserBranchMembershipsView
 from operations.viewsets import (
     AuditLogViewSet,
+    BranchDispatchPolicyViewSet,
     CycleCountReviewQueueViewSet,
     CycleCountSessionViewSet,
     DeliveryRouteViewSet,
@@ -15,6 +16,7 @@ from operations.viewsets import (
     ReturnBatchViewSet,
     ReturnLineViewSet,
     ReplenishmentRequestViewSet,
+    RouteRoundScheduleViewSet,
     RouteRunViewSet,
     SalesCorrectionViewSet,
     ShipmentViewSet,
@@ -41,6 +43,8 @@ router.register("cycle-count-review-queue", CycleCountReviewQueueViewSet, basena
 router.register("inventory-exceptions", InventoryExceptionSummaryViewSet, basename="inventory-exception")
 router.register("transport-overview", TransportOverviewViewSet, basename="transport-overview")
 router.register("delivery-routes", DeliveryRouteViewSet, basename="delivery-route")
+router.register("route-round-schedules", RouteRoundScheduleViewSet, basename="route-round-schedule")
+router.register("branch-dispatch-policies", BranchDispatchPolicyViewSet, basename="branch-dispatch-policy")
 router.register("route-runs", RouteRunViewSet, basename="route-run")
 router.register("orders", OrderViewSet, basename="order")
 router.register("order-lines", OrderLineViewSet, basename="order-line")
