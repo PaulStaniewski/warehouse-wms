@@ -197,6 +197,21 @@ export type ShipmentCommandEligibility = {
   enabled: boolean;
   reason: string;
 };
+export type RouteCloseBlocker = {
+  code: string;
+  message: string;
+};
+
+export type RouteCloseReadiness = {
+  can_close: boolean;
+  close_blockers: RouteCloseBlocker[];
+  unpicked_line_count: number;
+  uncontrolled_line_count: number;
+  unprepared_line_count: number;
+  incomplete_shipment_count: number;
+  shipment_count: number;
+  route_status: string;
+};
 
 export type ShipmentLine = {
   id: number;
@@ -329,6 +344,7 @@ export type Shipment = {
   route_assignments: ShipmentRouteAssignment[];
   status_history: ShipmentStatusHistory[];
   command_eligibility: Record<string, ShipmentCommandEligibility>;
+  route_close_readiness: RouteCloseReadiness | null;
   created_at: string;
   updated_at: string;
 };

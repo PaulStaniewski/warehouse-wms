@@ -116,6 +116,15 @@ function shipment(overrides: Partial<Shipment> = {}): Shipment {
       change_status: { enabled: true, reason: "" },
       proforma: { enabled: true, reason: "" },
       print_documents: { enabled: true, reason: "" },
+    },    route_close_readiness: {
+      can_close: false,
+      close_blockers: [{ code: "picking_incomplete", message: "1 Shipment line(s) still require picking." }],
+      unpicked_line_count: 1,
+      uncontrolled_line_count: 0,
+      unprepared_line_count: 0,
+      incomplete_shipment_count: 1,
+      shipment_count: 1,
+      route_status: "open",
     },
     created_at: "2026-07-20T08:00:00Z",
     updated_at: "2026-07-20T08:00:00Z",
@@ -209,21 +218,78 @@ describe("ShipmentsPage", () => {
 
   it("keeps route closure in Shipments and uses the canonical identifier", async () => {
     const user = userEvent.setup();
-    mockShipmentsApi([
-      shipment({
+    const readyShipment = shipment({
+      route_status: "ready_to_close",
+      command_eligibility: {
+        ...shipment().command_eligibility,
+        close_route: { enabled: true, reason: "" },
+      },
+      route_close_readiness: {
+        can_close: true,
+        close_blockers: [],
+        unpicked_line_count: 0,
+        uncontrolled_line_count: 0,
+        unprepared_line_count: 0,
+        incomplete_shipment_count: 0,
+        shipment_count: 2,
         route_status: "ready_to_close",
-        command_eligibility: {
-          ...shipment().command_eligibility,
-          close_route: { enabled: true, reason: "" },
-        },
-      }),
-    ]);
+      },
+    });
+    mockShipmentsApi([readyShipment]);
+    mockApiClient.post.mockResolvedValueOnce({
+      data: {
+        message: "Route ROUTE-01_MON-1 closed. 2 Shipment documents were printed.",
+        shipment: readyShipment,
+        document_count: 2,
+      },
+    });
 
     renderWithProviders(<App />, { route: "/wms/shipments" });
 
     expect((await screen.findAllByText("ROUTE-01_MON-1")).length).toBeGreaterThan(0);
-    await user.click(screen.getByRole("button", { name: /Close Routes/i }));
+    await user.click(screen.getByRole("button", { name: /Close Route and Print Package/i }));
+    expect(screen.getByText(/complete route package/i)).toBeInTheDocument();
+    await user.click(screen.getAllByRole("button", { name: "Close Route and Print Package" }).at(-1)!);
     await waitFor(() => expect(mockApiClient.post).toHaveBeenCalledWith("/shipments/1/close-route/", {}));
+    expect(await screen.findByText("Route ROUTE-01_MON-1 closed. 2 Shipment documents were printed.")).toBeInTheDocument();
+  });
+
+  it("renders structured route blockers instead of a generic HTTP error", async () => {
+    const user = userEvent.setup();
+    const readyShipment = shipment({
+      command_eligibility: {
+        ...shipment().command_eligibility,
+        close_route: { enabled: true, reason: "" },
+      },
+      route_close_readiness: {
+        can_close: true,
+        close_blockers: [],
+        unpicked_line_count: 0,
+        uncontrolled_line_count: 0,
+        unprepared_line_count: 0,
+        incomplete_shipment_count: 0,
+        shipment_count: 2,
+        route_status: "ready_to_close",
+      },
+    });
+    mockShipmentsApi([readyShipment]);
+    mockApiClient.post.mockRejectedValueOnce({
+      message: "Request failed with status code 400",
+      response: {
+        data: {
+          detail: "Route cannot be closed.",
+          code: "route_not_ready",
+          blockers: [{ code: "control_incomplete", message: "2 Shipment lines still require Control." }],
+        },
+      },
+    });
+
+    renderWithProviders(<App />, { route: "/wms/shipments" });
+
+    await user.click(await screen.findByRole("button", { name: /Close Route and Print Package/i }));
+    await user.click(screen.getAllByRole("button", { name: "Close Route and Print Package" }).at(-1)!);
+    expect(await screen.findByText("2 Shipment lines still require Control.")).toBeInTheDocument();
+    expect(screen.queryByText("Request failed with status code 400")).not.toBeInTheDocument();
   });
   it("loads the direct detail route without requiring a query-string selection", async () => {
     mockShipmentsApi();

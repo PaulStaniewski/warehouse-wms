@@ -92,3 +92,9 @@ must not duplicate tasks, movements, adjustments or events.
 ## RouteRun dispatch-board projection
 
 active_route_run_queryset defines the shared non-terminal, non-empty RouteRun board set and authoritative order. Route Monitor presents the full set; Scanner Proformas preserves that relative order while filtering to RouteRuns with an active Shipment, effective ShipmentLine, and canonical nonterminal PickingTask with remaining quantity. Shared rows serialize identical effective ShipmentLine buckets, PickingTask quantities, active claims, readiness, cutoff/departure attention, and progress. Scanner aliases are presentation-only and never recalculate operational truth. Exact RouteRun IDs connect job selection to Shipment-owned route assignment; operational identifiers are display labels only.
+
+## RouteRun close package
+
+RouteRun remains the aggregate boundary for outbound route closure. route_close_readiness projects blockers from every active Shipment, effective ShipmentLine, and canonical PickingTask. The same projection supplies Shipments command eligibility, Shipments detail, Route Monitor readiness, and close-service validation.
+
+Closing owns a single transaction: lock RouteRun and Shipments, validate readiness, print the supported Shipment-document package, write route-level print evidence to RouteRun.documents_printed_at and Event Register, then set RouteRun status to closed and complete active Shipments. Printing one Shipment separately updates only that Shipment's document evidence.

@@ -657,8 +657,7 @@ class ShipmentCommandCenterTests(APITestCase):
         self.shipment.status = Shipment.Status.PREPARED
         self.shipment.save(update_fields=["status", "updated_at"])
         self.route_run.status = RouteRun.Status.READY_TO_CLOSE
-        self.route_run.documents_printed_at = timezone.now()
-        self.route_run.save(update_fields=["status", "documents_printed_at", "updated_at"])
+        self.route_run.save(update_fields=["status", "updated_at"])
         self.login()
         blocked = self.client.post(f"/api/shipments/{self.shipment.id}/close-route/", {}, format="json")
         self.assertEqual(blocked.status_code, status.HTTP_400_BAD_REQUEST)
@@ -9787,6 +9786,23 @@ class RouteRunLifecycleTests(APITestCase):
             quantity_picked=Decimal("0"),
             quantity_prepared=Decimal("0"),
         )
+        self.shipment = Shipment.objects.create(
+            branch=self.branch,
+            order=self.order,
+            route_run=self.route_run,
+            reference="SHP-LIFE-001",
+            external_reference="AX-SHP-LIFE-001",
+            status=Shipment.Status.ACTIVE,
+            shipment_type=Shipment.ShipmentType.CUSTOMER_DELIVERY,
+            document_status=Shipment.DocumentStatus.AVAILABLE,
+        )
+        ShipmentLine.objects.create(
+            shipment=self.shipment,
+            order_line=self.order_line,
+            product=self.product,
+            line_number=1,
+            ordered_quantity=Decimal("1"),
+        )
         self.user = create_branch_user("LFC_LEADER", self.branch, UserBranchMembership.Role.LEADER)
         self.client.force_authenticate(self.user)
 
@@ -9797,6 +9813,8 @@ class RouteRunLifecycleTests(APITestCase):
         self.task.quantity_prepared = Decimal("1")
         self.task.status = PickingTask.Status.COMPLETED
         self.task.save(update_fields=["quantity_picked", "quantity_prepared", "status", "updated_at"])
+        self.shipment.status = Shipment.Status.PREPARED
+        self.shipment.save(update_fields=["status", "updated_at"])
         return recalculate_route_readiness(self.route_run)
 
     def print_documents(self):
@@ -9900,15 +9918,19 @@ class RouteRunLifecycleTests(APITestCase):
         response = self.close_route()
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("not ready", response.data["detail"])
+        self.assertEqual(response.data["code"], "route_not_ready")
 
-    def test_close_rejects_route_without_printed_documents(self):
+    def test_close_prints_package_without_previous_route_print(self):
         self.mark_prepared()
 
         response = self.close_route()
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("printed", response.data["detail"])
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.route_run.refresh_from_db()
+        self.shipment.refresh_from_db()
+        self.assertIsNotNone(self.route_run.documents_printed_at)
+        self.assertEqual(response.data["document_count"], 1)
+        self.assertEqual(self.shipment.document_print_count, 1)
 
     def test_close_succeeds_after_documents_are_printed(self):
         self.mark_prepared()
@@ -9922,6 +9944,33 @@ class RouteRunLifecycleTests(APITestCase):
         self.assertIsNotNone(self.route_run.closed_at)
         self.assertTrue(AuditLog.objects.filter(message__icontains="closed").exists())
 
+    def test_route_package_print_failure_leaves_route_open(self):
+        self.mark_prepared()
+
+        with patch("operations.shipment_services.print_route_document_package", side_effect=RuntimeError("printer offline")):
+            response = self.close_route()
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["code"], "route_print_failed")
+        self.route_run.refresh_from_db()
+        self.shipment.refresh_from_db()
+        self.assertEqual(self.route_run.status, RouteRun.Status.READY_TO_CLOSE)
+        self.assertIsNone(self.route_run.closed_at)
+        self.assertEqual(self.shipment.document_print_count, 0)
+
+    def test_repeated_close_does_not_reprint_or_duplicate_evidence(self):
+        self.mark_prepared()
+        first = self.close_route()
+        printed_at = first.data["printed_at"]
+        second = self.close_route()
+
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertTrue(second.data["replayed"])
+        self.assertEqual(second.data["printed_at"], printed_at)
+        self.shipment.refresh_from_db()
+        self.assertEqual(self.shipment.document_print_count, 1)
+        self.assertEqual(AuditLog.objects.filter(event_type="route_package_printed", route_run=self.route_run).count(), 1)
+        self.assertEqual(AuditLog.objects.filter(event_type="route_run_closed", route_run=self.route_run).count(), 1)
     def test_closed_route_is_excluded_from_active_monitor(self):
         self.mark_prepared()
         self.print_documents()

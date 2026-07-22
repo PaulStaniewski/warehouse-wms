@@ -57,6 +57,7 @@ from operations.shipment_services import (
     shipment_line_max_removable_quantity,
     shipment_line_task_totals,
     shipment_picking_totals,
+    route_close_readiness,
 )
 from operations.operational_projections import (
     route_run_quantity_progress,
@@ -346,7 +347,7 @@ class RouteRunSerializer(serializers.ModelSerializer):
         return audit_log.created_at.isoformat()
 
     def get_is_ready_to_close(self, obj: RouteRun) -> bool:
-        return obj.status == RouteRun.Status.READY_TO_CLOSE or is_route_work_fully_prepared(obj)
+        return route_close_readiness(obj)["can_close"]
 
     def get_is_late(self, obj: RouteRun) -> bool:
         if obj.status == RouteRun.Status.CLOSED:
@@ -1089,6 +1090,7 @@ class ShipmentSerializer(serializers.ModelSerializer):
     route_assignments = ShipmentRouteAssignmentSerializer(many=True, read_only=True)
     status_history = ShipmentStatusHistorySerializer(many=True, read_only=True)
     command_eligibility = serializers.SerializerMethodField()
+    route_close_readiness = serializers.SerializerMethodField()
 
     def _statuses(self, obj: Shipment) -> dict:
         cache_name = "_shipment_statuses"
@@ -1136,6 +1138,13 @@ class ShipmentSerializer(serializers.ModelSerializer):
     def _eligibility(self, enabled: bool, reason: str = "") -> dict:
         return {"enabled": enabled, "reason": reason}
 
+    def get_route_close_readiness(self, obj: Shipment) -> dict | None:
+        if obj.route_run_id is None:
+            return None
+        cache_name = "_route_close_readiness"
+        if not hasattr(obj.route_run, cache_name):
+            setattr(obj.route_run, cache_name, route_close_readiness(obj.route_run))
+        return getattr(obj.route_run, cache_name)
     def get_command_eligibility(self, obj: Shipment) -> dict:
         statuses = self._statuses(obj)
         terminal = obj.status in {
@@ -1177,8 +1186,9 @@ class ShipmentSerializer(serializers.ModelSerializer):
                 "Shipment must have an open route.",
             ),
             "close_route": self._eligibility(
-                obj.route_run is not None and obj.route_run.status == RouteRun.Status.READY_TO_CLOSE,
-                "Route must be ready to close.",
+                bool(self.get_route_close_readiness(obj) and self.get_route_close_readiness(obj)["can_close"]),
+                "" if self.get_route_close_readiness(obj) and self.get_route_close_readiness(obj)["can_close"]
+                else "Route has unfinished warehouse work.",
             ),
             "change_route": self._eligibility(
                 obj.route_run is not None and not terminal and obj.documents_posted_at is None,
@@ -1263,6 +1273,7 @@ class ShipmentSerializer(serializers.ModelSerializer):
             "route_assignments",
             "status_history",
             "command_eligibility",
+            "route_close_readiness",
             "created_at",
             "updated_at",
         ]

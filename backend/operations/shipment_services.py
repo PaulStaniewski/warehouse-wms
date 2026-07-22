@@ -18,6 +18,7 @@ from operations.models import (
     ShipmentStatusHistory,
 )
 from operations.operational_projections import shipment_line_progress, shipment_operational_projection
+from operations.route_services import operational_identifier
 from operations.services import is_route_work_fully_prepared, recalculate_route_readiness
 from warehouse.models import InventoryItem
 
@@ -389,33 +390,240 @@ def confirm_picking_route(user, shipment_id: int):
         return shipment, replayed
 
 
-def close_shipment_route(user, shipment_id: int):
+def route_close_readiness(route_run: RouteRun) -> dict:
+    active_shipments = list(
+        route_run.shipments.exclude(status=Shipment.Status.CANCELLED).prefetch_related(
+            "lines__order_line__picking_tasks"
+        )
+    )
+    unpicked_line_count = 0
+    uncontrolled_line_count = 0
+    unprepared_line_count = 0
+    incomplete_shipment_count = 0
+
+    prepared_statuses = {
+        Shipment.Status.PREPARED,
+        Shipment.Status.DOCUMENTS_POSTED,
+        Shipment.Status.READY_FOR_DISPATCH,
+    }
+    for shipment in active_shipments:
+        effective_lines = []
+        shipment_incomplete = False
+        for line in shipment.lines.all():
+            progress = shipment_line_progress(line)
+            if progress.effective_quantity <= 0:
+                continue
+            effective_lines.append(line)
+            required = max(progress.effective_quantity - progress.shortage_quantity, Decimal("0"))
+            if progress.remaining_to_pick > 0:
+                unpicked_line_count += 1
+                shipment_incomplete = True
+            elif progress.prepared_quantity < required:
+                uncontrolled_line_count += 1
+                shipment_incomplete = True
+        if effective_lines and shipment.status not in prepared_statuses:
+            if not shipment_incomplete:
+                unprepared_line_count += len(effective_lines)
+            shipment_incomplete = True
+        if shipment_incomplete:
+            incomplete_shipment_count += 1
+
+    blockers = []
+    if not active_shipments:
+        blockers.append({"code": "no_active_shipments", "message": "The route has no active Shipments."})
+    if unpicked_line_count:
+        blockers.append(
+            {
+                "code": "picking_incomplete",
+                "message": f"{unpicked_line_count} Shipment line(s) still require picking.",
+            }
+        )
+    if uncontrolled_line_count:
+        blockers.append(
+            {
+                "code": "control_incomplete",
+                "message": f"{uncontrolled_line_count} Shipment line(s) still require Control.",
+            }
+        )
+    if unprepared_line_count:
+        blockers.append(
+            {
+                "code": "preparation_incomplete",
+                "message": f"{unprepared_line_count} Shipment line(s) still require preparation.",
+            }
+        )
+    if incomplete_shipment_count > 1:
+        blockers.append(
+            {
+                "code": "shipment_incomplete",
+                "message": "Another Shipment assigned to this RouteRun is incomplete.",
+            }
+        )
+
+    lifecycle_blocked = route_run.status in {
+        RouteRun.Status.CLOSED,
+        RouteRun.Status.CANCELLED,
+        RouteRun.Status.DISPATCHED,
+    }
+    return {
+        "can_close": not lifecycle_blocked and not blockers,
+        "close_blockers": blockers,
+        "unpicked_line_count": unpicked_line_count,
+        "uncontrolled_line_count": uncontrolled_line_count,
+        "unprepared_line_count": unprepared_line_count,
+        "incomplete_shipment_count": incomplete_shipment_count,
+        "shipment_count": len(active_shipments),
+        "route_status": route_run.status,
+    }
+
+
+def print_route_document_package(user, route_run: RouteRun, shipments: list[Shipment], printer_code: str) -> dict:
+    """Print the supported route package: one Shipment document per active Shipment."""
+    printed_at = timezone.now()
+    for shipment in shipments:
+        if shipment.document_status != Shipment.DocumentStatus.POSTED:
+            shipment.document_status = Shipment.DocumentStatus.PRINTED
+        shipment.documents_printed_at = printed_at
+        shipment.documents_printed_by = user
+        shipment.document_print_count += 1
+        shipment.save(
+            update_fields=[
+                "document_status",
+                "documents_printed_at",
+                "documents_printed_by",
+                "document_print_count",
+                "updated_at",
+            ]
+        )
+    return {
+        "document_count": len(shipments),
+        "printer_code": printer_code,
+        "printed_at": printed_at,
+    }
+
+
+def close_route_run(user, route_run_id: int, printer_code: str = "WMS-ROUTE") -> dict:
     with transaction.atomic():
-        shipment = Shipment.objects.select_for_update().select_related("branch").get(pk=shipment_id)
-        require_branch_access(user, shipment.branch)
-        if shipment.route_run is None:
-            raise ValidationError("Shipment is not assigned to a route.")
-        route_run = RouteRun.objects.select_for_update().select_related("route", "route__branch").get(pk=shipment.route_run_id)
+        route_run = (
+            RouteRun.objects.select_for_update()
+            .select_related("route", "route__branch")
+            .get(pk=route_run_id)
+        )
         require_branch_access(user, route_run.route.branch)
+        shipments = list(
+            Shipment.objects.select_for_update()
+            .select_related("branch", "order")
+            .filter(route_run=route_run)
+            .exclude(status=Shipment.Status.CANCELLED)
+            .order_by("id")
+        )
+
         if route_run.status == RouteRun.Status.CLOSED:
-            return shipment, True
-        recalculate_route_readiness(route_run)
-        route_run.refresh_from_db()
-        if not is_route_work_fully_prepared(route_run):
-            raise ValidationError("Route run is not ready to close.")
-        if route_run.documents_printed_at is None:
-            raise ValidationError("Route documents must be printed before closing.")
+            return {
+                "replayed": True,
+                "route_run_id": route_run.id,
+                "operational_identifier": operational_identifier(
+                    route_run.route, route_run.service_date, route_run.run_number
+                ),
+                "shipment_count": len(shipments),
+                "document_count": len(shipments),
+                "printer_code": printer_code,
+                "printed_at": route_run.documents_printed_at,
+                "closed_at": route_run.closed_at,
+                "status": route_run.status,
+            }
+        if route_run.status in {RouteRun.Status.CANCELLED, RouteRun.Status.DISPATCHED}:
+            raise ValidationError(
+                {
+                    "detail": "Route cannot be closed.",
+                    "code": "route_not_open",
+                    "blockers": [
+                        {"code": "route_not_open", "message": "The RouteRun is no longer open."}
+                    ],
+                }
+            )
+
+        readiness = route_close_readiness(route_run)
+        if not readiness["can_close"]:
+            raise ValidationError(
+                {
+                    "detail": "Route cannot be closed.",
+                    "code": "route_not_ready",
+                    "blockers": readiness["close_blockers"],
+                    **{key: readiness[key] for key in [
+                        "unpicked_line_count",
+                        "uncontrolled_line_count",
+                        "unprepared_line_count",
+                        "incomplete_shipment_count",
+                    ]},
+                }
+            )
+
+        try:
+            package = print_route_document_package(user, route_run, shipments, printer_code)
+        except Exception:
+            transaction.set_rollback(True)
+            raise ValidationError(
+                {
+                    "detail": "Route package could not be printed. The route remains open.",
+                    "code": "route_print_failed",
+                    "route_run_id": route_run.id,
+                }
+            )
+
+        route_run.documents_printed_at = package["printed_at"]
         route_run.status = RouteRun.Status.CLOSED
         route_run.closed_at = timezone.now()
-        route_run.save(update_fields=["status", "closed_at", "updated_at"])
-        Shipment.objects.filter(route_run=route_run).exclude(status=Shipment.Status.CANCELLED).update(
+        route_run.save(update_fields=["documents_printed_at", "status", "closed_at", "updated_at"])
+        Shipment.objects.filter(id__in=[shipment.id for shipment in shipments]).update(
             status=Shipment.Status.COMPLETED,
-            updated_at=timezone.now(),
+            updated_at=route_run.closed_at,
         )
-        shipment.refresh_from_db()
-        audit_shipment_event(user, shipment, "shipment_route_closed", f"{user.username} closed route for shipment {shipment.reference}.")
-        return shipment, False
+        identifier = operational_identifier(route_run.route, route_run.service_date, route_run.run_number)
+        AuditLog.objects.create(
+            actor=user,
+            action_type=AuditLog.ActionType.UPDATE,
+            event_type="route_package_printed",
+            branch=route_run.route.branch,
+            route_run=route_run,
+            reference=identifier,
+            result=printer_code[:64],
+            entity_name="RouteRun",
+            entity_id=str(route_run.id),
+            message=f"Route package printed for {identifier}: {package['document_count']} Shipment document(s).",
+        )
+        AuditLog.objects.create(
+            actor=user,
+            action_type=AuditLog.ActionType.STATUS_CHANGE,
+            event_type="route_run_closed",
+            branch=route_run.route.branch,
+            route_run=route_run,
+            reference=identifier,
+            entity_name="RouteRun",
+            entity_id=str(route_run.id),
+            message=f"{user.username} closed RouteRun {identifier} after route package printing.",
+        )
+        return {
+            "replayed": False,
+            "route_run_id": route_run.id,
+            "operational_identifier": identifier,
+            "shipment_count": len(shipments),
+            "document_count": package["document_count"],
+            "printer_code": package["printer_code"],
+            "printed_at": package["printed_at"],
+            "closed_at": route_run.closed_at,
+            "status": route_run.status,
+        }
 
+
+def close_shipment_route(user, shipment_id: int, printer_code: str = "WMS-ROUTE"):
+    shipment = Shipment.objects.select_related("branch", "route_run").get(pk=shipment_id)
+    require_branch_access(user, shipment.branch)
+    if shipment.route_run_id is None:
+        raise ValidationError("Shipment is not assigned to a route.")
+    result = close_route_run(user, shipment.route_run_id, printer_code)
+    shipment.refresh_from_db()
+    return shipment, result
 
 def change_shipment_route(user, shipment_id: int, new_route_run_id: int, reason: str = "", client_operation_id: str | None = None):
     reason = reason.strip()

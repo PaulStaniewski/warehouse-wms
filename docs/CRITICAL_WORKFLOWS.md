@@ -164,7 +164,7 @@ The WMS command panel exposes only context-aware commands:
 - Post Documents records Shipment document-posted state and event evidence only. It does not release TransferPallets, change InterBranchTransfer transit state, mutate inventory, or enable destination Receiving; that boundary belongs to a future Freight/Forwarding module.
 - Picking Route confirmation records review evidence only; route optimization remains outside this stage.
 - Proforma print records an event for the existing source order representation. No invoice, tax, accounting, or AX document generation is implemented.
-- Close Routes delegates to the existing RouteRun readiness and document-print rules. `RouteRun` is the route aggregate; the monitor and close rules evaluate all non-cancelled Shipments assigned to the run, not only the currently selected Shipment.
+- Close Route and Print Package delegates to the authoritative RouteRun readiness and close service. RouteRun is the route aggregate; closure evaluates all non-cancelled Shipments assigned to the run, prints the complete supported package during closure, and does not require an earlier manual route print.
 - Change Route updates the Shipment and source Order route assignment, records append-only route history, and marks printed documents as requiring refresh. It does not require a reason. Eligible targets are server-filtered to the same branch and exclude closed, cancelled, dispatched, and current RouteRuns. The WMS dialog defaults to today's operational routes and can expand to the current Monday-Sunday operational week with route-code search.
 - Change Status uses a small server-side transition matrix and cannot fake picking, control, document posting, receiving visibility, or route closure.
 
@@ -241,3 +241,12 @@ Manual smoke testing is still useful for scanner ergonomics and multi-screen beh
 ## Canonical outbound consistency
 
 External demand enters through `upsert_external_shipment`; shipment commands and scanner commands then mutate the same Order/Shipment/PickingTask graph. Shipment and Route Monitor quantities come from `operations.operational_projections`. Quantity removal and route reassignment are non-stock operations. Scanner picking must atomically update InventoryItem and create StockMovement evidence. Before operational release, run `check_operational_consistency --branch <code> --fail-on-error`.
+## Route close and complete document package
+
+The authoritative completion sequence is:
+
+Picking -> Control -> Preparation -> Close Route from Shipments -> generate and print the complete RouteRun package -> mark RouteRun closed -> remove it from the active Route Monitor.
+
+The Shipments command locks the exact RouteRun, checks every non-cancelled Shipment and every effective ShipmentLine, prints one existing Shipment document per active Shipment, records route_package_printed evidence, closes the RouteRun, completes its active Shipments, and records route_run_closed evidence. Zero-effective lines and cancelled Shipments are excluded. A package-generation or print failure rolls back all package evidence and leaves the RouteRun open. A repeated close is an idempotent replay and does not reprint.
+
+Print Shipment Document prints or reprints only the selected Shipment document. It does not satisfy route-package printing and does not close the RouteRun.

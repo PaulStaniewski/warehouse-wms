@@ -181,3 +181,10 @@ The canonical outbound graph, quantity ownership, projections, import boundary, 
 ```powershell
 python manage.py check_operational_consistency --branch GDY --fail-on-error
 ```
+### Route close and complete document package
+
+The outbound completion sequence is Picking -> Control -> Preparation -> Close Route from Shipments -> generate and print the complete RouteRun package -> mark the RouteRun closed -> remove it from the active Route Monitor and Scanner Proformas. Route closure validates every active Shipment and effective ShipmentLine assigned to the RouteRun. Cancelled Shipments and zero-effective lines do not block closure.
+
+Close Route and Print Package prints one supported Shipment document for every active Shipment in the RouteRun and records route-package and route-close Event Register evidence before the RouteRun leaves the active board. Printing must succeed before the close transition; failures leave the RouteRun open. Repeated close requests replay the existing result without printing again.
+
+Print Shipment Document is separate: it prints or reprints one Shipment document and never closes a RouteRun or marks the complete route package as printed.

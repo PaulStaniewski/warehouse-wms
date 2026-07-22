@@ -112,6 +112,7 @@ from operations.shipment_services import (
     change_shipment_route,
     change_shipment_status,
     close_shipment_route,
+    close_route_run,
     confirm_picking_route,
     post_inter_branch_documents,
     post_picking_lists,
@@ -482,36 +483,24 @@ class RouteRunViewSet(ReadOnlyModelViewSet):
 
     @action(detail=True, methods=["post"])
     def close(self, request, pk=None):
-        route_run = self.get_object()
-        if request.user.is_authenticated:
-            require_branch_access(request.user, route_run.route.branch)
-        recalculate_route_readiness(route_run)
-        route_run.refresh_from_db()
-
-        if route_run.status == RouteRun.Status.CLOSED:
-            return Response({"detail": "Route run is already closed."}, status=status.HTTP_400_BAD_REQUEST)
-
-        if not is_route_work_fully_prepared(route_run):
-            return Response({"detail": "Route run is not ready to close."}, status=status.HTTP_400_BAD_REQUEST)
-
-        if route_run.documents_printed_at is None:
-            return Response({"detail": "Route documents must be printed before closing."}, status=status.HTTP_400_BAD_REQUEST)
-
-        closed_late = is_route_late(route_run)
-        route_run.status = RouteRun.Status.CLOSED
-        route_run.closed_at = timezone.now()
-        route_run.save(update_fields=["status", "closed_at", "updated_at"])
-        AuditLog.objects.create(
-            actor=audit_actor(request),
-            action_type=AuditLog.ActionType.STATUS_CHANGE,
-            entity_name="RouteRun",
-            entity_id=str(route_run.id),
-            message=f"Route run {route_run.id} closed {'late' if closed_late else 'on time'}.",
+        result = close_route_run(
+            request.user,
+            self.get_object().id,
+            str(request.data.get("printer_code", "WMS-ROUTE")).strip() or "WMS-ROUTE",
         )
-
-        serializer = self.get_serializer(route_run)
-        return Response({"message": "Route run closed.", "route_run": serializer.data})
-
+        route_run = RouteRun.objects.get(pk=result["route_run_id"])
+        return Response(
+            {
+                "message": (
+                    f"Route {result['operational_identifier']} was already closed."
+                    if result["replayed"]
+                    else f"Route {result['operational_identifier']} closed. "
+                    f"{result['document_count']} Shipment documents were printed."
+                ),
+                "route_run": self.get_serializer(route_run).data,
+                **result,
+            }
+        )
 
 class OrderViewSet(ReadOnlyModelViewSet):
     queryset = Order.objects.select_related("branch", "route_run", "route_run__route")
@@ -1222,8 +1211,23 @@ class ShipmentViewSet(ReadOnlyModelViewSet):
 
     @action(detail=True, methods=["post"], url_path="close-route")
     def close_route(self, request, pk=None):
-        shipment, replayed = close_shipment_route(request.user, self.get_object().id)
-        return Response({"message": "Route was already closed." if replayed else "Route closed.", "shipment": self.get_serializer(shipment).data})
+        shipment, result = close_shipment_route(
+            request.user,
+            self.get_object().id,
+            str(request.data.get("printer_code", "WMS-ROUTE")).strip() or "WMS-ROUTE",
+        )
+        return Response(
+            {
+                "message": (
+                    f"Route {result['operational_identifier']} was already closed."
+                    if result["replayed"]
+                    else f"Route {result['operational_identifier']} closed. "
+                    f"{result['document_count']} Shipment documents were printed."
+                ),
+                "shipment": self.get_serializer(shipment).data,
+                **result,
+            }
+        )
 
     @action(detail=True, methods=["post"], url_path="change-route")
     def change_route(self, request, pk=None):

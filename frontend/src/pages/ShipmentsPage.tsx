@@ -60,7 +60,7 @@ const SHIPMENT_STATUSES = [
 const PICKING_STATUSES = ["", "not_started", "in_progress", "completed", "shortage"];
 const MANUAL_NEXT_STATUSES = ["active", "exception", "cancelled"];
 
-type DialogMode = "cancel" | "change_route" | "change_status" | "remove_quantity" | null;
+type DialogMode = "cancel" | "close_route" | "change_route" | "change_status" | "remove_quantity" | null;
 
 type ShipmentCommand =
   | {
@@ -109,8 +109,14 @@ function targetById(targets: ShipmentRouteTarget[], id: string) {
 }
 
 function errorMessage(error: unknown) {
-  const axiosError = error as AxiosError<{ detail?: string; non_field_errors?: string[] }>;
-  return axiosError.response?.data?.detail ?? axiosError.response?.data?.non_field_errors?.join(" ") ?? axiosError.message ?? "Action failed.";
+  const axiosError = error as AxiosError<{
+    blockers?: Array<{ code: string; message: string }>;
+    detail?: string;
+    non_field_errors?: string[];
+  }>;
+  const data = axiosError.response?.data;
+  if (data?.blockers?.length) return data.blockers.map((blocker) => blocker.message).join(" ");
+  return data?.detail ?? data?.non_field_errors?.join(" ") ?? axiosError.message ?? "Action failed.";
 }
 
 type CommandTileProps = {
@@ -220,7 +226,16 @@ function ShipmentDetail({
           <Definition label="Imported" value={dateTime(shipment.external_created_at)} />
           <Definition label="Prepared by" value={shipment.prepared_by_username} />
         </dl>
-        {shipment.route_assignments.length > 0 && (
+        {shipment.route_close_readiness && (
+          <div className="route-history-box">
+            <strong>Route close readiness</strong>
+            <p>{shipment.route_close_readiness.can_close ? "Ready to close." : "Route has unfinished warehouse work."}</p>
+            <p>{shipment.route_close_readiness.shipment_count} Shipment(s) assigned.</p>
+            {shipment.route_close_readiness.close_blockers.map((blocker) => (
+              <p key={blocker.code}>{blocker.message}</p>
+            ))}
+          </div>
+        )}        {shipment.route_assignments.length > 0 && (
           <div className="route-history-box">
             <strong>Route history</strong>
             {shipment.route_assignments.slice(0, 3).map((assignment) => (
@@ -448,10 +463,10 @@ export function ShipmentsPage() {
         run: () => selectedShipment && confirmPickingRoute.mutateAsync(selectedShipment.id),
       },
       { key: "proforma", icon: FileText, title: "Proforma", description: "Print order preview.", run: () => selectedShipment && printProforma.mutateAsync(selectedShipment.id) },
-      { key: "close_route", icon: Truck, title: "Close Routes", description: "Close eligible route.", run: () => selectedShipment && closeRoute.mutateAsync(selectedShipment.id) },
+      { key: "close_route", icon: Truck, title: "Close Route and Print Package", description: "Print every Shipment document and close the RouteRun.", dialog: "close_route" },
       { key: "change_route", icon: Shuffle, title: "Change Route", description: "Move route.", dialog: "change_route" },
       { key: "change_status", icon: SlidersHorizontal, title: "Change Status", description: "Controlled transition.", dialog: "change_status" },
-      { key: "print_documents", icon: Printer, title: "Print Documents", description: "Print WMS documents.", run: () => selectedShipment && printDocuments.mutateAsync(selectedShipment.id) },
+      { key: "print_documents", icon: Printer, title: "Print Shipment Document", description: "Print or reprint this Shipment document only.", run: () => selectedShipment && printDocuments.mutateAsync(selectedShipment.id) },
     ],
     [activate, closeRoute, confirmPickingRoute, postDocuments, postPickingLists, prepare, printDocuments, printProforma, selectedShipment],
   );
@@ -639,6 +654,41 @@ export function ShipmentsPage() {
         ) : null}
       </DataState>
 
+      {dialogMode === "close_route" && selectedShipment && (
+        <CommandDialog
+          error={dialogError}
+          isPending={closeRoute.isPending}
+          onClose={() => setDialogMode(null)}
+          onSubmit={(event) => {
+            event.preventDefault();
+            void runAction(async () => {
+              const result = await closeRoute.mutateAsync(selectedShipment.id);
+              setSelectedLineId(null);
+              if (!routeShipmentId) {
+                const next = new URLSearchParams(searchParams);
+                next.delete("shipment");
+                setSearchParams(next, { replace: true });
+              }
+              return result;
+            });
+          }}
+          submitLabel="Close Route and Print Package"
+          title={"Close " + (selectedShipment.route_identifier || "RouteRun")}
+        >
+          <p className="shipment-dialog-context">
+            The complete route package will print one Shipment document for every active Shipment assigned to this RouteRun. The route closes only after printing succeeds.
+          </p>
+          <Definition label="RouteRun" value={selectedShipment.route_identifier} />
+          <Definition label="Shipments" value={selectedShipment.route_close_readiness?.shipment_count ?? "-"} />
+          <Definition
+            label="Readiness"
+            value={selectedShipment.route_close_readiness?.can_close ? "Ready to close" : "Warehouse work remains"}
+          />
+          {(selectedShipment.route_close_readiness?.close_blockers ?? []).map((blocker) => (
+            <p className="shipment-error-alert" key={blocker.code}>{blocker.message}</p>
+          ))}
+        </CommandDialog>
+      )}
       {dialogMode === "cancel" && selectedShipment && (
         <CommandDialog
           error={dialogError}

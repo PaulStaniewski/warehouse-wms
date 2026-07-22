@@ -554,6 +554,7 @@ function useShipmentCommand() {
       void queryClient.invalidateQueries({ queryKey: ["shipments"] });
       void queryClient.invalidateQueries({ queryKey: ["shipment", data.shipment.id] });
       void queryClient.invalidateQueries({ queryKey: ["route-runs"] });
+      void queryClient.invalidateQueries({ queryKey: ["scanner-proformas"] });
       void queryClient.invalidateQueries({ queryKey: ["dashboard-count"] });
       void queryClient.invalidateQueries({ queryKey: ["audit-logs"] });
       void queryClient.invalidateQueries({ queryKey: ["transport-overview"] });
@@ -666,6 +667,7 @@ export function useRemoveShipmentLineQuantity() {
       void queryClient.invalidateQueries({ queryKey: ["shipments"] });
       void queryClient.invalidateQueries({ queryKey: ["shipment", data.shipment.id] });
       void queryClient.invalidateQueries({ queryKey: ["route-runs"] });
+      void queryClient.invalidateQueries({ queryKey: ["scanner-proformas"] });
       void queryClient.invalidateQueries({ queryKey: ["picking-tasks"] });
       void queryClient.invalidateQueries({ queryKey: ["audit-logs"] });
     },
@@ -1154,6 +1156,7 @@ export function useOverrideRouteRunTimes() {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["route-runs"] });
+      void queryClient.invalidateQueries({ queryKey: ["scanner-proformas"] });
       void queryClient.invalidateQueries({ queryKey: ["audit-logs"] });
     },
   });
