@@ -11,6 +11,7 @@ from operations.models import (
     AuditLog,
     CartPickedItem,
     CartWorkSession,
+    CartWorkParticipant,
     DeliveryRoute,
     ExternalReturnDocument,
     ExternalReturnDocumentLine,
@@ -20,9 +21,11 @@ from operations.models import (
     PalletReceivingScan,
     PalletReceivingSession,
     PickingJob,
+    PickingJobTask,
     PickingShortage,
     PickingShortageAllocation,
     PickingTask,
+    PickingTaskClaim,
     PickingTaskReallocation,
     ReplenishmentRequest,
     ReturnAction,
@@ -65,6 +68,7 @@ class Command(BaseCommand):
     help = "Seed realistic demo data for the warehouse portfolio application."
 
     def handle(self, *args, **options):
+        self.seed_now = timezone.localtime().replace(microsecond=0)
         with transaction.atomic():
             self.cleanup_demo_workflow()
             branches = self.create_branches()
@@ -81,6 +85,7 @@ class Command(BaseCommand):
             scanner_carts = self.create_scanner_carts()
             transfer_pallets = self.create_transfer_pallets(branches, products)
             shipments = self.create_shipments(branches, orders, order_lines, route_runs, transfer_pallets)
+            self.create_scanner_demo_work(branches, demo_users, scanner_carts, shipments)
             stock_movements = self.create_stock_movements(branches, locations, products, inventory_items)
             audit_logs = self.create_audit_logs(orders, return_batch)
 
@@ -103,7 +108,45 @@ class Command(BaseCommand):
         self.stdout.write(f"Stock movements: {len(stock_movements)}")
         self.stdout.write(f"Audit logs: {len(audit_logs)}")
         self.stdout.write("Demo password: demo12345")
+        self.write_scenario_report(branches, shipments, route_runs)
 
+    def write_scenario_report(self, branches, shipments, route_runs):
+        scenarios = [
+            ("READY_BEFORE_CUTOFF", "SHP-GDY-0003", "neutral", "prepared", "Wait until cutoff; confirm the route changes to ready."),
+            ("READY_AFTER_CUTOFF", "SHP-GDY-READY-AFTER", "ready", "prepared", "Verify the green ready state."),
+            ("INCOMPLETE_AFTER_CUTOFF", "SHP-GDY-0001", "cutoff_warning", "not_started", "Complete the remaining pick and verify ready."),
+            ("DELAYED_OPEN", "SHP-GDY-0008", "delayed", "not_started", "Keep the run open and verify red delayed."),
+            ("ACTIVE_PICKING", "SHP-GDY-0002", "cutoff_warning", "started", "Continue the partially picked line."),
+            ("PARTIAL_PICKING", "SHP-GDY-0002", "cutoff_warning", "started", "Continue ACTIVE_PICKING from its half-picked quantity."),
+            ("QUANTITY_REMOVAL", "SHP-GDY-0006", "neutral", "not_started", "Remove quantity from a shipment line."),
+            ("PICKING_SHORTAGE", "SHP-GDY-0001", "cutoff_warning", "not_started", "Continue INCOMPLETE_AFTER_CUTOFF by reporting a shortage."),
+            ("CLOSED_AND_NEXT_ROUND", "SHP-GDY-0007", "neutral", "not_started", "Compare the closed first round with this open next round."),
+            ("ROUTE_REASSIGNMENT", "SHP-GDY-REASSIGN", "neutral", "not_started", "Move this shipment to another eligible open RouteRun."),
+            ("SCANNER_UNSTARTED", "SHP-GDY-REASSIGN", "neutral", "not_started", "Continue ROUTE_REASSIGNMENT by selecting its exact RouteRun ID in Scanner."),
+            ("SCANNER_ACTIVE_PICKING", "SHP-GDY-0002", "cutoff_warning", "started", "Continue ACTIVE_PICKING in the active WOZEK-03 session."),
+            ("SCANNER_PARTIAL_PICK", "SHP-GDY-0002", "cutoff_warning", "started", "Continue SCANNER_ACTIVE_PICKING and verify the remaining half quantity."),
+            ("SCANNER_ZERO_EFFECTIVE_EXCLUDED", "SHP-GDY-0006", "neutral", "zero_effective_excluded", "Continue QUANTITY_REMOVAL and verify line 2 is not pickable."),
+            ("SCANNER_PREPARED_EXCLUDED", "SHP-GDY-0003", "neutral", "prepared", "Verify the route remains on Route Monitor and is absent from Scanner Proformas."),
+            ("SCANNER_CLOSED_ROUTE_EXCLUDED", "SHP-GDY-0004", "muted", "prepared_historical", "Verify the closed RouteRun is absent from both active lists."),
+        ]
+        self.stdout.write("Operational demo scenarios (demo-owned records rebuilt):")
+        for name, reference, attention, line_state, action in scenarios:
+            shipment = shipments[reference]
+            route_identifier = shipment.route_run.operational_identifier if shipment.route_run else "unassigned"
+            self.stdout.write(
+                f"- {name}: route={route_identifier}; shipment={reference}; "
+                f"attention={attention}; line_state={line_state}; action={action}"
+            )
+        self.stdout.write(
+            "Operational totals: "
+            f"branch={branches['GDY'].code}, "
+            f"active_routes={RouteRun.objects.filter(pk__in=[run.pk for run in route_runs.values()], route__branch=branches['GDY']).exclude(status__in=[RouteRun.Status.CLOSED, RouteRun.Status.CANCELLED]).count()}, "
+            f"closed_routes={RouteRun.objects.filter(pk__in=[run.pk for run in route_runs.values()], route__branch=branches['GDY'], status=RouteRun.Status.CLOSED).count()}, "
+            f"shipments={Shipment.objects.filter(branch=branches['GDY']).count()}, "
+            f"shipment_lines={ShipmentLine.objects.filter(shipment__branch=branches['GDY']).count()}, "
+            f"picking_tasks={PickingTask.objects.filter(branch=branches['GDY']).count()}, "
+            f"active_scanner_sessions={ScannerSession.objects.filter(status=ScannerSession.Status.ACTIVE).count()}"
+        )
     def cleanup_demo_workflow(self):
         demo_cart_codes = ["WOZEK-01", "WOZEK-02", "WOZEK-03"]
         demo_transfer_refs = ["IBT-GDA-GDY-001", "IBT-GDA-GDY-DISC-001", "IBT-SHP-GDA-GDY-001"]
@@ -119,6 +162,8 @@ class Command(BaseCommand):
             "SHP-GDY-0006",
             "SHP-GDY-0007",
             "SHP-GDY-0008",
+            "SHP-GDY-READY-AFTER",
+            "SHP-GDY-REASSIGN",
         ]
         demo_order_refs = [
             "AX-ORDER-0001",
@@ -130,6 +175,8 @@ class Command(BaseCommand):
             "AX-SALE-RET-001",
             "AX-SALE-RET-002",
             "AX-SALE-RET-003",
+            "AX-ORDER-READY-AFTER",
+            "AX-ORDER-REASSIGN",
         ]
         demo_external_return_refs = ["ZW1103872"]
         demo_sales_correction_refs = ["SC-000001", "SC-000002", "SC-000003"]
@@ -378,8 +425,8 @@ class Command(BaseCommand):
         return routes
 
     def create_route_runs(self, delivery_routes):
-        now = timezone.localtime()
-        today = timezone.localdate()
+        now = self.seed_now
+        today = now.date()
 
         def as_time(delta: timedelta):
             return (now + delta).time().replace(microsecond=0)
@@ -393,9 +440,9 @@ class Command(BaseCommand):
                 "ROUTE-01",
                 1,
                 0,
-                as_time(timedelta(minutes=0)),
-                as_time(timedelta(minutes=1)),
-                as_time(timedelta(minutes=10)),
+                as_time(timedelta(minutes=-30)),
+                as_time(timedelta(minutes=-20)),
+                as_time(timedelta(minutes=30)),
                 RouteRun.Status.OPEN,
             ),
             (
@@ -413,9 +460,9 @@ class Command(BaseCommand):
                 "ROUTE-02",
                 1,
                 0,
-                as_time(timedelta(hours=1, minutes=50)),
-                as_time(timedelta(hours=1, minutes=51)),
-                as_time(timedelta(hours=2)),
+                as_time(timedelta(minutes=30)),
+                as_time(timedelta(minutes=40)),
+                as_time(timedelta(minutes=60)),
                 RouteRun.Status.READY_TO_CLOSE,
             ),
             (
@@ -462,12 +509,17 @@ class Command(BaseCommand):
                 "GDY",
                 "ROUTE-05",
                 1,
-                2,
-                as_time(timedelta(hours=2, minutes=50)),
-                as_time(timedelta(hours=2, minutes=51)),
-                as_time(timedelta(hours=3)),
+                0,
+                as_time(timedelta(minutes=-60)),
+                as_time(timedelta(minutes=-45)),
+                as_time(timedelta(minutes=-15)),
                 RouteRun.Status.OPEN,
             ),
+            ("GDY", "ROUTE-06", 1, 0, as_time(timedelta(minutes=-30)), as_time(timedelta(minutes=-20)), as_time(timedelta(minutes=30)), RouteRun.Status.OPEN),
+            ("GDY", "ROUTE-07", 1, 0, as_time(timedelta(minutes=90)), as_time(timedelta(minutes=100)), as_time(timedelta(minutes=120)), RouteRun.Status.OPEN),
+            ("GDY", "ROUTE-08", 1, 0, as_time(timedelta(minutes=150)), as_time(timedelta(minutes=160)), as_time(timedelta(minutes=180)), RouteRun.Status.OPEN),
+            ("GDY", "ROUTE-09", 1, 0, as_time(timedelta(minutes=210)), as_time(timedelta(minutes=220)), as_time(timedelta(minutes=240)), RouteRun.Status.OPEN),
+            ("GDY", "ROUTE-10", 1, 0, as_time(timedelta(minutes=270)), as_time(timedelta(minutes=280)), as_time(timedelta(minutes=300)), RouteRun.Status.OPEN),
         ]
 
         route_runs = {}
@@ -489,6 +541,15 @@ class Command(BaseCommand):
             )
             cutoff_at = as_datetime(service_date, cutoff_time)
             departure_at = as_datetime(service_date, departure_time)
+            scenario_window = {
+                ("GDY", "ROUTE-01", 1): (-30, 30),
+                ("GDY", "ROUTE-02", 1): (30, 60),
+                ("GDY", "ROUTE-05", 1): (-60, -15),
+                ("GDY", "ROUTE-06", 1): (-30, 30),
+            }.get((branch_code, route_code, run_number))
+            if scenario_window:
+                cutoff_at = now + timedelta(minutes=scenario_window[0])
+                departure_at = now + timedelta(minutes=scenario_window[1])
             ready_at = None
             documents_printed_at = None
             closed_at = None
@@ -546,6 +607,8 @@ class Command(BaseCommand):
             ),
             ("AX-ORDER-0006", "GDY", "Demo Client Six", "TARGET-TODAY", ("GDY", "ROUTE-01", 2), [("FILTR-001", 1, "1")]),
             ("AX-ORDER-0007", "GDY", "Demo Client Seven", "TARGET-WEEK", ("GDY", "ROUTE-05", 1), [("OLEJ-001", 1, "1")]),
+            ("AX-ORDER-READY-AFTER", "GDY", "Demo Ready After", "READY-AFTER", ("GDY", "ROUTE-06", 1), [("FILTR-001", 1, "1")]),
+            ("AX-ORDER-REASSIGN", "GDY", "Demo Reassignment", "REASSIGN", ("GDY", "ROUTE-07", 1), [("OLEJ-001", 1, "1")]),
             (
                 "AX-SALE-RET-001",
                 "GDY",
@@ -679,6 +742,8 @@ class Command(BaseCommand):
             (("AX-ORDER-LABEL-TEST", 2), "GDY", "A-01-02", PickingTask.Status.OPEN),
             (("AX-ORDER-0006", 1), "GDY", "A-01-01", PickingTask.Status.OPEN),
             (("AX-ORDER-0007", 1), "GDY", "A-01-02", PickingTask.Status.OPEN),
+            (("AX-ORDER-READY-AFTER", 1), "GDY", "A-01-01", PickingTask.Status.OPEN),
+            (("AX-ORDER-REASSIGN", 1), "GDY", "A-01-02", PickingTask.Status.OPEN),
         ]
 
         picking_tasks = {}
@@ -807,7 +872,7 @@ class Command(BaseCommand):
                 "payment_method": "Account",
                 "delivery_name": "Demo Client Two",
                 "external_notes": "Picking-in-progress shipment.",
-                "picked": True,
+                "partial_picked": True,
             },
             {
                 "reference": "SHP-GDY-0003",
@@ -886,7 +951,8 @@ class Command(BaseCommand):
                 "document_status": Shipment.DocumentStatus.NOT_AVAILABLE,
                 "payment_method": "Account",
                 "delivery_name": "Demo Client Label Test",
-                "external_notes": "Shipment that can be moved to another RouteRun.",
+                "external_notes": "Shipment for quantity removal with one zero-effective line.",
+                "zero_effective_lines": [2],
             },
             {
                 "reference": "SHP-GDY-0007",
@@ -911,6 +977,31 @@ class Command(BaseCommand):
                 "payment_method": "Account",
                 "delivery_name": "Demo Client Seven",
                 "external_notes": "Weekly eligible route target shipment.",
+            },
+            {
+                "reference": "SHP-GDY-READY-AFTER",
+                "order": "AX-ORDER-READY-AFTER",
+                "branch": "GDY",
+                "route": ("GDY", "ROUTE-06", 1),
+                "shipment_type": Shipment.ShipmentType.CUSTOMER_DELIVERY,
+                "status": Shipment.Status.PREPARED,
+                "document_status": Shipment.DocumentStatus.PRINTED,
+                "payment_method": "Account",
+                "delivery_name": "Demo Ready After",
+                "external_notes": "Prepared shipment on its dedicated post-cutoff RouteRun.",
+                "prepared": True,
+            },
+            {
+                "reference": "SHP-GDY-REASSIGN",
+                "order": "AX-ORDER-REASSIGN",
+                "branch": "GDY",
+                "route": ("GDY", "ROUTE-07", 1),
+                "shipment_type": Shipment.ShipmentType.CUSTOMER_DELIVERY,
+                "status": Shipment.Status.ACTIVE,
+                "document_status": Shipment.DocumentStatus.NOT_AVAILABLE,
+                "payment_method": "Account",
+                "delivery_name": "Demo Reassignment",
+                "external_notes": "Dedicated shipment for RouteRun reassignment testing.",
             },
         ]
 
@@ -975,6 +1066,12 @@ class Command(BaseCommand):
                     },
                 )
                 tasks = PickingTask.objects.filter(order_line=line)
+                if line.line_number in spec.get("zero_effective_lines", []):
+                    ShipmentLine.objects.filter(shipment=shipment, line_number=line.line_number).update(
+                        cancelled_quantity=line.quantity_ordered
+                    )
+                    tasks.update(status=PickingTask.Status.CANCELLED)
+                    continue
                 if spec.get("prepared"):
                     tasks.update(
                         status=PickingTask.Status.COMPLETED,
@@ -983,11 +1080,11 @@ class Command(BaseCommand):
                         quantity_prepared=line.quantity_ordered,
                         shortage_quantity=Decimal("0"),
                     )
-                elif spec.get("picked"):
+                elif spec.get("partial_picked"):
                     tasks.update(
-                        status=PickingTask.Status.PICKED,
+                        status=PickingTask.Status.IN_PROGRESS,
                         quantity_to_pick=line.quantity_ordered,
-                        quantity_picked=line.quantity_ordered,
+                        quantity_picked=line.quantity_ordered / Decimal("2"),
                         quantity_prepared=Decimal("0"),
                         shortage_quantity=Decimal("0"),
                     )
@@ -995,6 +1092,42 @@ class Command(BaseCommand):
                     tasks.update(status=PickingTask.Status.CANCELLED)
 
         return shipments
+
+    def create_scanner_demo_work(self, branches, users, carts, shipments):
+        """Attach scanner activity to the same canonical seeded picking graph."""
+        shipment = shipments["SHP-GDY-0002"]
+        task = PickingTask.objects.get(order_line__shipment_line__shipment=shipment)
+        job = PickingJob.objects.create(status=PickingJob.Status.IN_PROGRESS, mode=PickingJob.Mode.MERGED, started_at=self.seed_now)
+        job.route_runs.add(shipment.route_run)
+        PickingJobTask.objects.create(picking_job=job, picking_task=task)
+        cart = carts["WOZEK-03"]
+        cart.status = ScannerCart.Status.IN_USE
+        cart.save(update_fields=["status", "updated_at"])
+        scanner_session = ScannerSession.objects.create(
+            cart=cart,
+            worker_code=users["GDY_WORKER"].username,
+            status=ScannerSession.Status.ACTIVE,
+            started_at=self.seed_now,
+        )
+        work_session = CartWorkSession.objects.create(
+            cart=cart,
+            picking_job=job,
+            scanner_session=scanner_session,
+            status=CartWorkSession.Status.ACTIVE,
+            started_at=self.seed_now,
+        )
+        participant = CartWorkParticipant.objects.create(
+            cart_work_session=work_session,
+            user=users["GDY_WORKER"],
+            branch=branches["GDY"],
+            status=CartWorkParticipant.Status.ACTIVE,
+            current_picking_task=task,
+        )
+        PickingTaskClaim.objects.create(
+            picking_task=task,
+            cart_work_participant=participant,
+            status=PickingTaskClaim.Status.CLAIMED,
+        )
 
     def create_stock_movements(self, branches, locations, products, inventory_items):
         movement_data = [

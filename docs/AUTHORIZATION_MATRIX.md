@@ -54,7 +54,7 @@ Other operational routes inherit the authenticated default and then apply their 
 | Products | Authenticated reference data. Product quantities remain branch-owned through inventory endpoints. | Product mutation is not exposed in the WMS API. |
 | Locations | Filtered by branch membership. Branch query parameters must match an allowed branch. | Location-changing commands validate the location branch server-side. |
 | Inventory items and location contents | Filtered by branch membership. | Stock-changing commands derive branch, product, and location from stored records and validate branch access. |
-| Orders, order lines, proformas, route runs | Filtered through owning branch or route branch. | Scanner and route commands validate route, order, task, and branch relationships. |
+| Orders, order lines, proformas, route runs | Filtered through owning branch or route branch. Scanner Proformas is the pickable subset of Route Monitor and preserves the relative board order and projection values. | Scanner job creation validates exact RouteRun IDs, canonical ShipmentLine-linked tasks, remaining work, lifecycle, and branch access. Fully picked or prepared routes remain readable in Route Monitor but are absent from Scanner Proformas. |
 | Shipments | Filtered by owning Shipment branch. Detail access through guessed IDs is constrained by the scoped queryset. Route Monitor aggregates assigned Shipments through the authoritative RouteRun relation and active effective ShipmentLine quantities. Route-change targets are server-filtered by branch, state, date scope, current route exclusion, and recurring schedule eligibility. | Same-branch Workers and Leaders may activate, post picking lists, prepare, cancel eligible shipments, print/post supported documents, remove unpicked Shipment Line quantity, change eligible routes or schedule slots without providing a reason, close ready routes, and use controlled status changes. Post Documents is document-only and does not release freight or receiving visibility. Quantity removal is not a return and does not create inventory, StockMovement, Picking Shortage, or Sales Correction side effects. |
 | Stock movements | Filtered by movement branch. | Created by controlled workflow commands; client-provided before/after values are not authoritative. |
 | Stock adjustments | Branch-scoped register and detail. | Manual creation requires Leader in the target branch. Product and location must belong to that branch. |
@@ -113,3 +113,10 @@ Other operational routes inherit the authenticated default and then apply their 
 - Staff users do not receive a bypass unless they are also superusers or have branch memberships.
 - The active branch stored by the frontend selects working context only; it does not grant backend access.
 - The DRF default permission is authenticated access. Anonymous operational access requires an explicit, documented public exception.
+## Operational data spine commands
+
+| Operation | Authorization |
+| --- | --- |
+| External import/upsert boundary | Trusted backend/management integration; no public endpoint |
+| Shipment and route writes | Existing authenticated branch/role checks in domain services |
+| Operational consistency checker | Management command; read-only unless the caller elects failure exit behavior |

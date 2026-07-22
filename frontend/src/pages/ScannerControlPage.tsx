@@ -82,6 +82,8 @@ export function ScannerControlPage() {
       queryClient.invalidateQueries({ queryKey: ["scanner-control-cart-items", controlSession?.id] }),
       queryClient.invalidateQueries({ queryKey: ["scanner-control-target", controlSession?.id, productCode] }),
       queryClient.invalidateQueries({ queryKey: ["route-runs"] }),
+      queryClient.invalidateQueries({ queryKey: ["scanner-proformas"] }),
+      queryClient.invalidateQueries({ queryKey: ["shipments"] }),
       queryClient.invalidateQueries({ queryKey: ["audit-logs", "current"] }),
     ]);
   }, [controlCartCode, controlSession?.id, productCode, queryClient]);

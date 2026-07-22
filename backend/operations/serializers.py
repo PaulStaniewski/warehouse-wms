@@ -58,6 +58,12 @@ from operations.shipment_services import (
     shipment_line_task_totals,
     shipment_picking_totals,
 )
+from operations.operational_projections import (
+    route_run_quantity_progress,
+    route_run_workload_projection,
+    shipment_line_progress,
+    shipment_operational_projection,
+)
 from operations.services import (
     discrepancy_line_remaining,
     get_discrepancy_investigation_totals,
@@ -177,11 +183,20 @@ class RouteRunSerializer(serializers.ModelSerializer):
     attention_reason = serializers.SerializerMethodField()
     minutes_to_departure = serializers.SerializerMethodField()
     minutes_after_cutoff = serializers.SerializerMethodField()
+    operational_weekday = serializers.SerializerMethodField()
+    readiness_state = serializers.SerializerMethodField()
+    remaining_pickable_quantity = serializers.SerializerMethodField()
+    scanner_can_create_picking_job = serializers.SerializerMethodField()
+    scanner_blocking_reason = serializers.SerializerMethodField()
 
     def _get_shipments(self, obj: RouteRun):
         cache_name = "_monitor_shipments"
         if not hasattr(obj, cache_name):
-            setattr(obj, cache_name, list(obj.shipments.exclude(status=Shipment.Status.CANCELLED).prefetch_related("lines__order_line__picking_tasks")))
+            setattr(
+                obj,
+                cache_name,
+                [shipment for shipment in obj.shipments.all() if shipment.status != Shipment.Status.CANCELLED],
+            )
         return getattr(obj, cache_name)
 
     def _get_shipment_lines(self, obj: RouteRun):
@@ -191,19 +206,22 @@ class RouteRunSerializer(serializers.ModelSerializer):
     def _get_picking_tasks(self, obj: RouteRun):
         cache_name = "_monitor_picking_tasks"
         if not hasattr(obj, cache_name):
-            setattr(
-                obj,
-                cache_name,
-                list(
-                    PickingTask.objects.filter(
-                        models.Q(order_line__shipment_line__shipment__route_run=obj)
-                        | models.Q(order_line__order__route_run=obj, order_line__shipment_line__isnull=True)
-                    )
-                    .exclude(status=PickingTask.Status.CANCELLED)
-                    .exclude(order_line__shipment_line__shipment__status=Shipment.Status.CANCELLED)
-                    .distinct()
-                ),
-            )
+            tasks = {
+                task.id: task
+                for shipment in self._get_shipments(obj)
+                for line in shipment.lines.all()
+                for task in line.order_line.picking_tasks.all()
+                if task.status != PickingTask.Status.CANCELLED
+            }
+            if not tasks and not self._get_shipments(obj):
+                tasks = {
+                    task.id: task
+                    for order in obj.orders.all()
+                    for line in order.lines.all()
+                    for task in line.picking_tasks.all()
+                    if task.status != PickingTask.Status.CANCELLED
+                }
+            setattr(obj, cache_name, list(tasks.values()))
         return getattr(obj, cache_name)
 
     def get_orders_count(self, obj: RouteRun) -> int:
@@ -260,22 +278,18 @@ class RouteRunSerializer(serializers.ModelSerializer):
         return sum(task.status == PickingTask.Status.COMPLETED for task in self._get_picking_tasks(obj))
 
     def _line_bucket(self, line) -> str:
-        totals = shipment_line_task_totals(line)
-        effective_quantity = shipment_line_effective_quantity(line)
-        if totals["prepared"] >= effective_quantity:
-            return "prepared"
-        if totals["picked"] >= effective_quantity:
-            return "picked"
-        if totals["picked"] > 0 or any(task.status == PickingTask.Status.IN_PROGRESS for task in line.order_line.picking_tasks.exclude(status=PickingTask.Status.CANCELLED)):
-            return "started"
-        return "unstarted"
+        return shipment_line_progress(line).state
 
     def _line_buckets(self, obj: RouteRun) -> dict[str, int]:
         cache_name = "_monitor_line_buckets"
         if not hasattr(obj, cache_name):
-            buckets = {"unstarted": 0, "started": 0, "picked": 0, "prepared": 0}
-            for line in self._get_shipment_lines(obj):
-                buckets[self._line_bucket(line)] += 1
+            projection = route_run_workload_projection(obj)
+            buckets = {
+                "unstarted": projection.unstarted,
+                "started": projection.started,
+                "picked": projection.picked,
+                "prepared": projection.prepared,
+            }
             setattr(obj, cache_name, buckets)
         return getattr(obj, cache_name)
 
@@ -283,15 +297,14 @@ class RouteRunSerializer(serializers.ModelSerializer):
         task_ids = [task.id for task in self._get_picking_tasks(obj)]
         if not task_ids:
             return 0
-        return (
-            PickingTaskClaim.objects.filter(
-                picking_task_id__in=task_ids,
-                status=PickingTaskClaim.Status.CLAIMED,
-                cart_work_participant__status="active",
-            )
-            .values("cart_work_participant__user_id")
-            .distinct()
-            .count()
+        return len(
+            {
+                claim.cart_work_participant.user_id
+                for task in self._get_picking_tasks(obj)
+                for claim in task.task_claims.all()
+                if claim.status == PickingTaskClaim.Status.CLAIMED
+                and claim.cart_work_participant.status == "active"
+            }
         )
 
     def get_unstarted_lines_count(self, obj: RouteRun) -> int:
@@ -311,13 +324,9 @@ class RouteRunSerializer(serializers.ModelSerializer):
         return sum(buckets.values())
 
     def get_progress_percent(self, obj: RouteRun) -> float:
-        tasks = self._get_picking_tasks(obj)
-        total_quantity = sum((task.quantity_to_pick - task.shortage_quantity for task in tasks), Decimal("0"))
-        picked_quantity = sum((task.quantity_picked for task in tasks), Decimal("0"))
-
+        total_quantity, picked_quantity = route_run_quantity_progress(obj)
         if total_quantity <= 0:
             return 0
-
         return round(float((picked_quantity / total_quantity) * 100), 1)
 
     def get_last_activity_at(self, obj: RouteRun) -> str | None:
@@ -379,6 +388,46 @@ class RouteRunSerializer(serializers.ModelSerializer):
             return "ready"
         return "cutoff_warning"
 
+    def get_operational_weekday(self, obj: RouteRun) -> int:
+        return obj.service_date.weekday()
+
+    def get_readiness_state(self, obj: RouteRun) -> str:
+        return "ready_to_close" if self.get_is_ready_to_close(obj) else "work_remaining"
+
+    def get_remaining_pickable_quantity(self, obj: RouteRun) -> Decimal:
+        return sum(
+            (
+                max(task.quantity_to_pick - task.shortage_quantity - task.quantity_picked, Decimal("0"))
+                for task in self._get_picking_tasks(obj)
+            ),
+            Decimal("0"),
+        )
+
+    def _scanner_available_tasks(self, obj: RouteRun):
+        return [
+            task
+            for task in self._get_picking_tasks(obj)
+            if task.status not in {PickingTask.Status.COMPLETED, PickingTask.Status.CANCELLED}
+            and task.quantity_picked + task.shortage_quantity < task.quantity_to_pick
+            and not hasattr(task, "job_task")
+        ]
+
+    def get_scanner_can_create_picking_job(self, obj: RouteRun) -> bool:
+        if obj.status in {RouteRun.Status.CLOSED, RouteRun.Status.CANCELLED, RouteRun.Status.DISPATCHED}:
+            return False
+        return bool(self._scanner_available_tasks(obj))
+
+    def get_scanner_blocking_reason(self, obj: RouteRun) -> str:
+        if self.get_scanner_can_create_picking_job(obj):
+            return ""
+        if obj.status in {RouteRun.Status.CLOSED, RouteRun.Status.CANCELLED, RouteRun.Status.DISPATCHED}:
+            return "Route is no longer pickable"
+        if self.get_is_ready_to_close(obj):
+            return "Route fully prepared"
+        if self.get_remaining_pickable_quantity(obj) > 0:
+            return "Picking work already assigned"
+        return "No remaining picking work"
+
     def get_attention_reason(self, obj: RouteRun) -> str:
         status = self.get_attention_status(obj)
         if status == "neutral":
@@ -432,6 +481,11 @@ class RouteRunSerializer(serializers.ModelSerializer):
             "attention_reason",
             "minutes_to_departure",
             "minutes_after_cutoff",
+            "operational_weekday",
+            "readiness_state",
+            "remaining_pickable_quantity",
+            "scanner_can_create_picking_job",
+            "scanner_blocking_reason",
             "progress_percent",
             "last_activity_at",
             "is_ready_to_close",
@@ -891,6 +945,9 @@ class ShipmentLineSerializer(serializers.ModelSerializer):
     can_remove_quantity = serializers.SerializerMethodField()
     remove_blocked_reason = serializers.SerializerMethodField()
     service_status = serializers.SerializerMethodField()
+    operational_line_state = serializers.SerializerMethodField()
+    remaining_to_pick = serializers.SerializerMethodField()
+    blocking_reason = serializers.SerializerMethodField()
     source_location_code = serializers.SerializerMethodField()
     source_location_name = serializers.SerializerMethodField()
     picking_pallet = serializers.SerializerMethodField()
@@ -903,7 +960,7 @@ class ShipmentLineSerializer(serializers.ModelSerializer):
         return getattr(obj, cache_name)
 
     def get_picked_quantity(self, obj: ShipmentLine) -> str:
-        return str(sum((task.quantity_picked for task in self._tasks(obj)), Decimal("0")))
+        return str(shipment_line_progress(obj).picked_quantity)
 
     def get_original_ordered_quantity(self, obj: ShipmentLine) -> str:
         return str(obj.ordered_quantity)
@@ -915,13 +972,13 @@ class ShipmentLineSerializer(serializers.ModelSerializer):
         return str(obj.cancelled_quantity)
 
     def get_controlled_quantity(self, obj: ShipmentLine) -> str:
-        return str(sum((task.quantity_prepared for task in self._tasks(obj)), Decimal("0")))
+        return str(shipment_line_progress(obj).prepared_quantity)
 
     def get_prepared_quantity(self, obj: ShipmentLine) -> str:
-        return str(sum((task.quantity_prepared for task in self._tasks(obj)), Decimal("0")))
+        return str(shipment_line_progress(obj).prepared_quantity)
 
     def get_shortage_quantity(self, obj: ShipmentLine) -> str:
-        return str(sum((task.shortage_quantity for task in self._tasks(obj)), Decimal("0")))
+        return str(shipment_line_progress(obj).shortage_quantity)
 
     def get_maximum_removable_quantity(self, obj: ShipmentLine) -> str:
         return str(shipment_line_max_removable_quantity(obj))
@@ -949,6 +1006,14 @@ class ShipmentLineSerializer(serializers.ModelSerializer):
     def get_service_status(self, obj: ShipmentLine) -> str:
         return derive_shipment_line_status(obj)
 
+    def get_operational_line_state(self, obj: ShipmentLine) -> str:
+        return shipment_line_progress(obj).state
+
+    def get_remaining_to_pick(self, obj: ShipmentLine) -> str:
+        return str(shipment_line_progress(obj).remaining_to_pick)
+
+    def get_blocking_reason(self, obj: ShipmentLine) -> str:
+        return shipment_line_progress(obj).blocking_reason
     def get_source_location_code(self, obj: ShipmentLine) -> str | None:
         task = next(iter(self._tasks(obj)), None)
         return task.source_location.code if task else None
@@ -983,6 +1048,9 @@ class ShipmentLineSerializer(serializers.ModelSerializer):
             "remove_blocked_reason",
             "cancelled_quantity",
             "service_status",
+            "operational_line_state",
+            "remaining_to_pick",
+            "blocking_reason",
             "source_location_code",
             "source_location_name",
             "delivery_date",
@@ -1028,10 +1096,10 @@ class ShipmentSerializer(serializers.ModelSerializer):
             setattr(obj, cache_name, derive_shipment_operational_statuses(obj))
         return getattr(obj, cache_name)
 
-    def _totals(self, obj: Shipment) -> dict[str, Decimal]:
-        cache_name = "_shipment_totals"
+    def _projection(self, obj: Shipment):
+        cache_name = "_shipment_operational_projection"
         if not hasattr(obj, cache_name):
-            setattr(obj, cache_name, shipment_picking_totals(obj))
+            setattr(obj, cache_name, shipment_operational_projection(obj))
         return getattr(obj, cache_name)
 
     def get_route_status(self, obj: Shipment) -> str:
@@ -1047,23 +1115,19 @@ class ShipmentSerializer(serializers.ModelSerializer):
         return obj.lines.count()
 
     def get_ordered_quantity(self, obj: Shipment) -> str:
-        return str(sum((shipment_line_effective_quantity(line) for line in obj.lines.all()), Decimal("0")))
+        return str(self._projection(obj).effective_quantity)
 
     def get_picked_quantity(self, obj: Shipment) -> str:
-        return str(self._totals(obj)["quantity_picked"])
+        return str(self._projection(obj).picked_quantity)
 
     def get_prepared_quantity(self, obj: Shipment) -> str:
-        return str(self._totals(obj)["quantity_prepared"])
+        return str(self._projection(obj).prepared_quantity)
 
     def get_shortage_quantity(self, obj: Shipment) -> str:
-        return str(self._totals(obj)["shortage_quantity"])
+        return str(self._projection(obj).shortage_quantity)
 
     def get_progress_percent(self, obj: Shipment) -> float:
-        totals = self._totals(obj)
-        required = totals["quantity_to_pick"] - totals["shortage_quantity"]
-        if required <= 0:
-            return 0
-        return round(float((totals["quantity_picked"] / required) * 100), 1)
+        return self._projection(obj).progress_percent
 
     def _eligibility(self, enabled: bool, reason: str = "") -> dict:
         return {"enabled": enabled, "reason": reason}

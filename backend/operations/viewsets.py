@@ -97,6 +97,7 @@ from operations.serializers import (
     TransferDiscrepancySourceReviewSerializer,
     TransferDiscrepancyTransitInvestigationSerializer,
 )
+from operations.operational_projections import active_route_run_queryset
 from operations.route_services import (
     aware_datetime,
     create_route_run_from_schedule,
@@ -387,7 +388,10 @@ class RouteRunViewSet(ReadOnlyModelViewSet):
     queryset = RouteRun.objects.select_related("route", "route__branch", "schedule").prefetch_related(
         "shipments",
         "shipments__lines",
-        "shipments__lines__order_line__picking_tasks",
+        "shipments__lines__order_line__picking_tasks__job_task",
+        "shipments__lines__order_line__picking_tasks__task_claims__cart_work_participant",
+        "orders__lines__picking_tasks__job_task",
+        "orders__lines__picking_tasks__task_claims__cart_work_participant",
     )
     serializer_class = RouteRunSerializer
     filterset_class = RouteRunFilter
@@ -398,21 +402,7 @@ class RouteRunViewSet(ReadOnlyModelViewSet):
         queryset = super().get_queryset()
         queryset = filter_branch_queryset(queryset, self.request, "route__branch")
         if self.action == "list":
-            return (
-                queryset.exclude(status__in=[RouteRun.Status.CLOSED, RouteRun.Status.CANCELLED, RouteRun.Status.DISPATCHED])
-                .filter(shipments__status__in=[
-                    Shipment.Status.PENDING_ACTIVATION,
-                    Shipment.Status.ACTIVE,
-                    Shipment.Status.PICKING,
-                    Shipment.Status.PICKED,
-                    Shipment.Status.CONTROLLED,
-                    Shipment.Status.PREPARED,
-                    Shipment.Status.DOCUMENTS_POSTED,
-                    Shipment.Status.READY_FOR_DISPATCH,
-                    Shipment.Status.EXCEPTION,
-                ])
-                .distinct()
-            )
+            return active_route_run_queryset(queryset)
         return queryset
 
     @action(detail=True, methods=["post"], url_path="override-times")

@@ -49,7 +49,13 @@ from operations.models import (
     TransferPalletItem,
 )
 from operations.contents import ContentsLookupError, resolve_contents_code
+from operations.operational_projections import (
+    ACTIVE_SHIPMENT_STATUSES,
+    active_route_run_queryset,
+    route_run_has_remaining_pickable_work,
+)
 from operations.serializers import PickingTaskSerializer, RouteRunSerializer
+from operations.shipment_services import sync_shipment_status_from_work
 from operations.services import (
     DiscrepancyLocationMissing,
     TERMINAL_ROUTE_STATUSES,
@@ -1904,6 +1910,9 @@ def _prepare_for_order(request):
             task.status = PickingTask.Status.IN_PROGRESS
         task.save(update_fields=["status", "updated_at"])
         task.refresh_from_db()
+        shipment_line = getattr(task.order_line, "shipment_line", None)
+        if shipment_line is not None:
+            sync_shipment_status_from_work(shipment_line.shipment)
 
         AuditLog.objects.create(
             actor=actor,
@@ -2431,43 +2440,44 @@ class ScannerSessionEndView(APIView):
 
 
 def _route_proforma_data(route_run: RouteRun):
-    tasks = list(
-        PickingTask.objects.filter(order_line__order__route_run=route_run)
-        .select_related("order_line")
-        .order_by("created_at")
+    """Scanner presentation aliases over the canonical RouteRun projection."""
+    data = dict(RouteRunSerializer(route_run).data)
+    data.update(
+        {
+            "akt": data["active_workers_count"],
+            "lines": data["unstarted_lines_count"],
+            "started": data["started_lines_count"],
+            "picked": data["picked_line_bucket_count"],
+            "prepared": data["prepared_line_bucket_count"],
+            "is_selectable": data["scanner_can_create_picking_job"],
+            "blocking_reason": data["scanner_blocking_reason"],
+        }
     )
-    available_tasks = [task for task in tasks if not hasattr(task, "job_task") and task.status not in [PickingTask.Status.COMPLETED, PickingTask.Status.CANCELLED]]
-    started_tasks = [task for task in tasks if hasattr(task, "job_task")]
-    return {
-        "id": route_run.id,
-        "route_code": route_run.route.code,
-        "route_name": route_run.route.name,
-        "branch": route_run.route.branch_id,
-        "branch_code": route_run.route.branch.code,
-        "run_number": route_run.run_number,
-        "status": route_run.status,
-        "departure_time": route_run.departure_time.isoformat(),
-        "akt": len(available_tasks),
-        "lines": sum((task.quantity_picked + task.shortage_quantity) < task.quantity_to_pick for task in available_tasks),
-        "started": len(started_tasks),
-        "picked": sum((task.quantity_picked + task.shortage_quantity) >= task.quantity_to_pick for task in tasks),
-        "prepared": sum(task.quantity_prepared >= task.quantity_to_pick for task in tasks),
-        "is_selectable": bool(available_tasks) and route_run.status not in TERMINAL_ROUTE_STATUSES,
-    }
+    return data
 
 
 class ScannerProformasView(APIView):
     def get(self, request):
         branch = request.query_params.get("branch")
-        route_runs = RouteRun.objects.select_related("route", "route__branch").exclude(status__in=TERMINAL_ROUTE_STATUSES)
+        route_runs = RouteRun.objects.select_related("route", "route__branch", "schedule").prefetch_related(
+            "shipments",
+            "shipments__lines",
+            "shipments__lines__order_line__picking_tasks__job_task",
+            "shipments__lines__order_line__picking_tasks__task_claims__cart_work_participant",
+            "orders__lines__picking_tasks__job_task",
+            "orders__lines__picking_tasks__task_claims__cart_work_participant",
+        )
         if branch:
             route_runs = route_runs.filter(route__branch_id=branch)
         if request.user and request.user.is_authenticated:
             branch_ids = branch_ids_filter(request.user, branch)
             route_runs = route_runs.filter(route__branch_id__in=branch_ids)
-        route_runs = route_runs.order_by("service_date", "departure_time", "route__code", "run_number")
+        route_runs = [
+            route_run
+            for route_run in active_route_run_queryset(route_runs)
+            if route_run_has_remaining_pickable_work(route_run)
+        ]
         return Response({"results": [_route_proforma_data(route_run) for route_run in route_runs]})
-
 
 class ScannerProformasCreateJobsView(APIView):
     def post(self, request):
@@ -2502,11 +2512,17 @@ class ScannerProformasCreateJobsView(APIView):
             route_groups = [route_runs] if mode == PickingJob.Mode.MERGED else [[route_run] for route_run in route_runs]
             for group in route_groups:
                 reserved_task_ids = PickingJobTask.objects.filter(
-                    picking_task__order_line__order__route_run__in=group
+                    picking_task__order_line__shipment_line__shipment__route_run__in=group
                 ).values_list("picking_task_id", flat=True)
                 tasks = list(
                     PickingTask.objects.select_for_update()
-                    .filter(order_line__order__route_run__in=group)
+                    .filter(
+                        order_line__shipment_line__shipment__route_run__in=group,
+                        order_line__shipment_line__shipment__status__in=ACTIVE_SHIPMENT_STATUSES,
+                        order_line__shipment_line__cancelled_quantity__lt=F(
+                            "order_line__shipment_line__ordered_quantity"
+                        ),
+                    )
                     .exclude(status__in=[PickingTask.Status.COMPLETED, PickingTask.Status.CANCELLED])
                     .filter(quantity_picked__lt=F("quantity_to_pick") - F("shortage_quantity"))
                     .exclude(id__in=reserved_task_ids)

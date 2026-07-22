@@ -246,8 +246,10 @@ function ShipmentDetail({
                 <th>Removed</th>
                 <th>Picked</th>
                 <th>Controlled</th>
+                <th>Prepared</th>
+                <th>Remaining</th>
                 <th>Max Remove</th>
-                <th>Service Status</th>
+                <th>Operational State</th>
                 <th>Source Location</th>
                 <th>External Line ID</th>
               </tr>
@@ -271,8 +273,10 @@ function ShipmentDetail({
                   <td>{line.removed_quantity}</td>
                   <td>{line.picked_quantity}</td>
                   <td>{line.controlled_quantity}</td>
+                  <td>{line.prepared_quantity}</td>
+                  <td>{line.remaining_to_pick}</td>
                   <td>{line.maximum_removable_quantity}</td>
-                  <td><StatusBadge label={label(line.service_status)} tone={statusTone(line.service_status)} /></td>
+                  <td title={line.blocking_reason}><StatusBadge label={label(line.operational_line_state)} tone={statusTone(line.operational_line_state)} /></td>
                   <td>{line.source_location_code || <span className="muted">-</span>}</td>
                   <td className="mono">{line.external_line_reference || "-"}</td>
                 </tr>

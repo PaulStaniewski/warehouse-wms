@@ -7399,12 +7399,28 @@ class ScannerPickingJobWorkflowTests(APITestCase):
             customer_alias="JOB-CUST",
             status=Order.Status.IMPORTED,
         )
-        OrderLine.objects.create(
+        order_line = OrderLine.objects.create(
             order=order,
             product=product,
             line_number=1,
             quantity_ordered=Decimal("1"),
             quantity_picked=Decimal("0"),
+        )
+        shipment = Shipment.objects.create(
+            branch=self.branch,
+            order=order,
+            route_run=route_run,
+            reference=f"SHP-{reference}",
+            external_reference=f"AX-SHP-{reference}",
+            status=Shipment.Status.ACTIVE,
+            shipment_type=Shipment.ShipmentType.CUSTOMER_DELIVERY,
+        )
+        ShipmentLine.objects.create(
+            shipment=shipment,
+            order_line=order_line,
+            product=product,
+            line_number=1,
+            ordered_quantity=order_line.quantity_ordered,
         )
         return order
 
@@ -7450,6 +7466,7 @@ class ScannerPickingJobWorkflowTests(APITestCase):
         order_line.quantity_ordered = quantity
         order_line.quantity_picked = Decimal("0")
         order_line.save(update_fields=["quantity_ordered", "quantity_picked", "updated_at"])
+        ShipmentLine.objects.filter(order_line=order_line).update(ordered_quantity=quantity, cancelled_quantity=Decimal("0"))
         self.task_1.quantity_to_pick = quantity
         self.task_1.quantity_picked = Decimal("0")
         self.task_1.shortage_quantity = Decimal("0")
@@ -7537,9 +7554,86 @@ class ScannerPickingJobWorkflowTests(APITestCase):
         self.assertEqual(after.status_code, status.HTTP_200_OK)
         before_run = next(row for row in before.data["results"] if row["id"] == self.run_1.id)
         after_run = next(row for row in after.data["results"] if row["id"] == self.run_1.id)
-        self.assertEqual(before_run["akt"], 1)
-        self.assertEqual(after_run["akt"], 0)
+        self.assertEqual(before_run["akt"], before_run["active_workers_count"])
+        self.assertTrue(before_run["is_selectable"])
+        self.assertEqual(after_run["akt"], after_run["active_workers_count"])
+        self.assertFalse(after_run["is_selectable"])
+        self.assertEqual(after_run["blocking_reason"], "Picking work already assigned")
 
+    def test_route_monitor_and_scanner_proformas_share_order_and_projection(self):
+        self.task_2.status = PickingTask.Status.COMPLETED
+        self.task_2.quantity_picked = self.task_2.quantity_to_pick
+        self.task_2.quantity_prepared = self.task_2.quantity_to_pick
+        self.task_2.save(update_fields=["status", "quantity_picked", "quantity_prepared", "updated_at"])
+        Shipment.objects.filter(order=self.order_2).update(status=Shipment.Status.PREPARED)
+
+        monitor = self.client.get("/api/route-runs/", {"branch_code": self.branch.code})
+        scanner = self.client.get("/api/scanner/proformas/", {"branch": self.branch.id})
+
+        self.assertEqual(monitor.status_code, status.HTTP_200_OK)
+        self.assertEqual(scanner.status_code, status.HTTP_200_OK)
+        monitor_rows = monitor.data["results"]
+        scanner_rows = scanner.data["results"]
+        expected_monitor_rows = [row for row in monitor_rows if row["id"] == self.run_1.id]
+        self.assertEqual([row["id"] for row in scanner_rows], [row["id"] for row in expected_monitor_rows])
+        self.assertIn(self.run_2.id, [row["id"] for row in monitor_rows])
+        self.assertNotIn(self.run_2.id, [row["id"] for row in scanner_rows])
+        scanner_by_id = {row["id"]: row for row in scanner_rows}
+        for route in expected_monitor_rows:
+            proforma = scanner_by_id[route["id"]]
+            for field in [
+                "operational_identifier",
+                "run_number",
+                "active_workers_count",
+                "unstarted_lines_count",
+                "started_lines_count",
+                "picked_line_bucket_count",
+                "prepared_line_bucket_count",
+                "total_active_lines",
+                "progress_percent",
+                "cutoff_at",
+                "planned_departure_at",
+                "readiness_state",
+                "attention_status",
+            ]:
+                self.assertEqual(proforma[field], route[field], field)
+            self.assertEqual(proforma["akt"], route["active_workers_count"])
+            self.assertEqual(proforma["lines"], route["unstarted_lines_count"])
+            self.assertEqual(proforma["started"], route["started_lines_count"])
+            self.assertEqual(proforma["picked"], route["picked_line_bucket_count"])
+            self.assertEqual(proforma["prepared"], route["prepared_line_bucket_count"])
+
+
+    def test_proformas_require_effective_remaining_canonical_picking_work(self):
+        self.task_1.status = PickingTask.Status.IN_PROGRESS
+        self.task_1.quantity_to_pick = Decimal("2")
+        self.task_1.quantity_picked = Decimal("1")
+        self.task_1.save(update_fields=["status", "quantity_to_pick", "quantity_picked", "updated_at"])
+        ShipmentLine.objects.filter(order_line=self.task_1.order_line).update(ordered_quantity=Decimal("2"))
+
+        partial = self.client.get("/api/scanner/proformas/", {"branch": self.branch.id})
+        self.assertIn(self.run_1.id, [row["id"] for row in partial.data["results"]])
+
+        self.task_1.status = PickingTask.Status.PICKED
+        self.task_1.quantity_picked = Decimal("2")
+        self.task_1.save(update_fields=["status", "quantity_picked", "updated_at"])
+        control_only = self.client.get("/api/scanner/proformas/", {"branch": self.branch.id})
+        monitor = self.client.get("/api/route-runs/", {"branch_code": self.branch.code})
+        self.assertNotIn(self.run_1.id, [row["id"] for row in control_only.data["results"]])
+        self.assertIn(self.run_1.id, [row["id"] for row in monitor.data["results"]])
+
+        shipment_line = ShipmentLine.objects.get(order_line=self.task_2.order_line)
+        shipment_line.cancelled_quantity = shipment_line.ordered_quantity
+        shipment_line.save(update_fields=["cancelled_quantity", "updated_at"])
+        zero_effective = self.client.get("/api/scanner/proformas/", {"branch": self.branch.id})
+        self.assertNotIn(self.run_2.id, [row["id"] for row in zero_effective.data["results"]])
+
+        shipment_line.cancelled_quantity = Decimal("0")
+        shipment_line.save(update_fields=["cancelled_quantity", "updated_at"])
+        self.run_2.status = RouteRun.Status.CANCELLED
+        self.run_2.save(update_fields=["status", "updated_at"])
+        cancelled = self.client.get("/api/scanner/proformas/", {"branch": self.branch.id})
+        self.assertNotIn(self.run_2.id, [row["id"] for row in cancelled.data["results"]])
     def test_authenticated_worker_lists_proformas_for_allowed_branch(self):
         UserBranchMembership.objects.create(user=self.gdy_worker, branch=self.branch, role=UserBranchMembership.Role.WORKER)
         other_branch = Branch.objects.create(code="OTH", name="Other Branch", city="Gdansk", country="Poland")
@@ -9042,9 +9136,25 @@ class CriticalPickingControlFixtureMixin:
             quantity_on_hand=Decimal(str(stock_b)),
             quantity_reserved=Decimal("0"),
         )
+        shipment = Shipment.objects.create(
+            branch=self.branch,
+            order=order,
+            route_run=route_run,
+            reference=f"SHP-{reference}",
+            external_reference=f"AX-SHP-{reference}",
+            status=Shipment.Status.ACTIVE,
+            shipment_type=Shipment.ShipmentType.CUSTOMER_DELIVERY,
+        )
+        ShipmentLine.objects.create(
+            shipment=shipment, order_line=line_a, product=self.product_a, line_number=1, ordered_quantity=line_a.quantity_ordered
+        )
+        ShipmentLine.objects.create(
+            shipment=shipment, order_line=line_b, product=self.product_b, line_number=2, ordered_quantity=line_b.quantity_ordered
+        )
         return {
             "route_run": route_run,
             "order": order,
+            "shipment": shipment,
             "task_a": task_a,
             "task_b": task_b,
             "inventory_a": inventory_a,
@@ -9075,13 +9185,26 @@ class CriticalPickingControlFixtureMixin:
             line_number=1,
             quantity_ordered=Decimal("1"),
         )
-        return PickingTask.objects.create(
+        task = PickingTask.objects.create(
             branch=self.unrelated_branch,
             order_line=line,
             source_location=self.unrelated_location,
             status=PickingTask.Status.OPEN,
             quantity_to_pick=Decimal("1"),
         )
+        shipment = Shipment.objects.create(
+            branch=self.unrelated_branch,
+            order=order,
+            route_run=route_run,
+            reference=f"SHP-OTHER-{suffix}",
+            external_reference=f"AX-SHP-OTHER-{suffix}",
+            status=Shipment.Status.ACTIVE,
+            shipment_type=Shipment.ShipmentType.CUSTOMER_DELIVERY,
+        )
+        ShipmentLine.objects.create(
+            shipment=shipment, order_line=line, product=self.unrelated_product, line_number=1, ordered_quantity=line.quantity_ordered
+        )
+        return task
 
     def create_job(self, route_run):
         response = self.client.post(
@@ -9176,7 +9299,9 @@ class CriticalExactPickingControlIntegrationTests(CriticalPickingControlFixtureM
         self.client.force_authenticate(self.worker)
         proformas = self.client.get("/api/scanner/proformas/", {"branch": self.branch.id})
         self.assertEqual(proformas.status_code, status.HTTP_200_OK)
-        self.assertTrue(any(row["id"] == work["route_run"].id and row["akt"] == 2 for row in proformas.data["results"]))
+        self.assertTrue(any(row["id"] == work["route_run"].id and row["lines"] == 2 for row in proformas.data["results"]))
+        monitor = self.client.get("/api/route-runs/", {"branch_code": self.branch.code})
+        self.assertEqual([row["id"] for row in proformas.data["results"]], [row["id"] for row in monitor.data["results"]])
 
         job = self.create_job(work["route_run"])
         tasks = self.client.get("/api/scanner/tasks/")
@@ -9237,6 +9362,8 @@ class CriticalExactPickingControlIntegrationTests(CriticalPickingControlFixtureM
         self.assertEqual(work["inventory_b"].quantity_on_hand, Decimal("2.000"))
         self.assertEqual(job.status, PickingJob.Status.PICKED)
         self.assertEqual(StockMovement.objects.filter(movement_type=StockMovement.MovementType.PICK).count(), 2)
+        picked_scanner = self.client.get("/api/scanner/proformas/", {"branch": self.branch.id})
+        self.assertNotIn(work["route_run"].id, [row["id"] for row in picked_scanner.data["results"]])
 
         self.client.force_authenticate(self.unrelated_worker)
         forbidden_control = self.client.get("/api/scanner/control/cart/", {"cart_code": "CART-CRIT-PICK-EXACT"})
@@ -9284,6 +9411,17 @@ class CriticalExactPickingControlIntegrationTests(CriticalPickingControlFixtureM
         self.assertEqual(events.status_code, status.HTTP_200_OK)
         event_types = {row["event_type"] for row in events.data["results"]}
         self.assertTrue({"pick", "control"}.issubset(event_types))
+
+        prepared_monitor = self.client.get("/api/route-runs/", {"branch_code": self.branch.code})
+        prepared_scanner = self.client.get("/api/scanner/proformas/", {"branch": self.branch.id})
+        self.assertIn(work["route_run"].id, [row["id"] for row in prepared_monitor.data["results"]])
+        self.assertNotIn(work["route_run"].id, [row["id"] for row in prepared_scanner.data["results"]])
+        self.assertEqual(self.client.post(f"/api/route-runs/{work['route_run'].id}/print-documents/", {}, format="json").status_code, status.HTTP_200_OK)
+        self.assertEqual(self.client.post(f"/api/route-runs/{work['route_run'].id}/close/", {}, format="json").status_code, status.HTTP_200_OK)
+        closed_monitor = self.client.get("/api/route-runs/", {"branch_code": self.branch.code})
+        closed_scanner = self.client.get("/api/scanner/proformas/", {"branch": self.branch.id})
+        self.assertNotIn(work["route_run"].id, [row["id"] for row in closed_monitor.data["results"]])
+        self.assertNotIn(work["route_run"].id, [row["id"] for row in closed_scanner.data["results"]])
 
 
 class CriticalPickingShortageControlIntegrationTests(CriticalPickingControlFixtureMixin, APITestCase):
@@ -9457,9 +9595,53 @@ class SeedDemoDataCommandTests(APITestCase):
         self.assertIn("Demo warehouse data seeded successfully.", first_output)
         self.assertIn("Demo warehouse data seeded successfully.", second_output)
         self.assertGreaterEqual(len(self.available_route_ids()), 4)
-        self.assertFalse(CartWorkSession.objects.exists())
-        self.assertFalse(PickingJob.objects.exists())
+        self.assertEqual(CartWorkSession.objects.filter(status=CartWorkSession.Status.ACTIVE).count(), 1)
+        self.assertEqual(PickingJob.objects.filter(status=PickingJob.Status.IN_PROGRESS).count(), 1)
         self.assertTrue(ScannerCart.objects.filter(code="WOZEK-01", status=ScannerCart.Status.AVAILABLE).exists())
+
+    def test_seed_isolates_operational_scenarios_with_stable_attention_windows(self):
+        first_output = self.run_seed()
+        first_counts = (RouteRun.objects.count(), Shipment.objects.count(), PickingTask.objects.count())
+        second_output = self.run_seed()
+
+        scenario_refs = {
+            "READY_BEFORE_CUTOFF": "SHP-GDY-0003",
+            "READY_AFTER_CUTOFF": "SHP-GDY-READY-AFTER",
+            "INCOMPLETE_AFTER_CUTOFF": "SHP-GDY-0001",
+            "DELAYED_OPEN": "SHP-GDY-0008",
+        }
+        expected_attention = {
+            "READY_BEFORE_CUTOFF": "neutral",
+            "READY_AFTER_CUTOFF": "ready",
+            "INCOMPLETE_AFTER_CUTOFF": "cutoff_warning",
+            "DELAYED_OPEN": "delayed",
+        }
+        shipments = {
+            name: Shipment.objects.select_related("route_run").get(reference=reference)
+            for name, reference in scenario_refs.items()
+        }
+
+        self.assertEqual(len({shipment.route_run_id for shipment in shipments.values()}), 4)
+        for name, shipment in shipments.items():
+            self.assertEqual(RouteRunSerializer(shipment.route_run).data["attention_status"], expected_attention[name])
+            self.assertIn(f"- {name}: route={shipment.route_run.operational_identifier}; shipment={shipment.reference};", second_output)
+        self.assertLess(timezone.now(), shipments["READY_BEFORE_CUTOFF"].route_run.cutoff_at)
+        self.assertLess(shipments["READY_AFTER_CUTOFF"].route_run.cutoff_at, timezone.now())
+        self.assertLess(timezone.now(), shipments["READY_AFTER_CUTOFF"].route_run.planned_departure_at)
+        self.assertLess(shipments["DELAYED_OPEN"].route_run.planned_departure_at, timezone.now())
+        self.assertEqual(shipments["DELAYED_OPEN"].route_run.status, RouteRun.Status.OPEN)
+        self.assertNotEqual(
+            Shipment.objects.get(reference="SHP-GDY-0006").id,
+            Shipment.objects.get(reference="SHP-GDY-REASSIGN").id,
+        )
+        self.assertEqual(first_counts, (RouteRun.objects.count(), Shipment.objects.count(), PickingTask.objects.count()))
+        self.assertIn("attention=ready; line_state=prepared; action=", first_output)
+        self.assertEqual(
+            RouteRun.objects.filter(route__branch__code="GDY").exclude(
+                status__in=[RouteRun.Status.CLOSED, RouteRun.Status.CANCELLED]
+            ).count(),
+            10,
+        )
 
     def test_seed_creates_customer_label_reuse_scenario(self):
         self.run_seed()
@@ -9502,9 +9684,9 @@ class SeedDemoDataCommandTests(APITestCase):
 
         self.run_seed()
 
-        self.assertFalse(CartWorkSession.objects.exists())
+        self.assertEqual(CartWorkSession.objects.filter(status=CartWorkSession.Status.ACTIVE).count(), 1)
         self.assertFalse(CartPickedItem.objects.exists())
-        self.assertFalse(PickingJob.objects.exists())
+        self.assertEqual(PickingJob.objects.filter(status=PickingJob.Status.IN_PROGRESS).count(), 1)
         self.assertFalse(ScannerCustomerLabel.objects.exists())
         self.assertTrue(ScannerCart.objects.filter(code="WOZEK-01", status=ScannerCart.Status.AVAILABLE).exists())
         self.assertGreaterEqual(len(self.available_route_ids()), 4)
@@ -9550,8 +9732,8 @@ class SeedDemoDataCommandTests(APITestCase):
 
         self.assertFalse(CartPickedItem.objects.exists())
         self.assertFalse(ScannerCustomerLabel.objects.exists())
-        self.assertFalse(CartWorkSession.objects.exists())
-        self.assertFalse(PickingJob.objects.exists())
+        self.assertEqual(CartWorkSession.objects.filter(status=CartWorkSession.Status.ACTIVE).count(), 1)
+        self.assertEqual(PickingJob.objects.filter(status=PickingJob.Status.IN_PROGRESS).count(), 1)
         demo_task = PickingTask.objects.get(order_line__order__external_reference="AX-ORDER-0001", order_line__line_number=1)
         self.assertEqual(demo_task.quantity_picked, Decimal("0.000"))
         self.assertEqual(demo_task.quantity_prepared, Decimal("0.000"))

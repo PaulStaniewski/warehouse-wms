@@ -129,6 +129,8 @@ The assignment rules use the shipment creation/request time against the schedule
 Branch dispatch policy validation rejects more active routes than the configured maximum per wave and rejects departure gaps smaller than the configured minimum between different waves. Leaders can edit schedules and dispatch policy in `/wms/route-schedules`; Workers can read the schedule surface but cannot mutate it. RouteRun one-off timing overrides are Leader-only and recorded in `RouteRunOverrideHistory`.
 
 Route Monitor and Shipments share the same data: active monitor rows are non-empty active RouteRuns with active Shipment workload. Empty future runs are omitted from the active board. Line buckets are derived from effective ShipmentLine quantity and PickingTask progress, so removed zero-effective lines no longer inflate route workload.
+
+Scanner Proformas uses that identical active RouteRun queryset, authoritative board order, and RouteRunSerializer projection. It does not derive counters from PickingJob reservation rows. Prepared routes remain visible but are not selectable; job creation uses exact RouteRun primary keys and canonical ShipmentLine-linked PickingTasks. Picking, control, quantity removal, reassignment, and route close invalidate both Scanner and WMS views.
 ## Existing Specialized Coverage
 
 ## Returns And Sales Corrections
@@ -236,3 +238,6 @@ Manual smoke testing is still useful for scanner ergonomics and multi-screen beh
 - phone camera barcode scanning,
 - full inter-branch discrepancy investigation with real operator timing,
 - wall monitor refresh behavior during live scanner execution.
+## Canonical outbound consistency
+
+External demand enters through `upsert_external_shipment`; shipment commands and scanner commands then mutate the same Order/Shipment/PickingTask graph. Shipment and Route Monitor quantities come from `operations.operational_projections`. Quantity removal and route reassignment are non-stock operations. Scanner picking must atomically update InventoryItem and create StockMovement evidence. Before operational release, run `check_operational_consistency --branch <code> --fail-on-error`.

@@ -17,6 +17,7 @@ from operations.models import (
     ShipmentRouteAssignment,
     ShipmentStatusHistory,
 )
+from operations.operational_projections import shipment_line_progress, shipment_operational_projection
 from operations.services import is_route_work_fully_prepared, recalculate_route_readiness
 from warehouse.models import InventoryItem
 
@@ -75,15 +76,15 @@ def shipment_picking_totals(shipment: Shipment) -> dict[str, Decimal]:
 
 
 def shipment_line_effective_quantity(line: ShipmentLine) -> Decimal:
-    return line.ordered_quantity - line.cancelled_quantity
+    return shipment_line_progress(line).effective_quantity
 
 
 def shipment_line_task_totals(line: ShipmentLine) -> dict[str, Decimal]:
-    tasks = line.order_line.picking_tasks.all()
+    progress = shipment_line_progress(line)
     return {
-        "picked": sum((task.quantity_picked for task in tasks), Decimal("0")),
-        "prepared": sum((task.quantity_prepared for task in tasks), Decimal("0")),
-        "shortage": sum((task.shortage_quantity for task in tasks), Decimal("0")),
+        "picked": progress.picked_quantity,
+        "prepared": progress.prepared_quantity,
+        "shortage": progress.shortage_quantity,
     }
 
 
@@ -135,27 +136,27 @@ def derive_shipment_operational_statuses(shipment: Shipment) -> dict[str, str]:
 
 
 def derive_shipment_line_status(line: ShipmentLine) -> str:
-    if line.shipment.status == Shipment.Status.CANCELLED or shipment_line_effective_quantity(line) <= 0:
-        return ShipmentLine.ServiceStatus.CANCELLED
-    tasks = list(line.order_line.picking_tasks.exclude(status=PickingTask.Status.CANCELLED))
-    if not tasks:
-        return ShipmentLine.ServiceStatus.NOT_STARTED
-    if any(task.shortage_quantity > 0 for task in tasks):
-        return ShipmentLine.ServiceStatus.SHORTAGE
-    total_picked = sum((task.quantity_picked for task in tasks), Decimal("0"))
-    total_prepared = sum((task.quantity_prepared for task in tasks), Decimal("0"))
-    effective_quantity = shipment_line_effective_quantity(line)
-    if total_prepared >= effective_quantity:
-        return ShipmentLine.ServiceStatus.PREPARED
-    if total_picked >= effective_quantity:
-        return ShipmentLine.ServiceStatus.PICKED
-    if total_picked > 0 or any(task.status == PickingTask.Status.IN_PROGRESS for task in tasks):
-        return ShipmentLine.ServiceStatus.PICKING
-    return ShipmentLine.ServiceStatus.NOT_STARTED
-
+    state = shipment_line_progress(line).state
+    return {
+        "unstarted": ShipmentLine.ServiceStatus.NOT_STARTED,
+        "started": ShipmentLine.ServiceStatus.PICKING,
+        "picked": ShipmentLine.ServiceStatus.PICKED,
+        "prepared": ShipmentLine.ServiceStatus.PREPARED,
+        "cancelled": ShipmentLine.ServiceStatus.CANCELLED,
+    }[state]
 
 def sync_shipment_status_from_work(shipment: Shipment) -> Shipment:
     if shipment.status in TERMINAL_SHIPMENT_STATUSES or shipment.status == Shipment.Status.PREPARED:
+        return shipment
+    line_states = [
+        shipment_line_progress(line)
+        for line in shipment.lines.prefetch_related("order_line__picking_tasks").all()
+        if shipment_line_progress(line).effective_quantity > 0
+    ]
+    if line_states and all(progress.state == "prepared" and progress.shortage_quantity == 0 for progress in line_states):
+        shipment.status = Shipment.Status.PREPARED
+        shipment.prepared_at = shipment.prepared_at or timezone.now()
+        shipment.save(update_fields=["status", "prepared_at", "updated_at"])
         return shipment
     statuses = derive_shipment_operational_statuses(shipment)
     new_status = shipment.status

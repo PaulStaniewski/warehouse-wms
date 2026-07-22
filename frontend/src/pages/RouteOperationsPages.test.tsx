@@ -47,6 +47,11 @@ function routeRun(overrides = {}) {
     attention_reason: "Cutoff has passed and work remains before departure.",
     minutes_to_departure: 8,
     minutes_after_cutoff: 2,
+    operational_weekday: 1,
+    readiness_state: "work_remaining",
+    remaining_pickable_quantity: "2.000",
+    scanner_can_create_picking_job: true,
+    scanner_blocking_reason: "",
     progress_percent: 50,
     last_activity_at: null,
     is_ready_to_close: false,
@@ -63,6 +68,21 @@ function mockBaseApi(routeRuns = [routeRun()]) {
   mockApiClient.get.mockImplementation(async (path: string) => {
     if (path === "/auth/session/") return { data: authSession("GDY_LEADER") };
     if (path === "/me/branch-memberships/") return { data: [branchMembership("leader", "GDY")] };
+    if (path.startsWith("/scanner/proformas/")) {
+      return {
+        data: {
+          results: routeRuns.filter((run) => Number(run.remaining_pickable_quantity) > 0).map((run) => ({
+            ...run,
+            akt: run.active_workers_count,
+            lines: run.unstarted_lines_count,
+            started: run.started_lines_count,
+            picked: run.picked_line_bucket_count,
+            prepared: run.prepared_line_bucket_count,
+            blocking_reason: run.scanner_blocking_reason,
+          })),
+        },
+      };
+    }
     if (path.startsWith("/route-runs/")) return { data: paginated(routeRuns) };
     if (path.startsWith("/mm-tasks/")) return { data: paginated([]) };
     if (path.startsWith("/delivery-routes/")) {
@@ -137,6 +157,66 @@ describe("Route operations pages", () => {
     expect(screen.getByText("ROUTE-delayed-ready").closest("button")).toHaveClass("monitor-route-row--delayed");
     expect(screen.getByText("1 delayed / 1 cutoff warnings")).toBeInTheDocument();
   });
+  it("renders Scanner Proformas in backend order with canonical counters and identifiers", async () => {
+    mockBaseApi([
+      routeRun({ id: 502, operational_identifier: "115/2_Wt-2", run_number: 2, active_workers_count: 3, unstarted_lines_count: 2 }),
+      routeRun({ id: 501, operational_identifier: "115/2_Wt-1", run_number: 1, active_workers_count: 1, unstarted_lines_count: 4 }),
+    ]);
+
+    renderWithProviders(<App />, { route: "/scanner/proformas" });
+
+    const identifiers = await screen.findAllByText(/115\/2_Wt-[12]/);
+    expect(identifiers.map((node) => node.textContent)).toEqual(["115/2_Wt-2", "115/2_Wt-1"]);
+    expect(screen.getAllByText("3").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("2").length).toBeGreaterThan(0);
+  });
+
+  it("omits fully prepared routes and preserves API order for remaining picking work", async () => {
+    mockBaseApi([
+      routeRun({ id: 502, operational_identifier: "PICK-A", remaining_pickable_quantity: "3.000", active_workers_count: 2 }),
+      routeRun({
+        id: 777,
+        operational_identifier: "READY-HIDDEN",
+        attention_status: "delayed",
+        readiness_state: "ready_to_close",
+        remaining_pickable_quantity: "0.000",
+        scanner_can_create_picking_job: false,
+        scanner_blocking_reason: "Route fully prepared",
+        is_selectable: false,
+        prepared_line_bucket_count: 1,
+        progress_percent: 100,
+      }),
+      routeRun({ id: 503, operational_identifier: "PICK-C", remaining_pickable_quantity: "1.000", active_workers_count: 4 }),
+    ]);
+
+    renderWithProviders(<App />, { route: "/scanner/proformas" });
+
+    const identifiers = await screen.findAllByText(/PICK-[AC]/);
+    expect(identifiers.map((node) => node.textContent)).toEqual(["PICK-A", "PICK-C"]);
+    expect(screen.queryByText("READY-HIDDEN")).not.toBeInTheDocument();
+    expect(screen.queryByText("Route fully prepared")).not.toBeInTheDocument();
+    expect(screen.getAllByText("2").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("4").length).toBeGreaterThan(0);
+  });
+
+  it("shows a friendly no-work state when all active routes are fully picked", async () => {
+    mockBaseApi([
+      routeRun({
+        id: 777,
+        operational_identifier: "READY-HIDDEN",
+        remaining_pickable_quantity: "0.000",
+        scanner_can_create_picking_job: false,
+        is_selectable: false,
+        progress_percent: 100,
+      }),
+    ]);
+
+    renderWithProviders(<App />, { route: "/scanner/proformas" });
+
+    expect(await screen.findByText("No routes have remaining picking work for the working branch.")).toBeInTheDocument();
+    expect(screen.queryByText("READY-HIDDEN")).not.toBeInTheDocument();
+  });
+
   it("renders Route Schedule Editor and saves policy changes", async () => {
     const user = userEvent.setup();
     renderWithProviders(<App />, { route: "/wms/route-schedules" });

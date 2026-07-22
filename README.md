@@ -118,6 +118,8 @@ Useful demo references:
 - Change Route defaults to today's eligible routes and can expand to the current operational week. Route changes do not require a reason.
 - Dynamic route rounds are schedule-driven. `RouteRoundSchedule` defines recurring weekday route slots with cutoff, departure, dispatch wave, and round number. Shipment route changes can target an existing RouteRun or a scheduled slot; scheduled slots create the RouteRun on demand when the shipment is assigned.
 - RouteRun stores cutoff/departure snapshots (`cutoff_at`, `planned_departure_at`, `dispatch_wave`, `operational_identifier`) so later schedule edits do not rewrite historical route runs. Route Monitor uses active Shipment workload and hides empty route runs from the active board.
+- Scanner Proformas filters the ordered active RouteRun projection to routes with effective remaining canonical picking work. The remaining cards preserve Route Monitor relative order and identical workload/readiness/attention values, and select work only by exact RouteRun ID. Fully picked and prepared routes remain on Route Monitor but are absent from Scanner Proformas.
+- Deterministic Scanner scenarios include SCANNER_UNSTARTED, SCANNER_ACTIVE_PICKING, SCANNER_PARTIAL_PICK, SCANNER_ZERO_EFFECTIVE_EXCLUDED, SCANNER_PREPARED_NOT_SELECTABLE, and SCANNER_CLOSED_ROUTE_EXCLUDED; the seed report prints their canonical RouteRun and Shipment references.
 - Route Schedule Editor is available at `/wms/route-schedules` for branch Leaders. It validates maximum routes per dispatch wave and minimum departure gaps between waves.
 - Shipment line quantity removal can be tested on active/unpicked demo shipments. Removed unpicked quantity is not a return: it creates history only, does not mutate inventory, does not create a StockMovement, and does not create a Sales Correction. Picked or controlled quantities are intentionally blocked from silent removal. Removing the final unpicked unit leaves a zero-effective historical line and cancels inactive picking work.
 
@@ -172,3 +174,10 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml restart backend
 ## Current Scope
 
 This repository is a portfolio WMS application with Django APIs, React WMS screens, Scanner workflows, and Docker-based local development.
+## Operational Data Spine
+
+The canonical outbound graph, quantity ownership, projections, import boundary, and consistency checker are documented in [`docs/OPERATIONAL_DATA_MODEL.md`](docs/OPERATIONAL_DATA_MODEL.md).
+
+```powershell
+python manage.py check_operational_consistency --branch GDY --fail-on-error
+```

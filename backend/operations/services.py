@@ -544,14 +544,13 @@ def is_route_work_fully_prepared(route_run: RouteRun) -> bool:
                 Shipment.Status.COMPLETED,
             }:
                 return False
+            from operations.operational_projections import shipment_line_progress
+
             for line in shipment.lines.all():
-                effective_quantity = line.ordered_quantity - line.cancelled_quantity
-                if effective_quantity <= 0:
+                progress = shipment_line_progress(line)
+                if progress.effective_quantity <= 0:
                     continue
-                tasks = list(line.order_line.picking_tasks.exclude(status=PickingTask.Status.CANCELLED))
-                if not tasks:
-                    return False
-                if not all(is_task_effectively_prepared(task) for task in tasks):
+                if progress.state != "prepared":
                     return False
         return True
 

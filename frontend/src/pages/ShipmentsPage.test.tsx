@@ -6,9 +6,9 @@ import App from "../App";
 import { mockApiClient } from "../test/apiClientMock";
 import { authSession, branchMembership, inventoryExceptionSummary, paginated, transportOverview } from "../test/fixtures";
 import { renderWithProviders, setViewport } from "../test/render";
-import type { Shipment } from "../types/api";
+import type { Shipment, ShipmentLine } from "../types/api";
 
-const baseLine = {
+const baseLine: ShipmentLine = {
   id: 101,
   shipment: 1,
   order_line: 201,
@@ -29,6 +29,9 @@ const baseLine = {
   remove_blocked_reason: "",
   cancelled_quantity: "0.000",
   service_status: "not_started",
+  operational_line_state: "unstarted",
+  remaining_to_pick: "3.000",
+  blocking_reason: "Picking has not started.",
   source_location_code: "A-01-01",
   source_location_name: "A-01-01",
   delivery_date: "2026-07-20",
@@ -325,6 +328,9 @@ describe("ShipmentsPage", () => {
             can_remove_quantity: false,
             remove_blocked_reason: "No unpicked quantity remains removable.",
             service_status: "cancelled",
+            operational_line_state: "cancelled",
+            remaining_to_pick: "0.000",
+            blocking_reason: "No active fulfilment quantity.",
             quantity_adjustments: [
               {
                 id: 1,

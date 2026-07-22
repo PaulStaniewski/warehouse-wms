@@ -3401,6 +3401,28 @@ a {
   color: #8a9aa3;
 }
 
+.scanner-proforma-card--cutoff_warning {
+  border-left-color: #d97706;
+}
+
+.scanner-proforma-card--ready {
+  border-left-color: #15803d;
+}
+
+.scanner-proforma-card--delayed {
+  border-left-color: #dc2626;
+}
+
+.scanner-proforma-card__blocking {
+  margin: 0;
+  border-radius: 6px;
+  background: #e8edf0;
+  padding: 8px 10px;
+  color: #52636d;
+  font-size: 0.85rem;
+  font-weight: 800;
+}
+
 .scanner-proforma-card label {
   display: grid;
   grid-template-columns: 32px minmax(0, 1fr);

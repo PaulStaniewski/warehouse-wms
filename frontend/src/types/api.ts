@@ -163,6 +163,11 @@ export type RouteRun = {
   attention_reason: string;
   minutes_to_departure: number;
   minutes_after_cutoff: number;
+  operational_weekday: number;
+  readiness_state: "work_remaining" | "ready_to_close";
+  remaining_pickable_quantity: string;
+  scanner_can_create_picking_job: boolean;
+  scanner_blocking_reason: string;
   progress_percent: number;
   last_activity_at: string | null;
   is_ready_to_close: boolean;
@@ -214,6 +219,9 @@ export type ShipmentLine = {
   remove_blocked_reason: string;
   cancelled_quantity: string;
   service_status: string;
+  operational_line_state: "unstarted" | "started" | "picked" | "prepared" | "cancelled";
+  remaining_to_pick: string;
+  blocking_reason: string;
   source_location_code: string | null;
   source_location_name: string | null;
   delivery_date: string | null;
@@ -1663,21 +1671,13 @@ export type TransferDiscrepancySourceStockRecoveryResponse = {
   };
 };
 
-export type ScannerProforma = {
-  id: number;
-  route_code: string;
-  route_name: string;
-  branch: number;
-  branch_code: string;
-  run_number: number;
-  status: string;
-  departure_time: string;
+export type ScannerProforma = RouteRun & {
   akt: number;
   lines: number;
   started: number;
   picked: number;
   prepared: number;
-  is_selectable: boolean;
+  blocking_reason: string;
 };
 
 export type PickingJobRoute = {

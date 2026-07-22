@@ -272,6 +272,8 @@ export function ScannerPickingPage() {
       queryClient.invalidateQueries({ queryKey: ["scanner-control-cart-items", activeSession?.id] }),
       queryClient.invalidateQueries({ queryKey: ["scanner-jobs"] }),
       queryClient.invalidateQueries({ queryKey: ["route-runs"] }),
+      queryClient.invalidateQueries({ queryKey: ["scanner-proformas"] }),
+      queryClient.invalidateQueries({ queryKey: ["shipments"] }),
       queryClient.invalidateQueries({ queryKey: ["audit-logs", "current"] }),
       queryClient.invalidateQueries({ queryKey: ["picking-shortages"] }),
       queryClient.invalidateQueries({ queryKey: ["replenishment-requests"] }),

@@ -14,7 +14,11 @@ function getErrorMessage(error: unknown, fallback: string) {
   return axios.isAxiosError(error) ? error.response?.data?.detail || fallback : fallback;
 }
 
-function formatTime(value: string) {
+function formatTime(value: string | null | undefined) {
+  if (!value) return "-";
+  if (value.includes("T")) {
+    return new Date(value).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+  }
   return value.slice(0, 5);
 }
 
@@ -30,8 +34,8 @@ export function ScannerProformasPage() {
   const rows = proformas.data?.results ?? [];
   const visibleSelectableIds = useMemo(() => new Set(rows.filter((row) => row.is_selectable).map((row) => row.id)), [rows]);
   const selectedRows = rows.filter((row) => selectedIds.includes(row.id) && row.is_selectable);
-  const selectedLines = selectedRows.reduce((sum, row) => sum + row.lines, 0);
-  const selectedUnits = selectedRows.reduce((sum, row) => sum + row.akt, 0);
+  const selectedLines = selectedRows.reduce((sum, row) => sum + row.total_active_lines, 0);
+  const selectedUnits = selectedRows.reduce((sum, row) => sum + Number(row.remaining_pickable_quantity), 0);
 
   useEffect(() => {
     setSelectedIds((current) => current.filter((id) => visibleSelectableIds.has(id)));
@@ -60,6 +64,8 @@ export function ScannerProformasPage() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["scanner-proformas"] }),
         queryClient.invalidateQueries({ queryKey: ["scanner-jobs"] }),
+        queryClient.invalidateQueries({ queryKey: ["route-runs"] }),
+        queryClient.invalidateQueries({ queryKey: ["shipments"] }),
         queryClient.invalidateQueries({ queryKey: ["audit-logs", "current"] }),
       ]);
     } catch (error) {
@@ -132,7 +138,7 @@ export function ScannerProformasPage() {
         error={proformas.error}
       >
         {rows.length === 0 ? (
-          <div className="state-box">No proformas found for the working branch.</div>
+          <div className="state-box">No routes have remaining picking work for the working branch.</div>
         ) : (
           <section className="scanner-proforma-list">
             {rows.map((run) => {
@@ -143,6 +149,7 @@ export function ScannerProformasPage() {
                     "scanner-proforma-card",
                     !run.is_selectable ? "scanner-proforma-card--disabled" : "",
                     selected ? "scanner-proforma-card--selected" : "",
+                    "scanner-proforma-card--" + run.attention_status,
                   ]
                     .filter(Boolean)
                     .join(" ")}
@@ -156,8 +163,8 @@ export function ScannerProformasPage() {
                       type="checkbox"
                     />
                     <span>
-                      <strong>{run.route_code}</strong>
-                      <small>{run.branch_code} / run {run.run_number}</small>
+                      <strong>{run.operational_identifier || run.route_code}</strong>
+                      <small>{run.route_name} / round {run.run_number}</small>
                     </span>
                   </label>
                   <div className="scanner-proforma-card__metrics">
@@ -166,7 +173,15 @@ export function ScannerProformasPage() {
                       <strong>{run.status.replaceAll("_", " ")}</strong>
                     </div>
                     <div>
-                      <span>AKT</span>
+                      <span>Readiness</span>
+                      <strong>{run.readiness_state.replaceAll("_", " ")}</strong>
+                    </div>
+                    <div>
+                      <span>Attention</span>
+                      <strong>{run.attention_status.replaceAll("_", " ")}</strong>
+                    </div>
+                    <div>
+                      <span>Active</span>
                       <strong>{run.akt}</strong>
                     </div>
                     <div>
@@ -186,10 +201,19 @@ export function ScannerProformasPage() {
                       <strong>{run.prepared}</strong>
                     </div>
                     <div>
+                      <span>Progress</span>
+                      <strong>{run.progress_percent}%</strong>
+                    </div>
+                    <div>
+                      <span>Cutoff</span>
+                      <strong>{formatTime(run.cutoff_at || run.order_cutoff_time)}</strong>
+                    </div>
+                    <div>
                       <span>Departure</span>
-                      <strong>{formatTime(run.departure_time)}</strong>
+                      <strong>{formatTime(run.planned_departure_at || run.departure_time)}</strong>
                     </div>
                   </div>
+                  {!run.is_selectable && <p className="scanner-proforma-card__blocking">{run.blocking_reason}</p>}
                 </article>
               );
             })}
