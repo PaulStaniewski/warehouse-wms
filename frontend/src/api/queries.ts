@@ -1128,17 +1128,6 @@ export function usePrintRouteDocuments() {
   });
 }
 
-export function useCloseRouteRun() {
-  return useMutation({
-    mutationFn: async ({ routeRunId }: { routeRunId: number }) => {
-      const response = await apiClient.post<{ message: string; route_run: RouteRun }>(
-        `/route-runs/${routeRunId}/close/`,
-      );
-      return response.data;
-    },
-  });
-}
-
 export function useOverrideRouteRunTimes() {
   const queryClient = useQueryClient();
   return useMutation({

@@ -34,8 +34,7 @@ export function RouteDocumentsPage() {
           <header className="route-document-header">
             <div>
               <p>Route documents</p>
-              <h1>{routeRun.data.route_code}</h1>
-              <span>{routeRun.data.route_name}</span>
+              <h1>{routeRun.data.operational_identifier}</h1>
             </div>
             <button onClick={() => window.print()} type="button">
               <Printer size={18} />

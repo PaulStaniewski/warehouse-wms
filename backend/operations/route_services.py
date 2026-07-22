@@ -18,13 +18,13 @@ from operations.models import (
 
 
 WEEKDAY_ABBREVIATIONS = {
-    0: "Pn",
-    1: "Wt",
-    2: "Sr",
-    3: "Cz",
-    4: "Pt",
-    5: "So",
-    6: "Nd",
+    0: "MON",
+    1: "TUE",
+    2: "WED",
+    3: "THU",
+    4: "FRI",
+    5: "SAT",
+    6: "SUN",
 }
 
 TERMINAL_ROUTE_STATUSES = {
@@ -38,9 +38,20 @@ def aware_datetime(day, value):
     return timezone.make_aware(datetime.combine(day, value), timezone.get_current_timezone())
 
 
+def operational_route_code(route: DeliveryRoute) -> str:
+    code = route.code.strip().upper()
+    if code.startswith("ROUTE-"):
+        code = code[6:]
+    if "/" in code:
+        code = code.rsplit("/", 1)[-1]
+    if code.isdigit():
+        code = code.zfill(2)
+    return code
+
+
 def operational_identifier(route: DeliveryRoute, service_date, round_number: int) -> str:
     weekday = WEEKDAY_ABBREVIATIONS[service_date.weekday()]
-    return f"{route.code}_{weekday}-{round_number}"
+    return f"ROUTE-{operational_route_code(route)}_{weekday}-{round_number}"
 
 
 def validate_dispatch_schedule(branch, *, exclude_schedule_id=None):
@@ -178,7 +189,7 @@ def assign_shipment_to_route_run(shipment: Shipment, route: DeliveryRoute, assig
 def route_snapshot(route_run: RouteRun | None) -> str:
     if route_run is None:
         return ""
-    identifier = route_run.operational_identifier or operational_identifier(route_run.route, route_run.service_date, route_run.run_number)
+    identifier = operational_identifier(route_run.route, route_run.service_date, route_run.run_number)
     return f"{route_run.route.branch.code} / {identifier} / {route_run.planned_departure_at or route_run.departure_time}"
 
 

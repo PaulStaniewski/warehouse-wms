@@ -1,4 +1,4 @@
-from datetime import datetime, time
+from datetime import date, datetime, time
 from decimal import Decimal
 from io import StringIO
 import threading
@@ -81,7 +81,7 @@ from operations.models import (
     TransferPalletArrival,
     TransferPalletItem,
 )
-from operations.route_services import assign_shipment_to_route_run, aware_datetime, create_route_run_from_schedule, override_route_run, validate_dispatch_schedule
+from operations.route_services import assign_shipment_to_route_run, aware_datetime, create_route_run_from_schedule, operational_identifier, override_route_run, validate_dispatch_schedule
 from operations.serializers import RouteRunSerializer
 from operations.services import recalculate_route_readiness, reconciliation_route_for_finding, route_close_result
 from warehouse.models import Branch, InventoryItem, Location, Product
@@ -10026,6 +10026,28 @@ class CriticalDynamicRouteRoundIntegrationTests(APITestCase):
     def at_time(self, value):
         return timezone.make_aware(datetime.combine(self.service_date, value), timezone.get_current_timezone())
 
+    def test_operational_identifier_uses_canonical_route_code_weekday_and_round(self):
+        wednesday = date(2026, 7, 22)
+        cases = [
+            ("ROUTE-5", 1, "ROUTE-05_WED-1"),
+            ("ROUTE-1", 2, "ROUTE-01_WED-2"),
+            ("ROUTE-10", 1, "ROUTE-10_WED-1"),
+            ("H120", 1, "ROUTE-H120_WED-1"),
+            ("PICKUP", 1, "ROUTE-PICKUP_WED-1"),
+            ("115/2", 1, "ROUTE-02_WED-1"),
+        ]
+        for index, (code, round_number, expected) in enumerate(cases):
+            route, _ = DeliveryRoute.objects.get_or_create(branch=self.branch, code=code, defaults={"name": f"Route {index}"})
+            with self.subTest(code=code):
+                self.assertEqual(operational_identifier(route, wednesday, round_number), expected)
+
+        weekday_codes = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
+        monday = date(2026, 7, 20)
+        route = DeliveryRoute.objects.get(branch=self.branch, code="ROUTE-5")
+        self.assertEqual(
+            [operational_identifier(route, monday + timezone.timedelta(days=offset), 1) for offset in range(7)],
+            [f"ROUTE-05_{weekday}-1" for weekday in weekday_codes],
+        )
     def test_route_schedule_editor_endpoints_filter_by_branch_code(self):
         BranchDispatchPolicy.objects.create(branch=self.other_branch, max_routes_per_wave=2, min_wave_gap_minutes=15)
         RouteRoundSchedule.objects.create(
@@ -10108,7 +10130,7 @@ class CriticalDynamicRouteRoundIntegrationTests(APITestCase):
         run_1 = assign_shipment_to_route_run(shipment_1, self.route, self.at_time(time(6, 49)))
         self.assertIsNotNone(run_1)
         self.assertEqual(run_1.run_number, 1)
-        self.assertEqual(run_1.operational_identifier, f"115/2_{run_1.operational_identifier.split('_')[1]}")
+        self.assertEqual(run_1.operational_identifier, operational_identifier(self.route, self.service_date, 1))
 
         shipment_2, _line_2, _task_2 = self.create_unassigned_shipment("002")
         run_again = assign_shipment_to_route_run(shipment_2, self.route, self.at_time(time(6, 50)))
@@ -10190,6 +10212,7 @@ class CriticalDynamicRouteRoundIntegrationTests(APITestCase):
         targets = self.client.get("/api/shipments/route-targets/", {"branch": self.branch.code, "scope": "today"})
         self.assertEqual(targets.status_code, status.HTTP_200_OK)
         schedule_target = next(row for row in targets.data["results"] if row["target_type"] == "schedule_slot" and row["schedule"] == self.schedule_2.id)
+        self.assertEqual(schedule_target["operational_identifier"], operational_identifier(self.route, self.service_date, 2))
         response = self.client.post(
             f"/api/shipments/{shipment.id}/change-route/",
             {"schedule": schedule_target["schedule"], "operational_date": schedule_target["service_date"], "client_operation_id": str(uuid.uuid4())},
@@ -10197,6 +10220,7 @@ class CriticalDynamicRouteRoundIntegrationTests(APITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         shipment.refresh_from_db()
+        self.assertEqual(response.data["shipment"]["route_identifier"], operational_identifier(self.route, self.service_date, 2))
         self.assertEqual(shipment.route_run.run_number, 2)
         self.assertEqual(shipment.document_status, Shipment.DocumentStatus.REQUIRES_REFRESH)
 

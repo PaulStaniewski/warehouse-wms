@@ -132,7 +132,7 @@ class Command(BaseCommand):
         self.stdout.write("Operational demo scenarios (demo-owned records rebuilt):")
         for name, reference, attention, line_state, action in scenarios:
             shipment = shipments[reference]
-            route_identifier = shipment.route_run.operational_identifier if shipment.route_run else "unassigned"
+            route_identifier = operational_identifier(shipment.route_run.route, shipment.route_run.service_date, shipment.route_run.run_number) if shipment.route_run else "unassigned"
             self.stdout.write(
                 f"- {name}: route={route_identifier}; shipment={reference}; "
                 f"attention={attention}; line_state={line_state}; action={action}"

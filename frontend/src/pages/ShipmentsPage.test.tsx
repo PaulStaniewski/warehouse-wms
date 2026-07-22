@@ -53,6 +53,7 @@ function shipment(overrides: Partial<Shipment> = {}): Shipment {
     route_run: 20,
     route_code: "ROUTE-01",
     route_name: "Gdynia Morning",
+    route_identifier: "ROUTE-01_MON-1",
     route_time: "10:00:00",
     cutoff_time: "08:00:00",
     route_status: "open",
@@ -139,7 +140,7 @@ function mockShipmentsApi(rows = [shipment()]) {
               schedule: null,
               creates_route_run: false,
               label: "ROUTE-02 / 2026-07-20 / run 1 / 12:00:00",
-              operational_identifier: "ROUTE-02",
+              operational_identifier: "ROUTE-02_MON-1",
               branch_code: "GDY",
               route: 2,
               route_code: "ROUTE-02",
@@ -161,7 +162,7 @@ function mockShipmentsApi(rows = [shipment()]) {
               schedule: 100,
               creates_route_run: true,
               label: "ROUTE-05 / 2026-07-22 / run 1 / 15:00:00",
-              operational_identifier: "ROUTE-05",
+              operational_identifier: "ROUTE-05_WED-1",
               branch_code: "GDY",
               route: 5,
               route_code: "ROUTE-05",
@@ -206,6 +207,24 @@ describe("ShipmentsPage", () => {
     expect(screen.getByLabelText("Shipment commands")).toHaveClass("shipment-command-panel");
   });
 
+  it("keeps route closure in Shipments and uses the canonical identifier", async () => {
+    const user = userEvent.setup();
+    mockShipmentsApi([
+      shipment({
+        route_status: "ready_to_close",
+        command_eligibility: {
+          ...shipment().command_eligibility,
+          close_route: { enabled: true, reason: "" },
+        },
+      }),
+    ]);
+
+    renderWithProviders(<App />, { route: "/wms/shipments" });
+
+    expect((await screen.findAllByText("ROUTE-01_MON-1")).length).toBeGreaterThan(0);
+    await user.click(screen.getByRole("button", { name: /Close Routes/i }));
+    await waitFor(() => expect(mockApiClient.post).toHaveBeenCalledWith("/shipments/1/close-route/", {}));
+  });
   it("loads the direct detail route without requiring a query-string selection", async () => {
     mockShipmentsApi();
 
@@ -246,7 +265,7 @@ describe("ShipmentsPage", () => {
     renderWithProviders(<App />, { route: "/wms/shipments" });
 
     await user.click(await screen.findByRole("button", { name: /Change Route/i }));
-    expect(screen.getByText(/ROUTE-02 \/ Monday 2026-07-20/i)).toBeInTheDocument();
+    expect(screen.getByText(/ROUTE-02_MON-1 \/ Monday 2026-07-20/i)).toBeInTheDocument();
     await user.click(screen.getByLabelText("Today only"));
     await user.type(screen.getByLabelText("Route search"), "ROUTE-05");
 

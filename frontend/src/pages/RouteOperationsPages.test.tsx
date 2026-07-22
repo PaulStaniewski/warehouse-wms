@@ -12,10 +12,10 @@ function routeRun(overrides = {}) {
     id: 501,
     route: 41,
     branch: 1,
-    route_code: "115/2",
-    route_name: "Dynamic Route 2",
+    route_code: "ROUTE-05",
+    route_name: "Trasa 5",
     branch_code: "GDY",
-    service_date: "2026-07-21",
+    service_date: "2026-07-22",
     run_number: 1,
     order_cutoff_time: "06:50:00",
     sync_time: "06:50:00",
@@ -23,7 +23,7 @@ function routeRun(overrides = {}) {
     cutoff_at: "2026-07-21T04:50:00Z",
     planned_departure_at: "2026-07-21T05:00:00Z",
     dispatch_wave: "07:00",
-    operational_identifier: "115/2_Wt-1",
+    operational_identifier: "ROUTE-05_WED-1",
     status: "open",
     orders_count: 2,
     order_lines_count: 4,
@@ -86,7 +86,7 @@ function mockBaseApi(routeRuns = [routeRun()]) {
     if (path.startsWith("/route-runs/")) return { data: paginated(routeRuns) };
     if (path.startsWith("/mm-tasks/")) return { data: paginated([]) };
     if (path.startsWith("/delivery-routes/")) {
-      return { data: paginated([{ id: 41, branch: 1, branch_code: "GDY", code: "115/2", name: "Dynamic Route 2", is_active: true, created_at: "", updated_at: "" }]) };
+      return { data: paginated([{ id: 41, branch: 1, branch_code: "GDY", code: "ROUTE-05", name: "Trasa 5", is_active: true, created_at: "", updated_at: "" }]) };
     }
     if (path.startsWith("/route-round-schedules/")) {
       return {
@@ -94,8 +94,8 @@ function mockBaseApi(routeRuns = [routeRun()]) {
           {
             id: 71,
             route: 41,
-            route_code: "115/2",
-            route_name: "Dynamic Route 2",
+            route_code: "ROUTE-05",
+            route_name: "Trasa 5",
             branch: 1,
             branch_code: "GDY",
             weekday: 1,
@@ -131,7 +131,7 @@ describe("Route operations pages", () => {
   it("renders Route Monitor with route buckets and attention state", async () => {
     renderWithProviders(<App />, { route: "/wms/routes-monitor" });
 
-    expect(await screen.findByText("115/2_Wt-1", {}, { timeout: 5000 })).toBeInTheDocument();
+    expect((await screen.findAllByText("ROUTE-05_WED-1", {}, { timeout: 5000 })).length).toBeGreaterThan(0);
     expect(screen.getByText("Active")).toBeInTheDocument();
     expect(screen.getByText("Lines")).toBeInTheDocument();
     expect(screen.getByText("Started")).toBeInTheDocument();
@@ -141,6 +141,17 @@ describe("Route operations pages", () => {
     expect(screen.getAllByText(/Cutoff has passed/i).length).toBeGreaterThan(0);
   });
 
+  it("renders canonical identifiers without generic route subtitles or close controls", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<App />, { route: "/wms/routes-monitor" });
+
+    await user.click((await screen.findAllByText("ROUTE-05_WED-1"))[0]);
+    expect(screen.queryByText("Trasa 5")).not.toBeInTheDocument();
+    expect(screen.queryByText(/_Sr-/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Close route" })).not.toBeInTheDocument();
+    expect(screen.getByText("Route is not ready yet.")).toBeInTheDocument();
+    expect(mockApiClient.post).not.toHaveBeenCalledWith(expect.stringMatching(/\/route-runs\/\d+\/close\//));
+  });
   it("renders neutral, cutoff warning, ready, and delayed route tones", async () => {
     mockBaseApi([
       routeRun({ id: 501, operational_identifier: "ROUTE-neutral", attention_status: "neutral", attention_reason: "Cutoff has not passed.", is_ready_to_close: false }),
@@ -151,22 +162,22 @@ describe("Route operations pages", () => {
 
     renderWithProviders(<App />, { route: "/wms/routes-monitor" });
 
-    expect((await screen.findByText("ROUTE-neutral")).closest("button")).toHaveClass("monitor-route-row--normal");
-    expect(screen.getByText("ROUTE-warning").closest("button")).toHaveClass("monitor-route-row--attention");
-    expect(screen.getByText("ROUTE-ready").closest("button")).toHaveClass("monitor-route-row--complete");
-    expect(screen.getByText("ROUTE-delayed-ready").closest("button")).toHaveClass("monitor-route-row--delayed");
+    expect((await screen.findAllByText("ROUTE-neutral"))[0].closest("button")).toHaveClass("monitor-route-row--normal");
+    expect(screen.getAllByText("ROUTE-warning")[0].closest("button")).toHaveClass("monitor-route-row--attention");
+    expect(screen.getAllByText("ROUTE-ready")[0].closest("button")).toHaveClass("monitor-route-row--complete");
+    expect(screen.getAllByText("ROUTE-delayed-ready")[0].closest("button")).toHaveClass("monitor-route-row--delayed");
     expect(screen.getByText("1 delayed / 1 cutoff warnings")).toBeInTheDocument();
   });
   it("renders Scanner Proformas in backend order with canonical counters and identifiers", async () => {
     mockBaseApi([
-      routeRun({ id: 502, operational_identifier: "115/2_Wt-2", run_number: 2, active_workers_count: 3, unstarted_lines_count: 2 }),
-      routeRun({ id: 501, operational_identifier: "115/2_Wt-1", run_number: 1, active_workers_count: 1, unstarted_lines_count: 4 }),
+      routeRun({ id: 502, operational_identifier: "ROUTE-05_WED-2", run_number: 2, active_workers_count: 3, unstarted_lines_count: 2 }),
+      routeRun({ id: 501, operational_identifier: "ROUTE-05_WED-1", run_number: 1, active_workers_count: 1, unstarted_lines_count: 4 }),
     ]);
 
     renderWithProviders(<App />, { route: "/scanner/proformas" });
 
-    const identifiers = await screen.findAllByText(/115\/2_Wt-[12]/);
-    expect(identifiers.map((node) => node.textContent)).toEqual(["115/2_Wt-2", "115/2_Wt-1"]);
+    const identifiers = await screen.findAllByText(/ROUTE-05_WED-[12]/);
+    expect(identifiers.map((node) => node.textContent)).toEqual(["ROUTE-05_WED-2", "ROUTE-05_WED-1"]);
     expect(screen.getAllByText("3").length).toBeGreaterThan(0);
     expect(screen.getAllByText("2").length).toBeGreaterThan(0);
   });
@@ -222,7 +233,7 @@ describe("Route operations pages", () => {
     renderWithProviders(<App />, { route: "/wms/route-schedules" });
 
     expect(await screen.findByRole("heading", { name: "Dispatch policy" })).toBeInTheDocument();
-    expect((await screen.findAllByText(/Dynamic Route 2/)).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText(/Trasa 5/)).length).toBeGreaterThan(0);
     await user.clear(screen.getByLabelText("Maximum routes per wave"));
     await user.type(screen.getByLabelText("Maximum routes per wave"), "2");
     await user.click(screen.getByRole("button", { name: /Save policy/i }));

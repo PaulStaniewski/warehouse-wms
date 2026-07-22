@@ -66,9 +66,7 @@ export function RouteArchivePage() {
                   {rows.map((run) => (
                     <tr key={run.id}>
                       <td>
-                        <strong>{run.route_code}</strong>
-                        <br />
-                        {run.route_name}
+                        <strong>{run.operational_identifier}</strong>
                       </td>
                       <td>{run.run_number}</td>
                       <td>{run.branch_code}</td>

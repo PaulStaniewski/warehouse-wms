@@ -74,6 +74,7 @@ from operations.services import (
     transit_investigation_next_action,
 )
 from operations.services import is_route_late, is_route_work_fully_prepared, route_close_result
+from operations.route_services import operational_identifier
 
 
 class DeliveryRouteSerializer(serializers.ModelSerializer):
@@ -356,9 +357,7 @@ class RouteRunSerializer(serializers.ModelSerializer):
         return route_close_result(obj)
 
     def get_operational_identifier(self, obj: RouteRun) -> str:
-        if obj.operational_identifier:
-            return obj.operational_identifier
-        return f"{obj.route.code}-{obj.run_number}"
+        return operational_identifier(obj.route, obj.service_date, obj.run_number)
 
     def _cutoff_dt(self, obj: RouteRun):
         if obj.cutoff_at:
@@ -1067,6 +1066,7 @@ class ShipmentSerializer(serializers.ModelSerializer):
     order_reference = serializers.CharField(source="order.external_reference", read_only=True)
     route_code = serializers.CharField(source="route_run.route.code", read_only=True, allow_null=True)
     route_name = serializers.CharField(source="route_run.route.name", read_only=True, allow_null=True)
+    route_identifier = serializers.SerializerMethodField()
     route_time = serializers.TimeField(source="route_run.departure_time", read_only=True, allow_null=True)
     cutoff_time = serializers.TimeField(source="route_run.order_cutoff_time", read_only=True, allow_null=True)
     route_status = serializers.SerializerMethodField()
@@ -1102,6 +1102,10 @@ class ShipmentSerializer(serializers.ModelSerializer):
             setattr(obj, cache_name, shipment_operational_projection(obj))
         return getattr(obj, cache_name)
 
+    def get_route_identifier(self, obj: Shipment) -> str | None:
+        if obj.route_run_id is None:
+            return None
+        return operational_identifier(obj.route_run.route, obj.route_run.service_date, obj.route_run.run_number)
     def get_route_status(self, obj: Shipment) -> str:
         return self._statuses(obj)["route_status"]
 
@@ -1207,6 +1211,7 @@ class ShipmentSerializer(serializers.ModelSerializer):
             "route_run",
             "route_code",
             "route_name",
+            "route_identifier",
             "route_time",
             "cutoff_time",
             "route_status",
@@ -2138,7 +2143,7 @@ class AuditLogSerializer(serializers.ModelSerializer):
     def get_route_run_label(self, obj) -> str | None:
         if obj.route_run_id is None:
             return None
-        return str(obj.route_run)
+        return operational_identifier(obj.route_run.route, obj.route_run.service_date, obj.route_run.run_number)
 
     def get_source(self, obj) -> str:
         return "current" if obj.created_at >= timezone.now() - timezone.timedelta(days=30) else "archive"

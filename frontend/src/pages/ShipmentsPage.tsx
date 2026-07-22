@@ -207,7 +207,7 @@ function ShipmentDetail({
           <Definition label="Reference" value={shipment.reference} />
           <Definition label="External ref" value={shipment.external_reference} />
           <Definition label="Branch" value={shipment.branch_code} />
-          <Definition label="Route" value={shipment.route_code ? `${shipment.route_code} ${shipment.route_time || ""}` : "-"} />
+          <Definition label="Route" value={shipment.route_identifier || "-"} />
           <Definition label="Cutoff" value={shipment.cutoff_time} />
           <Definition label="Delivery" value={dateOnly(shipment.delivery_date)} />
           <Definition label="Customer" value={shipment.customer_name} />
@@ -599,7 +599,7 @@ export function ShipmentsPage() {
                     <td>{shipment.line_count}</td>
                     <td><StatusBadge label={label(shipment.status)} tone={statusTone(shipment.status)} /></td>
                     <td><StatusBadge label={label(shipment.picking_status)} tone={statusTone(shipment.picking_status)} /></td>
-                    <td>{shipment.route_code || "-"}</td>
+                    <td>{shipment.route_identifier || "-"}</td>
                     <td>{shipment.route_time || "-"}</td>
                     <td>{shipment.cutoff_time || "-"}</td>
                     <td>{shipment.document_status === "printed" || shipment.document_status === "posted" ? "Yes" : "-"}</td>
@@ -679,7 +679,7 @@ export function ShipmentsPage() {
           submitLabel="Change Route"
           title={`Change route for ${selectedShipment.reference}`}
         >
-          <p className="shipment-dialog-context">Current route: {selectedShipment.route_code || "-"} {selectedShipment.route_time || ""}</p>
+          <p className="shipment-dialog-context">Current route: {selectedShipment.route_identifier || "-"}</p>
           <label className="shipment-checkbox-label">
             <input checked={routeTodayOnly} onChange={(event) => setRouteTodayOnly(event.target.checked)} type="checkbox" />
             <span>Today only</span>

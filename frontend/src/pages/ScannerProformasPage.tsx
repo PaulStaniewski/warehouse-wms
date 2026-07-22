@@ -164,7 +164,6 @@ export function ScannerProformasPage() {
                     />
                     <span>
                       <strong>{run.operational_identifier || run.route_code}</strong>
-                      <small>{run.route_name} / round {run.run_number}</small>
                     </span>
                   </label>
                   <div className="scanner-proforma-card__metrics">

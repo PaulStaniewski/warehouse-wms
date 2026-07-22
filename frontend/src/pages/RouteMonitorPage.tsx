@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import { AlertTriangle, CalendarClock, Clock3, RefreshCw } from "lucide-react";
 
 import { useActiveBranch } from "../api/ActiveBranchContext";
-import { useCloseRouteRun, useInterBranchMMTasks, usePrintRouteDocuments, useRouteRuns } from "../api/queries";
+import { useInterBranchMMTasks, usePrintRouteDocuments, useRouteRuns } from "../api/queries";
 import { DataState } from "../components/DataState";
 import { PageHeader } from "../components/PageHeader";
 import type { InterBranchMMTask, RouteRun } from "../types/api";
@@ -201,7 +201,6 @@ function RouteList({
           >
             <div className="monitor-route-name">
               <strong>{run.operational_identifier || run.route_code}</strong>
-              <span>{run.route_name}</span>
               <small>{formatStatus(run.status)} / {run.attention_reason}</small>
             </div>
             <div className="monitor-count monitor-count--active">{run.active_workers_count}</div>
@@ -228,11 +227,10 @@ export function RouteMonitorPage() {
   const routeRuns = useRouteRuns(activeBranchCode);
   const mmTasks = useInterBranchMMTasks(activeBranchCode);
   const printDocuments = usePrintRouteDocuments();
-  const closeRouteRun = useCloseRouteRun();
   const rows = routeRuns.data?.results ?? [];
   const delayedRows = rows.filter((run) => run.attention_status === "delayed");
   const warningRows = rows.filter((run) => run.attention_status === "cutoff_warning");
-  const routesToClose = rows
+  const attentionRoutes = rows
     .filter((run) => needsAttention(run))
     .filter((run, index, list) => list.findIndex((item) => item.id === run.id) === index)
     .sort((left, right) => (left.planned_departure_at || left.departure_time).localeCompare(right.planned_departure_at || right.departure_time));
@@ -278,21 +276,6 @@ export function RouteMonitorPage() {
       window.open(`/wms/route-runs/${selectedRouteRun.id}/documents`, "_blank");
     } catch (error) {
       setActionMessage({ type: "error", text: "Could not print route documents." });
-    }
-  }
-
-  async function handleCloseRoute() {
-    if (!selectedRouteRun) {
-      return;
-    }
-
-    try {
-      const result = await closeRouteRun.mutateAsync({ routeRunId: selectedRouteRun.id });
-      setActionMessage({ type: "success", text: result.message });
-      setSelectedRouteRun(null);
-      await routeRuns.refetch();
-    } catch (error) {
-      setActionMessage({ type: "error", text: "Could not close route." });
     }
   }
 
@@ -362,15 +345,15 @@ export function RouteMonitorPage() {
               </section>
 
               <section className="monitor-side-section">
-                <h2>Routes requiring attention / To close</h2>
-                {routesToClose.length === 0 ? (
+                <h2>Routes requiring attention</h2>
+                {attentionRoutes.length === 0 ? (
                   <p>No route runs require attention.</p>
                 ) : (
                   <ul className="monitor-attention-list">
-                    {routesToClose.map((run) => (
+                    {attentionRoutes.map((run) => (
                       <li key={run.id}>
                         <div>
-                          <strong>{run.route_code}</strong>
+                          <strong>{run.operational_identifier}</strong>
                           <span>{formatTime(run.planned_departure_at || run.departure_time)}</span>
                         </div>
                         <small>
@@ -384,14 +367,14 @@ export function RouteMonitorPage() {
               </section>
 
               <section className="monitor-side-section">
-                <h2>Route actions</h2>
+                <h2>Route documents</h2>
                 {actionMessage && <p className={`monitor-action-message monitor-action-message--${actionMessage.type}`}>{actionMessage.text}</p>}
                 {!selectedRouteRun ? (
-                  <p>Select a ready route.</p>
+                  <p>Select a route to view its read-only state and document action.</p>
                 ) : (
                   <>
                     <p>
-                      {selectedRouteRun.route_code} / run {selectedRouteRun.run_number}
+                      {selectedRouteRun.operational_identifier}
                     </p>
                     <p>{selectedRouteRun.is_ready_to_close ? "Ready to close" : "Route is not ready yet."}</p>
                     <div className="monitor-action-buttons">
@@ -401,17 +384,6 @@ export function RouteMonitorPage() {
                         type="button"
                       >
                         Print route documents
-                      </button>
-                      <button
-                        disabled={
-                          !selectedRouteRun.is_ready_to_close ||
-                          !selectedRouteRun.documents_printed_at ||
-                          closeRouteRun.isPending
-                        }
-                        onClick={handleCloseRoute}
-                        type="button"
-                      >
-                        Close route
                       </button>
                     </div>
                   </>

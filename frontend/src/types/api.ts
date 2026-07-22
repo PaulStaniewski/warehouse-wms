@@ -277,6 +277,7 @@ export type Shipment = {
   route_run: number | null;
   route_code: string | null;
   route_name: string | null;
+  route_identifier: string | null;
   route_time: string | null;
   cutoff_time: string | null;
   route_status: string;
