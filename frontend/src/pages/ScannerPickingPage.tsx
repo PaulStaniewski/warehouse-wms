@@ -31,6 +31,7 @@ import { clearStoredScannerCartWork, storeScannerSession, useStoredScannerSessio
 import { CameraBarcodeScanner } from "../components/scanner/CameraBarcodeScanner";
 import { DataState } from "../components/DataState";
 import type { AuditLog, PickingShortageChallenge, PickingTask, PickInstruction } from "../types/api";
+import { formatQuantity } from "../utils/quantity";
 
 type ScanMessage = {
   type: "success" | "error" | "warning";
@@ -54,15 +55,6 @@ function getErrorMessage(error: unknown, fallback: string) {
 
 function toNumber(value: string | number | null | undefined) {
   return Number.parseFloat(String(value ?? 0));
-}
-
-function formatQuantity(value: string | number | null | undefined) {
-  const numberValue = toNumber(value);
-  if (!Number.isFinite(numberValue)) {
-    return String(value);
-  }
-
-  return new Intl.NumberFormat("en-GB", { maximumFractionDigits: 0 }).format(numberValue);
 }
 
 function clampQuantity(value: number, max: number) {
@@ -140,7 +132,7 @@ function getTaskStatus(task: PickingTask, instruction: PickInstruction | null, n
     return "Location shortage";
   }
 
-  if (toNumber(task.remaining_quantity) <= 0) {
+  if (toNumber(task.remaining_to_pick) <= 0) {
     return "Completed";
   }
 
@@ -203,11 +195,11 @@ export function ScannerPickingPage() {
   const pickingState = hasStoredCartWork ? cartWork.data?.state ?? "waiting_for_location" : "waiting_for_location";
   const active = Boolean(work && instruction && pickingState !== "completed");
   const currentTask = tasks.find((task) => task.id === instruction?.picking_task_id);
-  const currentRemaining = toNumber(currentTask?.remaining_quantity ?? instruction?.remaining_quantity ?? 0);
+  const currentRemaining = toNumber(currentTask?.remaining_to_pick ?? instruction?.remaining_to_pick ?? 0);
   const totalToPick = tasks.reduce((sum, task) => sum + toNumber(task.quantity_to_pick), 0);
   const totalPicked = tasks.reduce((sum, task) => sum + toNumber(task.quantity_picked), 0);
   const totalPrepared = tasks.reduce((sum, task) => sum + toNumber(task.quantity_prepared), 0);
-  const totalRemaining = tasks.reduce((sum, task) => sum + toNumber(task.remaining_quantity), 0);
+  const totalRemaining = tasks.reduce((sum, task) => sum + toNumber(task.remaining_to_pick), 0);
   const progress = work?.picking_job.progress_percent ?? 0;
   const progressText = `${formatQuantity(totalPicked)} / ${formatQuantity(totalToPick)} picked`;
   const currentLocation = instruction?.location.code ?? null;
@@ -225,11 +217,11 @@ export function ScannerPickingPage() {
       toPick: groupTasks.reduce((sum, task) => sum + toNumber(task.quantity_to_pick), 0),
       picked: groupTasks.reduce((sum, task) => sum + toNumber(task.quantity_picked), 0),
       prepared: groupTasks.reduce((sum, task) => sum + toNumber(task.quantity_prepared), 0),
-      remaining: groupTasks.reduce((sum, task) => sum + toNumber(task.remaining_quantity), 0),
+      remaining: groupTasks.reduce((sum, task) => sum + toNumber(task.remaining_to_pick), 0),
     }));
   }, [tasks]);
 
-  const nextOpenTaskId = tasks.find((task) => toNumber(task.remaining_quantity) > 0)?.id;
+  const nextOpenTaskId = tasks.find((task) => toNumber(task.remaining_to_pick) > 0)?.id;
   const compactActions = (work ? recentActions.data?.results ?? [] : []).slice(0, 5).map(compactAction);
 
   useEffect(() => {
@@ -627,7 +619,7 @@ export function ScannerPickingPage() {
             <dl className="concept-current-stats">
               <div><dt>To pick</dt><dd>{formatQuantity(instruction?.required_quantity ?? 0)}</dd></div>
               <div><dt>Picked</dt><dd>{formatQuantity(instruction?.picked_quantity ?? 0)}</dd></div>
-              <div><dt>Remaining</dt><dd>{formatQuantity(instruction?.remaining_quantity ?? 0)}</dd></div>
+              <div><dt>Remaining</dt><dd>{formatQuantity(instruction?.remaining_to_pick ?? 0)}</dd></div>
               <div><dt>Progress</dt><dd>{progress}%</dd></div>
             </dl>
             <div className="concept-progress-line">
@@ -718,7 +710,7 @@ export function ScannerPickingPage() {
             <div><dt>Picked</dt><dd>{formatQuantity(currentTask?.quantity_picked ?? 0)}</dd></div>
             <div><dt>Missing at location</dt><dd>{formatQuantity(currentTask?.shortage_quantity ?? 0)}</dd></div>
             <div><dt>Prepared</dt><dd>{formatQuantity(currentTask?.quantity_prepared ?? 0)}</dd></div>
-            <div><dt>Remaining</dt><dd>{formatQuantity(currentTask?.remaining_quantity ?? 0)}</dd></div>
+            <div><dt>Remaining</dt><dd>{formatQuantity(currentTask?.remaining_to_pick ?? 0)}</dd></div>
             <button
               className="concept-shortage-button"
               disabled={!active || pickingState !== "waiting_for_product" || currentRemaining <= 0}
@@ -931,7 +923,7 @@ export function ScannerPickingPage() {
                         const isComplete = statusLabel === "Completed";
                         const isCurrent = statusLabel === "Current";
                         const handledByAnother = Boolean(task.claimed_by_username && !task.is_claimed_by_current_user && !isComplete);
-                        const openForClaim = work && !isComplete && !isCurrent && !handledByAnother && toNumber(task.remaining_quantity) > 0;
+                        const openForClaim = work && !isComplete && !isCurrent && !handledByAnother && toNumber(task.remaining_to_pick) > 0;
 
                         return (
                           <div
@@ -953,7 +945,7 @@ export function ScannerPickingPage() {
                                 <dt>Missing</dt><dd>{formatQuantity(task.shortage_quantity)}</dd>
                               </div>
                               <div><dt>Prepared</dt><dd>{formatQuantity(task.quantity_prepared)}</dd></div>
-                              <div><dt>Remaining</dt><dd>{formatQuantity(task.remaining_quantity)}</dd></div>
+                              <div><dt>Remaining</dt><dd>{formatQuantity(task.remaining_to_pick)}</dd></div>
                             </dl>
                             {task.is_replacement_pick && (
                               <span className="concept-replacement-note">

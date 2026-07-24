@@ -21,6 +21,7 @@ from operations.operational_projections import shipment_line_progress, shipment_
 from operations.route_services import operational_identifier
 from operations.services import is_route_work_fully_prepared, recalculate_route_readiness
 from warehouse.models import InventoryItem
+from warehouse.quantity_policy import product_quantity_error
 
 
 TERMINAL_SHIPMENT_STATUSES = {
@@ -725,6 +726,9 @@ def remove_shipment_line_quantity(
         )
         if line.shipment_id != shipment.id:
             raise ValidationError("Shipment line does not belong to the selected shipment.")
+        quantity_policy_error = product_quantity_error(line.product, quantity)
+        if quantity_policy_error:
+            raise ValidationError(quantity_policy_error)
 
         previous_effective = shipment_line_effective_quantity(line)
         if quantity > previous_effective:

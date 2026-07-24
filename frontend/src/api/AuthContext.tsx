@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 
 import { apiClient } from "./client";
+import { clearStoredScannerCartWork } from "./scannerSession";
 import type { AuthSession } from "../types/api";
 
 export const ACTIVE_BRANCH_STORAGE_KEY = "warehouse-wms-active-branch";
@@ -48,6 +49,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     },
     onSettled: () => {
       localStorage.removeItem(ACTIVE_BRANCH_STORAGE_KEY);
+      clearStoredScannerCartWork();
       queryClient.clear();
       queryClient.setQueryData(["auth", "session"], {
         is_authenticated: false,

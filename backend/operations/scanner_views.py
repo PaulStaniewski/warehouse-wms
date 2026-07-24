@@ -66,6 +66,7 @@ from operations.services import (
     recalculate_route_readiness,
 )
 from warehouse.models import Branch, InventoryItem, Location, Product
+from warehouse.quantity_policy import product_quantity_error
 
 
 User = get_user_model()
@@ -128,7 +129,7 @@ def _parse_positive_quantity(value, default="1"):
 def _parse_positive_piece_quantity(value, default="1"):
     raw_value = str(value if value not in [None, ""] else default).strip()
     if not raw_value.isdigit():
-        return None, Response({"detail": "Quantity must be a whole number."}, status=status.HTTP_400_BAD_REQUEST)
+        return None, Response({"detail": "This product must be handled in whole units."}, status=status.HTTP_400_BAD_REQUEST)
 
     quantity = Decimal(raw_value)
     if quantity <= 0:
@@ -150,6 +151,7 @@ def _get_route_run_or_response(route_run_id):
 
 def _session_data(session: ScannerSession):
     cart_work_session = getattr(session, "cart_work_session", None)
+    cart_work_active = bool(cart_work_session and cart_work_session.status in [CartWorkSession.Status.ACTIVE, CartWorkSession.Status.CONTROL])
     return {
         "id": session.id,
         "cart": session.cart_id,
@@ -159,6 +161,13 @@ def _session_data(session: ScannerSession):
         "picking_job": cart_work_session.picking_job_id if cart_work_session else None,
         "worker_code": session.worker_code,
         "status": session.status,
+        "session_active": session.status == ScannerSession.Status.ACTIVE,
+        "cart_status": session.cart.status,
+        "cart_active": session.cart.status == ScannerCart.Status.IN_USE,
+        "cart_work_status": cart_work_session.status if cart_work_session else None,
+        "cart_work_active": cart_work_active,
+        "has_unfinished_picking_work": bool(cart_work_active and _has_unresolved_cart_work(cart_work_session.picking_job)),
+        "has_unfinished_control_work": bool(cart_work_active and cart_work_session.status == CartWorkSession.Status.CONTROL),
         "started_at": session.started_at.isoformat(),
         "ended_at": session.ended_at.isoformat() if session.ended_at else None,
     }
@@ -225,7 +234,7 @@ def _cart_item_data(item: CartPickedItem):
 
 
 def _task_remaining(task: PickingTask):
-    return task.quantity_to_pick - task.quantity_picked - task.shortage_quantity
+    return task.remaining_to_pick
 
 
 def _job_tasks(picking_job: PickingJob):
@@ -811,12 +820,14 @@ def _pick_instruction_data(task: PickingTask | None):
             "brand": product.brand,
             "description": product.description,
             "image_url": product.image_url,
+            "unit_of_measure": product.unit_of_measure,
         },
         "order_reference": task.order_line.order.external_reference,
         "required_quantity": str(task.quantity_to_pick),
         "picked_quantity": str(task.quantity_picked),
         "shortage_quantity": str(task.shortage_quantity),
-        "remaining_quantity": str(task.quantity_to_pick - task.quantity_picked - task.shortage_quantity),
+        "remaining_quantity": str(task.remaining_to_pick),
+        "remaining_to_pick": str(task.remaining_to_pick),
         "customer_alias": task.order_line.order.customer_alias or task.order_line.order.customer_name,
     }
 
@@ -1389,7 +1400,7 @@ def _pick_for_cart_work(request):
     if not product_code:
         return Response({"detail": "product_code is required."}, status=status.HTTP_400_BAD_REQUEST)
 
-    quantity, error = _parse_positive_piece_quantity(request.data.get("quantity", 1))
+    quantity, error = _parse_positive_quantity(request.data.get("quantity", 1))
     if error is not None:
         return error
 
@@ -1455,6 +1466,10 @@ def _pick_for_cart_work(request):
         if product_code.lower() not in {product.sku.lower(), (product.barcode or "").lower()}:
             return Response({"detail": f"Wrong product. Expected {product.sku}."}, status=status.HTTP_400_BAD_REQUEST)
 
+        quantity_policy_error = product_quantity_error(product, quantity)
+        if quantity_policy_error:
+            return Response({"detail": quantity_policy_error}, status=status.HTTP_400_BAD_REQUEST)
+
         task_remaining = task.quantity_to_pick - task.quantity_picked - task.shortage_quantity
         order_remaining = order_line.quantity_ordered - order_line.quantity_picked
         if quantity > task_remaining or quantity > order_remaining:
@@ -1505,7 +1520,7 @@ def _pick_for_cart_work(request):
         task.status = PickingTask.Status.IN_PROGRESS
         task.save(update_fields=["quantity_picked", "status", "updated_at"])
         task.refresh_from_db()
-        if task.quantity_picked >= task.quantity_to_pick:
+        if task.remaining_to_pick == 0:
             task.status = PickingTask.Status.PICKED
             task.save(update_fields=["status", "updated_at"])
             task.refresh_from_db()
@@ -1642,7 +1657,7 @@ def _pick_from_shelf(request, allow_legacy_without_session=False):
     if not code:
         return Response({"detail": "Scan code is required."}, status=status.HTTP_400_BAD_REQUEST)
 
-    quantity, error = _parse_positive_piece_quantity(request.data.get("quantity", 1))
+    quantity, error = _parse_positive_quantity(request.data.get("quantity", 1))
     if error is not None:
         return error
 
@@ -1679,6 +1694,9 @@ def _pick_from_shelf(request, allow_legacy_without_session=False):
 
         order_line = task.order_line
         product = order_line.product
+        quantity_policy_error = product_quantity_error(product, quantity)
+        if quantity_policy_error:
+            return Response({"detail": quantity_policy_error}, status=status.HTTP_400_BAD_REQUEST)
         task_remaining = task.quantity_to_pick - task.quantity_picked - task.shortage_quantity
         order_remaining = order_line.quantity_ordered - order_line.quantity_picked
 
@@ -2678,6 +2696,13 @@ class ScannerCartWorkCurrentView(APIView):
 
         if cart_work_session is None:
             return Response({"detail": "Cart work session not found."}, status=status.HTTP_404_NOT_FOUND)
+        if (
+            cart_work_session.status not in [CartWorkSession.Status.ACTIVE, CartWorkSession.Status.CONTROL]
+            or cart_work_session.scanner_session is None
+            or cart_work_session.scanner_session.status != ScannerSession.Status.ACTIVE
+            or cart_work_session.cart.status != ScannerCart.Status.IN_USE
+        ):
+            return Response({"detail": "Scanner cart work is no longer active."}, status=status.HTTP_409_CONFLICT)
 
         return _cart_work_response(cart_work_session, request)
 
@@ -3638,6 +3663,9 @@ class ScannerQuickTransferView(APIView):
             product = _find_product_by_code(product_code)
             if product is None:
                 return Response({"detail": "Product not found."}, status=status.HTTP_404_NOT_FOUND)
+            quantity_policy_error = product_quantity_error(product, quantity)
+            if quantity_policy_error:
+                return Response({"detail": quantity_policy_error}, status=status.HTTP_400_BAD_REQUEST)
 
             existing_operation = (
                 ScannerQuickTransferOperation.objects.select_for_update(of=("self",))

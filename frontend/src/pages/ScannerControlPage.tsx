@@ -14,6 +14,7 @@ import {
 } from "../api/queries";
 import { storeScannerSession, useStoredScannerSession } from "../api/scannerSession";
 import { CameraBarcodeScanner } from "../components/scanner/CameraBarcodeScanner";
+import { formatQuantity } from "../utils/quantity";
 import type { ScannerCartItem } from "../types/api";
 
 
@@ -25,14 +26,6 @@ function toNumber(value: string | number) {
   return Number.parseFloat(String(value));
 }
 
-function formatQuantity(value: string | number) {
-  const numberValue = toNumber(value);
-  if (!Number.isFinite(numberValue)) {
-    return String(value);
-  }
-
-  return new Intl.NumberFormat("en-GB", { maximumFractionDigits: 0 }).format(numberValue);
-}
 
 function itemRemaining(item: ScannerCartItem) {
   return toNumber(item.remaining_quantity);
@@ -266,7 +259,7 @@ export function ScannerControlPage() {
             <div>
               <h1>{controlSession?.cart_code ?? controlCartCode}</h1>
               <p>
-                {items.length} lines · {formatQuantity(totalPicked)} picked · {formatQuantity(totalPrepared)} prepared ·{" "}
+                {items.length} lines - {formatQuantity(totalPicked)} picked - {formatQuantity(totalPrepared)} prepared -{" "}
                 {formatQuantity(totalRemaining)} remaining
               </p>
             </div>
@@ -388,7 +381,7 @@ export function ScannerControlPage() {
                     <div>
                       <strong>{item.product_sku}</strong>
                       <span>{item.product_name}</span>
-                      <small>{item.order_reference} · {item.customer_name || "-"}</small>
+                      <small>{item.order_reference} - {item.customer_name || "-"}</small>
                     </div>
                     <div>
                       <strong>{formatQuantity(item.quantity_picked)} / {formatQuantity(item.quantity_prepared)}</strong>

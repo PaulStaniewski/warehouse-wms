@@ -97,7 +97,7 @@ from operations.serializers import (
     TransferDiscrepancySourceReviewSerializer,
     TransferDiscrepancyTransitInvestigationSerializer,
 )
-from operations.operational_projections import active_route_run_queryset
+from operations.operational_projections import active_route_run_queryset, open_shipment_query, open_shipment_queryset, shipment_is_open
 from operations.route_services import (
     aware_datetime,
     create_route_run_from_schedule,
@@ -145,6 +145,7 @@ from operations.services import (
     source_verification_item_remaining,
 )
 from warehouse.models import Branch, InventoryItem, Location, Product
+from warehouse.quantity_policy import product_quantity_error
 
 
 class TransferDiscrepancyActionPagination(PageNumberPagination):
@@ -911,6 +912,8 @@ class ShipmentFilter(django_filters.FilterSet):
     customer = django_filters.CharFilter(method="filter_customer")
     payment_method = django_filters.CharFilter(field_name="payment_method", lookup_expr="icontains")
     external_reference = django_filters.CharFilter(field_name="external_reference", lookup_expr="icontains")
+    completed_from = django_filters.DateFilter(method="filter_completed_from")
+    completed_to = django_filters.DateFilter(method="filter_completed_to")
 
     def filter_branch(self, queryset, name, value):
         if str(value).isdigit():
@@ -943,6 +946,20 @@ class ShipmentFilter(django_filters.FilterSet):
         if str(value).isdigit():
             route_query |= models.Q(route_run_id=value)
         return queryset.filter(route_query)
+
+    def filter_completed_from(self, queryset, name, value):
+        return queryset.filter(
+            models.Q(route_run__closed_at__date__gte=value)
+            | models.Q(cancelled_at__date__gte=value)
+            | models.Q(status=Shipment.Status.COMPLETED, updated_at__date__gte=value)
+        )
+
+    def filter_completed_to(self, queryset, name, value):
+        return queryset.filter(
+            models.Q(route_run__closed_at__date__lte=value)
+            | models.Q(cancelled_at__date__lte=value)
+            | models.Q(status=Shipment.Status.COMPLETED, updated_at__date__lte=value)
+        )
 
     def filter_customer(self, queryset, name, value):
         return queryset.filter(
@@ -1027,7 +1044,31 @@ class ShipmentViewSet(ReadOnlyModelViewSet):
         branch = self.request.query_params.get("branch", "").strip()
         if branch:
             queryset = queryset.filter(models.Q(branch_id=branch) if branch.isdigit() else models.Q(branch__code__iexact=branch))
+        if getattr(self, "action", None) == "list":
+            raw_open_only = str(self.request.query_params.get("open_only", "true")).strip().lower()
+            if raw_open_only in {"true", "1", "yes", "on"}:
+                queryset = open_shipment_queryset(queryset)
+            elif raw_open_only in {"false", "0", "no", "off"}:
+                self.ordering = ["_open_rank", "-route_run__closed_at", "-cancelled_at", "-updated_at", "-id"]
+                queryset = queryset.annotate(
+                    _open_rank=models.Case(
+                        models.When(open_shipment_query(), then=models.Value(0)),
+                        default=models.Value(1),
+                        output_field=models.IntegerField(),
+                    )
+                ).order_by("_open_rank", "-route_run__closed_at", "-cancelled_at", "-updated_at", "-id")
+            else:
+                raise ValidationError({"open_only": "Use true or false."})
         return queryset.distinct()
+
+    def get_object(self):
+        shipment = super().get_object()
+        if self.action not in {"retrieve", "print_documents"} and not shipment_is_open(shipment):
+            raise ValidationError({
+                "detail": "Historical Shipments are read-only.",
+                "code": "historical_shipment_read_only",
+            })
+        return shipment
 
     def retrieve(self, request, *args, **kwargs):
         shipment = self.get_object()
@@ -1856,6 +1897,9 @@ class StockAdjustmentViewSet(StockMovementViewSet):
             return Response({"quantity": ["Quantity must be a valid number."]}, status=status.HTTP_400_BAD_REQUEST)
         if quantity <= 0:
             return Response({"quantity": ["Quantity must be greater than zero."]}, status=status.HTTP_400_BAD_REQUEST)
+        quantity_policy_error = product_quantity_error(product, quantity)
+        if quantity_policy_error:
+            return Response({"quantity": [quantity_policy_error]}, status=status.HTTP_400_BAD_REQUEST)
         if reason not in StockMovement.AdjustmentReason.values:
             return Response({"reason_code": ["Select a valid stock adjustment reason."]}, status=status.HTTP_400_BAD_REQUEST)
         if not note:

@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
@@ -60,6 +60,7 @@ from operations.models import (
     TransferPalletArrival,
     TransferPalletItem,
 )
+from operations.operational_projections import open_shipment_queryset
 from operations.route_services import operational_identifier
 from warehouse.models import Branch, InventoryItem, Location, Product
 
@@ -117,17 +118,22 @@ class Command(BaseCommand):
             ("INCOMPLETE_AFTER_CUTOFF", "SHP-GDY-0001", "cutoff_warning", "not_started", "Complete the remaining pick and verify ready."),
             ("DELAYED_OPEN", "SHP-GDY-0008", "delayed", "not_started", "Keep the run open and verify red delayed."),
             ("ACTIVE_PICKING", "SHP-GDY-0002", "cutoff_warning", "started", "Continue the partially picked line."),
-            ("PARTIAL_PICKING", "SHP-GDY-0002", "cutoff_warning", "started", "Continue ACTIVE_PICKING from its half-picked quantity."),
+            ("PARTIAL_PICKING", "SHP-GDY-0002", "cutoff_warning", "started", "Continue ACTIVE_PICKING from one picked unit and one remaining unit."),
             ("QUANTITY_REMOVAL", "SHP-GDY-0006", "neutral", "not_started", "Remove quantity from a shipment line."),
             ("PICKING_SHORTAGE", "SHP-GDY-0001", "cutoff_warning", "not_started", "Continue INCOMPLETE_AFTER_CUTOFF by reporting a shortage."),
             ("CLOSED_AND_NEXT_ROUND", "SHP-GDY-0007", "neutral", "not_started", "Compare the closed first round with this open next round."),
             ("ROUTE_REASSIGNMENT", "SHP-GDY-REASSIGN", "neutral", "not_started", "Move this shipment to another eligible open RouteRun."),
             ("SCANNER_UNSTARTED", "SHP-GDY-REASSIGN", "neutral", "not_started", "Continue ROUTE_REASSIGNMENT by selecting its exact RouteRun ID in Scanner."),
-            ("SCANNER_ACTIVE_PICKING", "SHP-GDY-0002", "cutoff_warning", "started", "Continue ACTIVE_PICKING in the active WOZEK-03 session."),
-            ("SCANNER_PARTIAL_PICK", "SHP-GDY-0002", "cutoff_warning", "started", "Continue SCANNER_ACTIVE_PICKING and verify the remaining half quantity."),
+            ("SCANNER_ACTIVE_PICKING", "SHP-GDY-0002", "cutoff_warning", "started", "WOZEK-03 is intentionally active: target 2, picked 1, remaining 1; pick the final unit."),
+            ("SCANNER_PARTIAL_PICK", "SHP-GDY-0002", "cutoff_warning", "started", "Continue SCANNER_ACTIVE_PICKING and verify target 2, picked 1, remaining 1."),
             ("SCANNER_ZERO_EFFECTIVE_EXCLUDED", "SHP-GDY-0006", "neutral", "zero_effective_excluded", "Continue QUANTITY_REMOVAL and verify line 2 is not pickable."),
             ("SCANNER_PREPARED_EXCLUDED", "SHP-GDY-0003", "neutral", "prepared", "Verify the route remains on Route Monitor and is absent from Scanner Proformas."),
             ("SCANNER_CLOSED_ROUTE_EXCLUDED", "SHP-GDY-0004", "muted", "prepared_historical", "Verify the closed RouteRun is absent from both active lists."),
+            ("OPEN_SHIPMENT", "SHP-GDY-0001", "cutoff_warning", "not_started", "Verify this current Shipment appears with open_only=true."),
+            ("READY_TO_CLOSE", "SHP-GDY-0003", "neutral", "prepared", "Verify this prepared Shipment remains open until its RouteRun closes."),
+            ("CLOSED_ROUTE_HISTORY", "SHP-GDY-0004", "muted", "prepared_historical", "Verify open_only=false exposes this completed closed-route Shipment."),
+            ("CANCELLED_SHIPMENT_HISTORY", "SHP-GDY-0005", "muted", "cancelled", "Verify open_only=false exposes this cancelled Shipment."),
+            ("HISTORICAL_REPRINT", "SHP-GDY-0004", "muted", "prepared_historical", "Continue CLOSED_ROUTE_HISTORY by reprinting only its Shipment document."),
         ]
         self.stdout.write("Operational demo scenarios (demo-owned records rebuilt):")
         for name, reference, attention, line_state, action in scenarios:
@@ -143,6 +149,8 @@ class Command(BaseCommand):
             f"active_routes={RouteRun.objects.filter(pk__in=[run.pk for run in route_runs.values()], route__branch=branches['GDY']).exclude(status__in=[RouteRun.Status.CLOSED, RouteRun.Status.CANCELLED]).count()}, "
             f"closed_routes={RouteRun.objects.filter(pk__in=[run.pk for run in route_runs.values()], route__branch=branches['GDY'], status=RouteRun.Status.CLOSED).count()}, "
             f"shipments={Shipment.objects.filter(branch=branches['GDY']).count()}, "
+            f"open_shipments={open_shipment_queryset(Shipment.objects.filter(branch=branches['GDY'])).count()}, "
+            f"all_shipments={Shipment.objects.filter(branch=branches['GDY']).count()}, "
             f"shipment_lines={ShipmentLine.objects.filter(shipment__branch=branches['GDY']).count()}, "
             f"picking_tasks={PickingTask.objects.filter(branch=branches['GDY']).count()}, "
             f"active_scanner_sessions={ScannerSession.objects.filter(status=ScannerSession.Status.ACTIVE).count()}"
@@ -267,7 +275,7 @@ class Command(BaseCommand):
     def create_branches(self):
         branch_data = [
             {"code": "GDY", "name": "Magazyn Gdynia", "city": "Gdynia", "country": "Poland"},
-            {"code": "GDA", "name": "Magazyn Gdańsk", "city": "Gdańsk", "country": "Poland"},
+            {"code": "GDA", "name": "Gdansk", "city": "Gdansk", "country": "Poland"},
         ]
 
         branches = {}
@@ -409,7 +417,7 @@ class Command(BaseCommand):
     def create_delivery_routes(self, branches):
         route_data = []
         route_data.extend(("GDY", f"ROUTE-{number:02d}", f"Trasa {number}") for number in range(1, 11))
-        route_data.extend(("GDA", f"ROUTE-{number:02d}", f"Trasa Gdańsk {number}") for number in range(1, 4))
+        route_data.extend(("GDA", f"ROUTE-{number:02d}", f"Trasa Gdansk {number}") for number in range(1, 4))
 
         routes = {}
         for branch_code, code, name in route_data:
@@ -527,12 +535,13 @@ class Command(BaseCommand):
             route = delivery_routes[(branch_code, route_code)]
             service_date = today + timedelta(days=day_offset)
             BranchDispatchPolicy.objects.get_or_create(branch=route.branch)
+            schedule_cutoff_time = cutoff_time if cutoff_time < departure_time else time(0, 0)
             schedule, _ = RouteRoundSchedule.objects.update_or_create(
                 route=route,
                 weekday=service_date.weekday(),
                 round_number=run_number,
                 defaults={
-                    "cutoff_time": cutoff_time,
+                    "cutoff_time": schedule_cutoff_time,
                     "departure_time": departure_time,
                     "dispatch_wave": departure_time.strftime("%H:%M"),
                     "operational_label": "",
@@ -593,7 +602,7 @@ class Command(BaseCommand):
                 ("GDY", "ROUTE-01", 1),
                 [("FILTR-001", 1, "2"), ("OLEJ-001", 2, "5")],
             ),
-            ("AX-ORDER-0002", "GDY", "Demo Client Two", "BRAKE-PL", ("GDY", "ROUTE-01", 1), [("KLOCKI-001", 1, "1")]),
+            ("AX-ORDER-0002", "GDY", "Demo Client Two", "BRAKE-PL", ("GDY", "ROUTE-01", 1), [("KLOCKI-001", 1, "2")]),
             ("AX-ORDER-0003", "GDA", "Demo Client Three", "GDA-AUTO", ("GDA", "ROUTE-01", 1), [("FILTR-001", 1, "3")]),
             ("AX-ORDER-0004", "GDY", "Demo Client Four", "OIL-SHOP", ("GDY", "ROUTE-02", 1), [("OLEJ-001", 1, "2")]),
             ("AX-ORDER-0005", "GDA", "Demo Client Five", "GDA-FLEET", ("GDA", "ROUTE-02", 1), [("OLEJ-001", 1, "2")]),
@@ -1081,10 +1090,13 @@ class Command(BaseCommand):
                         shortage_quantity=Decimal("0"),
                     )
                 elif spec.get("partial_picked"):
+                    picked_quantity = line.quantity_ordered / Decimal("2")
+                    line.quantity_picked = picked_quantity
+                    line.save(update_fields=["quantity_picked", "updated_at"])
                     tasks.update(
                         status=PickingTask.Status.IN_PROGRESS,
                         quantity_to_pick=line.quantity_ordered,
-                        quantity_picked=line.quantity_ordered / Decimal("2"),
+                        quantity_picked=picked_quantity,
                         quantity_prepared=Decimal("0"),
                         shortage_quantity=Decimal("0"),
                     )
@@ -1129,6 +1141,22 @@ class Command(BaseCommand):
             status=PickingTaskClaim.Status.CLAIMED,
         )
 
+        CartPickedItem.objects.create(
+            session=scanner_session,
+            cart_work_session=work_session,
+            cart=cart,
+            route_run=shipment.route_run,
+            picking_task=task,
+            product=task.order_line.product,
+            quantity_picked=Decimal("1"),
+            quantity_prepared=Decimal("0"),
+        )
+        inventory_item = InventoryItem.objects.get(
+            branch=branches["GDY"], location=task.source_location, product=task.order_line.product
+        )
+        inventory_item.quantity_on_hand -= Decimal("1")
+        inventory_item.save(update_fields=["quantity_on_hand", "updated_at"])
+
     def create_stock_movements(self, branches, locations, products, inventory_items):
         movement_data = [
             {
@@ -1150,6 +1178,16 @@ class Command(BaseCommand):
                 "destination": ("GDY", "RET-01"),
                 "movement_type": StockMovement.MovementType.RETURN,
                 "quantity": "2",
+            },
+            {
+                "reference": "PICK-GDY-SCANNER-ACTIVE",
+                "branch": "GDY",
+                "product": "KLOCKI-001",
+                "inventory": ("GDY", "A-02-01", "KLOCKI-001"),
+                "source": ("GDY", "A-02-01"),
+                "destination": None,
+                "movement_type": StockMovement.MovementType.PICK,
+                "quantity": "1",
             },
             {
                 "reference": "ADJ-GDA-0001",

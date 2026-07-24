@@ -837,6 +837,69 @@ class ShipmentCommandCenterTests(APITestCase):
         self.assertEqual(untrusted.status_code, status.HTTP_403_FORBIDDEN)
 
 
+    def test_open_only_defaults_to_current_work_and_false_includes_history(self):
+        self.login()
+        self.shipment.status = Shipment.Status.PREPARED
+        self.shipment.save(update_fields=["status", "updated_at"])
+        cancelled_order = Order.objects.create(branch=self.branch, route_run=self.route_run_2, external_reference="AX-HISTORY-CANCELLED", status=Order.Status.IMPORTED)
+        cancelled = Shipment.objects.create(reference="SHP-HISTORY-CANCELLED", branch=self.branch, order=cancelled_order, route_run=self.route_run_2, status=Shipment.Status.CANCELLED, external_reference="AX-SHP-HISTORY-CANCELLED")
+        closed_run = RouteRun.objects.create(route=self.route, service_date=timezone.localdate() - timezone.timedelta(days=1), run_number=9, order_cutoff_time=time(8), sync_time=time(8, 30), departure_time=time(10), status=RouteRun.Status.CLOSED, closed_at=timezone.now())
+        completed_order = Order.objects.create(branch=self.branch, route_run=closed_run, external_reference="AX-HISTORY-COMPLETED", status=Order.Status.IMPORTED)
+        completed = Shipment.objects.create(reference="SHP-HISTORY-COMPLETED", branch=self.branch, order=completed_order, route_run=closed_run, status=Shipment.Status.COMPLETED, document_status=Shipment.DocumentStatus.PRINTED, document_print_count=1, external_reference="AX-SHP-HISTORY-COMPLETED")
+        for params in ({"branch": "SHP"}, {"branch": "SHP", "open_only": "true"}, {"branch": "SHP", "open_only": "1"}):
+            response = self.client.get("/api/shipments/", params)
+            references = [row["reference"] for row in response.data["results"]]
+            self.assertIn(self.shipment.reference, references)
+            self.assertNotIn(cancelled.reference, references)
+            self.assertNotIn(completed.reference, references)
+        combined = self.client.get("/api/shipments/", {"branch": "SHP", "open_only": "false"})
+        references = [row["reference"] for row in combined.data["results"]]
+        self.assertEqual(references[0], self.shipment.reference)
+        self.assertIn(cancelled.reference, references)
+        self.assertIn(completed.reference, references)
+        historical = next(row for row in combined.data["results"] if row["id"] == completed.id)
+        self.assertTrue(historical["is_historical"])
+        self.assertTrue(historical["is_read_only"])
+
+    def test_historical_detail_commands_and_reprint(self):
+        self.login()
+        self.route_run.status = RouteRun.Status.CLOSED
+        self.route_run.closed_at = timezone.now()
+        self.route_run.save(update_fields=["status", "closed_at", "updated_at"])
+        self.shipment.status = Shipment.Status.COMPLETED
+        self.shipment.document_status = Shipment.DocumentStatus.PRINTED
+        self.shipment.document_print_count = 1
+        self.shipment.documents_printed_at = timezone.now() - timezone.timedelta(hours=1)
+        self.shipment.save(update_fields=["status", "document_status", "document_print_count", "documents_printed_at", "updated_at"])
+        original_closed_at = self.route_run.closed_at
+        detail = self.client.get(f"/api/shipments/{self.shipment.id}/", {"branch": "SHP"})
+        self.assertEqual(detail.status_code, status.HTTP_200_OK)
+        self.assertTrue(detail.data["is_read_only"])
+        blocked = self.client.post(f"/api/shipments/{self.shipment.id}/change-status/", {"status": "active", "reason": "Reopen"}, format="json")
+        self.assertEqual(blocked.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(blocked.data["code"], "historical_shipment_read_only")
+        reprint = self.client.post(f"/api/shipments/{self.shipment.id}/print-documents/", {"printer": "WMS-REPRINT"}, format="json")
+        self.assertEqual(reprint.status_code, status.HTTP_200_OK)
+        self.shipment.refresh_from_db()
+        self.route_run.refresh_from_db()
+        self.assertEqual(self.shipment.status, Shipment.Status.COMPLETED)
+        self.assertEqual(self.shipment.document_print_count, 2)
+        self.assertEqual(self.route_run.closed_at, original_closed_at)
+
+    def test_route_close_moves_shipment_to_combined_history(self):
+        self.login()
+        PickingTask.objects.create(branch=self.branch, order_line=self.order_line, source_location=self.location, status=PickingTask.Status.COMPLETED, quantity_to_pick=Decimal("3"), quantity_picked=Decimal("3"), quantity_prepared=Decimal("3"))
+        self.shipment.status = Shipment.Status.PREPARED
+        self.shipment.document_status = Shipment.DocumentStatus.AVAILABLE
+        self.shipment.save(update_fields=["status", "document_status", "updated_at"])
+        response = self.client.post(f"/api/shipments/{self.shipment.id}/close-route/", {}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        active = self.client.get("/api/shipments/", {"branch": "SHP", "open_only": "true"})
+        combined = self.client.get("/api/shipments/", {"branch": "SHP", "open_only": "false"})
+        self.assertNotIn(self.shipment.reference, [row["reference"] for row in active.data["results"]])
+        self.assertIn(self.shipment.reference, [row["reference"] for row in combined.data["results"]])
+        self.assertTrue(self.client.get(f"/api/shipments/{self.shipment.id}/", {"branch": "SHP"}).data["is_historical"])
+
 class BranchMembershipAuthorizationTests(APITestCase):
     def setUp(self):
         self.source_branch = Branch.objects.create(code="GDA", name="Gdansk", city="Gdansk", country="Poland")
@@ -2903,7 +2966,7 @@ class ScannerPickingScanActionTests(APITestCase):
         response = self.prepare(quantity="1.000")
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("whole number", response.data["detail"])
+        self.assertIn("whole units", response.data["detail"])
 
     def print_label(self, order_reference="SCAN-ORDER-001", printer_code="ZEBRA-01"):
         return self.client.post(
@@ -8112,7 +8175,7 @@ class ScannerPickingJobWorkflowTests(APITestCase):
 
     def test_joining_other_branch_cart_work_is_rejected(self):
         UserBranchMembership.objects.create(user=self.gdy_worker, branch=self.branch, role=UserBranchMembership.Role.WORKER)
-        other_branch = Branch.objects.create(code="GDA", name="Gdansk Branch", city="Gdansk", country="Poland")
+        other_branch = Branch.objects.create(code="GDA", name="Gdansk", city="Gdansk", country="Poland")
         UserBranchMembership.objects.create(user=self.gda_worker, branch=other_branch, role=UserBranchMembership.Role.WORKER)
         self.client.force_authenticate(self.gdy_worker)
         self.create_jobs(route_run_ids=[self.run_1.id, self.run_2.id])
@@ -8415,14 +8478,14 @@ class ScannerPickingJobWorkflowTests(APITestCase):
                 "cart_work_session_id": cart_work_session_id,
                 "location_code": "J-01-01",
                 "product_code": "JOB-A",
-                "quantity": "2.000",
+                "quantity": "0.500",
                 "worker_code": "DEMO",
             },
             format="json",
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("whole number", response.data["detail"])
+        self.assertIn("whole units", response.data["detail"])
         participant = CartWorkParticipant.objects.get(cart_work_session_id=cart_work_session_id, user=self.demo_user)
         self.assertEqual(participant.confirmed_location_id, self.location.id)
 
@@ -8445,7 +8508,7 @@ class ScannerPickingJobWorkflowTests(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("at least 1", response.data["detail"])
+        self.assertIn("greater than zero", response.data["detail"])
 
     def test_picking_rejects_quantity_above_remaining_work(self):
         self.create_jobs(route_run_ids=[self.run_1.id])
@@ -9597,6 +9660,15 @@ class SeedDemoDataCommandTests(APITestCase):
         self.assertEqual(CartWorkSession.objects.filter(status=CartWorkSession.Status.ACTIVE).count(), 1)
         self.assertEqual(PickingJob.objects.filter(status=PickingJob.Status.IN_PROGRESS).count(), 1)
         self.assertTrue(ScannerCart.objects.filter(code="WOZEK-01", status=ScannerCart.Status.AVAILABLE).exists())
+        demo_task = PickingTask.objects.get(order_line__order__external_reference="AX-ORDER-0002")
+        demo_line = ShipmentLine.objects.get(shipment__reference="SHP-GDY-0002")
+        demo_cart_item = CartPickedItem.objects.get(picking_task=demo_task)
+        demo_movement = StockMovement.objects.get(reference="PICK-GDY-SCANNER-ACTIVE")
+        self.assertEqual(demo_line.ordered_quantity - demo_line.cancelled_quantity, Decimal("2.000"))
+        self.assertEqual(demo_task.quantity_picked, Decimal("1.000"))
+        self.assertEqual(demo_task.remaining_to_pick, Decimal("1.000"))
+        self.assertEqual(demo_cart_item.quantity_picked, Decimal("1.000"))
+        self.assertEqual(demo_movement.quantity, Decimal("1.000"))
 
     def test_seed_isolates_operational_scenarios_with_stable_attention_windows(self):
         first_output = self.run_seed()
@@ -9684,7 +9756,7 @@ class SeedDemoDataCommandTests(APITestCase):
         self.run_seed()
 
         self.assertEqual(CartWorkSession.objects.filter(status=CartWorkSession.Status.ACTIVE).count(), 1)
-        self.assertFalse(CartPickedItem.objects.exists())
+        self.assertEqual(CartPickedItem.objects.count(), 1)
         self.assertEqual(PickingJob.objects.filter(status=PickingJob.Status.IN_PROGRESS).count(), 1)
         self.assertFalse(ScannerCustomerLabel.objects.exists())
         self.assertTrue(ScannerCart.objects.filter(code="WOZEK-01", status=ScannerCart.Status.AVAILABLE).exists())
@@ -9729,7 +9801,7 @@ class SeedDemoDataCommandTests(APITestCase):
 
         self.run_seed()
 
-        self.assertFalse(CartPickedItem.objects.exists())
+        self.assertEqual(CartPickedItem.objects.count(), 1)
         self.assertFalse(ScannerCustomerLabel.objects.exists())
         self.assertEqual(CartWorkSession.objects.filter(status=CartWorkSession.Status.ACTIVE).count(), 1)
         self.assertEqual(PickingJob.objects.filter(status=PickingJob.Status.IN_PROGRESS).count(), 1)

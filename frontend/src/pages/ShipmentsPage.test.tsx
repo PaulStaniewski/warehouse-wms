@@ -57,6 +57,10 @@ function shipment(overrides: Partial<Shipment> = {}): Shipment {
     route_time: "10:00:00",
     cutoff_time: "08:00:00",
     route_status: "open",
+    route_closed_at: null,
+    completed_at: null,
+    is_historical: false,
+    is_read_only: false,
     inter_branch_transfer: null,
     transfer_reference: null,
     destination_branch_code: null,
@@ -213,6 +217,12 @@ describe("ShipmentsPage", () => {
     expect(screen.getByRole("button", { name: /Activation/i })).toBeDisabled();
     expect(screen.getByRole("heading", { name: "Shipment Lines" })).toBeInTheDocument();
     expect(screen.getByText("FILTR-001")).toBeInTheDocument();
+    expect(screen.getByLabelText("Shipment commands")).toHaveClass("shipment-command-panel");
+    const openOnly = screen.getByLabelText("Open only");
+    expect(openOnly).toHaveAttribute("type", "checkbox");
+    expect(openOnly.closest("label")).toHaveClass("shipment-checkbox-label");
+    expect(screen.getByLabelText("Search").closest("section")).toHaveClass("shipment-filter-panel");
+    expect(document.querySelector(".shipment-table-scroll")).toBeInTheDocument();
     expect(screen.getByLabelText("Shipment commands")).toHaveClass("shipment-command-panel");
   });
 
@@ -467,5 +477,63 @@ describe("ShipmentsPage", () => {
 
     await user.type(await screen.findByLabelText("Customer"), "Demo");
     expect(await screen.findByDisplayValue("Demo")).toBeInTheDocument();
+  });
+  it("defaults Open only on, requests active work, and preserves filters when toggled", async () => {
+    const user = userEvent.setup();
+    mockShipmentsApi();
+    renderWithProviders(<App />, { route: "/wms/shipments?customer=Demo" });
+
+    const checkbox = await screen.findByLabelText("Open only");
+    expect(checkbox).toBeChecked();
+    await waitFor(() => expect(mockApiClient.get).toHaveBeenCalledWith(expect.stringContaining("open_only=true")));
+    expect(screen.getByDisplayValue("Demo")).toBeInTheDocument();
+    await user.click(checkbox);
+    expect(checkbox).not.toBeChecked();
+    await waitFor(() => expect(mockApiClient.get).toHaveBeenCalledWith(expect.stringContaining("open_only=false")));
+    expect(screen.getByDisplayValue("Demo")).toBeInTheDocument();
+  });
+
+  it("renders active and historical rows together with historical commands read-only", async () => {
+    const historical = shipment({
+      id: 2,
+      reference: "SHP-GDY-HISTORY",
+      status: "completed",
+      route_status: "closed",
+      completed_at: "2026-07-21T10:00:00Z",
+      route_closed_at: "2026-07-21T10:00:00Z",
+      document_print_count: 2,
+      is_historical: true,
+      is_read_only: true,
+      command_eligibility: {
+        ...shipment().command_eligibility,
+        print_documents: { enabled: true, reason: "" },
+        post_picking_lists: { enabled: false, reason: "Historical Shipments are read-only." },
+      },
+    });
+    mockShipmentsApi([shipment(), historical]);
+    renderWithProviders(<App />, { route: "/wms/shipments?open_only=false&shipment=2" });
+
+    expect((await screen.findAllByText("SHP-GDY-HISTORY")).length).toBeGreaterThan(0);
+    expect(screen.getByText("Historical / read-only")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Reprint Shipment Document/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Post Picking Lists/i })).not.toBeInTheDocument();
+    const row = screen.getAllByText("SHP-GDY-HISTORY")[0].closest("tr");
+    expect(row).toHaveClass("shipment-historical-row");
+  });
+
+  it("loads direct historical detail as read-only", async () => {
+    const historical = shipment({
+      status: "completed",
+      route_status: "closed",
+      completed_at: "2026-07-21T10:00:00Z",
+      route_closed_at: "2026-07-21T10:00:00Z",
+      is_historical: true,
+      is_read_only: true,
+    });
+    mockShipmentsApi([historical]);
+    renderWithProviders(<App />, { route: "/wms/shipments/1?open_only=true" });
+
+    expect(await screen.findByText("Historical / read-only")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Close Route and Print Package/i })).not.toBeInTheDocument();
   });
 });

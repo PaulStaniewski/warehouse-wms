@@ -9,6 +9,8 @@ state; application services are responsible for transitions and audit events.
 from dataclasses import dataclass
 from decimal import Decimal
 
+from django.db.models import Q
+
 from operations.models import PickingTask, RouteRun, Shipment, ShipmentLine
 
 
@@ -31,6 +33,37 @@ TERMINAL_ACTIVE_BOARD_STATUSES = (
     RouteRun.Status.CANCELLED,
     RouteRun.Status.DISPATCHED,
 )
+
+TERMINAL_SHIPMENT_STATUSES = (
+    Shipment.Status.DISPATCHED,
+    Shipment.Status.COMPLETED,
+    Shipment.Status.CANCELLED,
+)
+
+
+def open_shipment_query() -> Q:
+    """Canonical current-work definition used by Shipment list and audits."""
+    return (
+        ~Q(status__in=TERMINAL_SHIPMENT_STATUSES)
+        & (
+            Q(route_run__isnull=True)
+            | ~Q(route_run__status__in=TERMINAL_ACTIVE_BOARD_STATUSES)
+        )
+    )
+
+
+def open_shipment_queryset(queryset):
+    return queryset.filter(open_shipment_query())
+
+
+def shipment_is_open(shipment: Shipment) -> bool:
+    return (
+        shipment.status not in TERMINAL_SHIPMENT_STATUSES
+        and (
+            shipment.route_run_id is None
+            or shipment.route_run.status not in TERMINAL_ACTIVE_BOARD_STATUSES
+        )
+    )
 
 
 def active_route_run_queryset(queryset):

@@ -4,8 +4,15 @@ from collections import Counter
 from django.core.management.base import BaseCommand, CommandError
 from django.db.models import Count, F, Q
 
-from operations.models import CartPickedItem, PickingTask, RouteRun, Shipment, ShipmentLine
-from operations.operational_projections import route_run_workload_projection, shipment_line_progress
+from operations.models import CartPickedItem, CartWorkSession, PickingTask, RouteRun, ScannerCart, ScannerSession, Shipment, ShipmentLine, StockMovement
+from operations.operational_projections import (
+    TERMINAL_ACTIVE_BOARD_STATUSES,
+    TERMINAL_SHIPMENT_STATUSES,
+    route_run_workload_projection,
+    shipment_is_open,
+    shipment_line_progress,
+)
+from warehouse.quantity_policy import product_uses_discrete_quantities, quantity_has_fraction
 
 
 class Command(BaseCommand):
@@ -43,6 +50,19 @@ class Command(BaseCommand):
                 add("shipment_order_branch_mismatch", "Shipment and order branches differ.", shipment=shipment.reference)
             if shipment.route_run_id and shipment.route_run.route.branch_id != shipment.branch_id:
                 add("shipment_route_branch_mismatch", "Shipment and route branches differ.", shipment=shipment.reference)
+            if (
+                shipment.route_run_id
+                and shipment.route_run.status in TERMINAL_ACTIVE_BOARD_STATUSES
+                and shipment.status not in TERMINAL_SHIPMENT_STATUSES
+            ):
+                add(
+                    "active_shipment_terminal_route",
+                    "A terminal RouteRun retains a Shipment in an active status.",
+                    shipment=shipment.reference,
+                    route_run=shipment.route_run_id,
+                )
+            if shipment.status in TERMINAL_SHIPMENT_STATUSES and shipment_is_open(shipment):
+                add("terminal_shipment_marked_open", "A terminal Shipment is classified as current work.", shipment=shipment.reference)
 
         for line in lines:
             progress = shipment_line_progress(line)
@@ -53,6 +73,8 @@ class Command(BaseCommand):
                 add("negative_line_quantity", "Effective or removed quantity is negative.", line=reference)
             if progress.effective_quantity + progress.removed_quantity != progress.original_quantity:
                 add("line_quantity_equation", "Effective plus removed does not equal original quantity.", line=reference)
+            if product_uses_discrete_quantities(line.product) and quantity_has_fraction(progress.effective_quantity):
+                add("fractional_discrete_effective", "Integer-only product has fractional effective quantity.", line=reference)
             if progress.picked_quantity > progress.effective_quantity:
                 add("picked_exceeds_effective", "Picked quantity exceeds effective quantity.", line=reference)
             if progress.controlled_quantity > progress.picked_quantity:
@@ -85,10 +107,18 @@ class Command(BaseCommand):
                     add("scanner_task_terminal_route", "Scanner-visible task belongs to a terminal RouteRun.", task=task.id)
                 if task.branch_id != line.shipment.branch_id or task.source_location.branch_id != task.branch_id:
                     add("task_branch_mismatch", "Picking task crosses branch boundaries.", task=task.id)
+                if product_uses_discrete_quantities(line.product) and quantity_has_fraction(task.quantity_to_pick):
+                    add("fractional_discrete_task_target", "Integer-only product has fractional picking target.", task=task.id)
+                if product_uses_discrete_quantities(line.product) and quantity_has_fraction(task.quantity_picked):
+                    add("fractional_discrete_task_picked", "Integer-only product has fractional picked quantity.", task=task.id)
                 if task.quantity_picked > task.quantity_to_pick:
                     add("task_picked_exceeds_target", "Task picked quantity exceeds target.", task=task.id)
                 if task.quantity_prepared > task.quantity_picked:
                     add("task_prepared_exceeds_picked", "Task prepared quantity exceeds picked quantity.", task=task.id)
+                if task.remaining_to_pick == 0 and task.status in {PickingTask.Status.OPEN, PickingTask.Status.ASSIGNED, PickingTask.Status.IN_PROGRESS}:
+                    add("active_task_without_remaining", "Active PickingTask has no remaining pickable quantity.", task=task.id)
+                if task.remaining_to_pick > 0 and task.status in {PickingTask.Status.PICKED, PickingTask.Status.COMPLETED}:
+                    add("terminal_task_with_remaining", "Terminal PickingTask retains remaining pickable quantity.", task=task.id)
 
         terminal_runs = RouteRun.objects.filter(status__in=[RouteRun.Status.CLOSED, RouteRun.Status.CANCELLED])
         if branch_code:
@@ -118,6 +148,26 @@ class Command(BaseCommand):
             orphan_items = orphan_items.filter(route_run__route__branch__code=branch_code)
         for item_id in orphan_items.values_list("id", flat=True):
             add("orphaned_cart_picked_item", "Cart picked item is detached from its task route.", cart_picked_item=item_id)
+
+        cart_items = CartPickedItem.objects.select_related("product", "picking_task__order_line__shipment_line__shipment")
+        pick_movements = StockMovement.objects.filter(movement_type=StockMovement.MovementType.PICK).select_related("product")
+        if branch_code:
+            cart_items = cart_items.filter(picking_task__branch__code=branch_code)
+            pick_movements = pick_movements.filter(branch__code=branch_code)
+        for item in cart_items:
+            if product_uses_discrete_quantities(item.product) and quantity_has_fraction(item.quantity_picked):
+                add("fractional_discrete_cart_pick", "Integer-only product has fractional cart picked quantity.", cart_picked_item=item.id)
+        for movement in pick_movements:
+            if product_uses_discrete_quantities(movement.product) and quantity_has_fraction(movement.quantity):
+                add("fractional_discrete_pick_movement", "Integer-only product has fractional picking movement.", stock_movement=movement.id)
+
+        stale_carts = ScannerCart.objects.filter(status=ScannerCart.Status.IN_USE).exclude(sessions__status=ScannerSession.Status.ACTIVE, work_sessions__status__in=[CartWorkSession.Status.ACTIVE, CartWorkSession.Status.CONTROL])
+        for cart in stale_carts.distinct():
+            add("stale_active_cart", "In-use cart has no valid active scanner/work session.", cart=cart.code)
+
+        conflicting_workers = ScannerSession.objects.filter(status=ScannerSession.Status.ACTIVE).exclude(worker_code="").values("worker_code").annotate(total=Count("id")).filter(total__gt=1)
+        for row in conflicting_workers:
+            add("worker_multiple_active_sessions", "Worker has multiple active scanner sessions.", **row)
 
         duplicate_rounds = RouteRun.objects.values("route_id", "service_date", "run_number").annotate(total=Count("id")).filter(total__gt=1)
         if branch_code:

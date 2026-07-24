@@ -458,9 +458,12 @@ export function useOrders(branch?: string) {
 
 export type ShipmentListFilters = {
   branch?: string;
+  completedFrom?: string;
+  completedTo?: string;
   customer?: string;
   deliveryDate?: string;
   externalReference?: string;
+  openOnly?: boolean;
   ordering?: string;
   page?: number;
   paymentMethod?: string;
@@ -473,12 +476,15 @@ export type ShipmentListFilters = {
 function shipmentFilterParams(filters: ShipmentListFilters = {}) {
   const params = new URLSearchParams();
   if (filters.branch) params.set("branch", filters.branch);
+  params.set("open_only", filters.openOnly === false ? "false" : "true");
   if (filters.search) params.set("search", filters.search);
   if (filters.shipmentStatus) params.set("shipment_status", filters.shipmentStatus);
   if (filters.pickingStatus) params.set("picking_status", filters.pickingStatus);
   if (filters.route) params.set("route", filters.route);
   if (filters.deliveryDate) params.set("delivery_date", filters.deliveryDate);
   if (filters.customer) params.set("customer", filters.customer);
+  if (filters.completedFrom) params.set("completed_from", filters.completedFrom);
+  if (filters.completedTo) params.set("completed_to", filters.completedTo);
   if (filters.paymentMethod) params.set("payment_method", filters.paymentMethod);
   if (filters.externalReference) params.set("external_reference", filters.externalReference);
   if (filters.ordering) params.set("ordering", filters.ordering);
@@ -1445,7 +1451,7 @@ export function useScannerCartWork(
     enabled: Boolean(sessionId || cartWorkSessionId),
     refetchInterval: (query) => {
       const error = query.state.error;
-      if (axios.isAxiosError(error) && error.response?.status === 404) {
+      if (axios.isAxiosError(error) && [400, 404, 409, 410].includes(error.response?.status ?? 0)) {
         return false;
       }
       const status = query.state.data?.cart_work_session?.status;
@@ -1461,14 +1467,14 @@ export function useScannerCartWork(
         const response = await apiClient.get<ScannerCartWorkResponse>(`/scanner/cart-work/current/?${query}`);
         return response.data;
       } catch (error) {
-        if (axios.isAxiosError(error) && error.response?.status === 404) {
+        if (axios.isAxiosError(error) && [400, 404, 409, 410].includes(error.response?.status ?? 0)) {
           options.onStaleSession?.();
         }
         throw error;
       }
     },
     retry: (failureCount, error) => {
-      if (axios.isAxiosError(error) && error.response?.status === 404) {
+      if (axios.isAxiosError(error) && [400, 404, 409, 410].includes(error.response?.status ?? 0)) {
         return false;
       }
       return failureCount < 2;

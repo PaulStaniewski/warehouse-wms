@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from decimal import Decimal
 import uuid
 
 from django.conf import settings
@@ -872,6 +873,11 @@ class PickingTask(TimestampedModel):
 
     def __str__(self) -> str:
         return f"Pick {self.order_line.product.sku} for {self.order_line.order.external_reference}"
+
+    @property
+    def remaining_to_pick(self):
+        """Canonical outstanding picking work; preparation is deliberately unrelated."""
+        return max(self.quantity_to_pick - self.quantity_picked - self.shortage_quantity, Decimal("0"))
 
 
 class PickingShortage(TimestampedModel):

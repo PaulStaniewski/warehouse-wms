@@ -13,6 +13,7 @@ import {
   Truck,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { formatQuantity } from "../utils/quantity";
 import type { FormEvent, ReactNode } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import type { LucideIcon } from "lucide-react";
@@ -134,7 +135,7 @@ function CommandTile({ description, disabledReason, icon: Icon, isEnabled, isPen
   return (
     <button
       aria-disabled={disabled}
-      className="shipment-command-tile"
+      className={`shipment-command-tile shipment-command-tile--${title === "Close Route and Print Package" ? "close-route" : "standard"}`}
       disabled={disabled}
       onClick={onClick}
       title={!isEnabled ? disabledReason : undefined}
@@ -209,11 +210,16 @@ function ShipmentDetail({
     <section className="shipment-detail-grid">
       <div className="panel shipment-summary-panel">
         <h2>Shipment Summary</h2>
+        {shipment.is_historical && <div className="shipment-read-only-badge">Historical / read-only</div>}
         <dl>
           <Definition label="Reference" value={shipment.reference} />
           <Definition label="External ref" value={shipment.external_reference} />
           <Definition label="Branch" value={shipment.branch_code} />
           <Definition label="Route" value={shipment.route_identifier || "-"} />
+          <Definition label="Route status" value={label(shipment.route_status)} />
+          <Definition label="Completed" value={dateTime(shipment.completed_at)} />
+          <Definition label="Route closed" value={dateTime(shipment.route_closed_at)} />
+          <Definition label="Printed documents" value={shipment.document_print_count} />
           <Definition label="Cutoff" value={shipment.cutoff_time} />
           <Definition label="Delivery" value={dateOnly(shipment.delivery_date)} />
           <Definition label="Customer" value={shipment.customer_name} />
@@ -283,13 +289,13 @@ function ShipmentDetail({
                   <td>{line.line_number}</td>
                   <td className="mono">{line.product_sku}</td>
                   <td>{line.product_name}</td>
-                  <td>{line.original_ordered_quantity}</td>
-                  <td>{line.effective_quantity}</td>
+                  <td>{formatQuantity(line.original_ordered_quantity)}</td>
+                  <td>{formatQuantity(line.effective_quantity)}</td>
                   <td>{line.removed_quantity}</td>
-                  <td>{line.picked_quantity}</td>
-                  <td>{line.controlled_quantity}</td>
-                  <td>{line.prepared_quantity}</td>
-                  <td>{line.remaining_to_pick}</td>
+                  <td>{formatQuantity(line.picked_quantity)}</td>
+                  <td>{formatQuantity(line.controlled_quantity)}</td>
+                  <td>{formatQuantity(line.prepared_quantity)}</td>
+                  <td>{formatQuantity(line.remaining_to_pick)}</td>
                   <td>{line.maximum_removable_quantity}</td>
                   <td title={line.blocking_reason}><StatusBadge label={label(line.operational_line_state)} tone={statusTone(line.operational_line_state)} /></td>
                   <td>{line.source_location_code || <span className="muted">-</span>}</td>
@@ -333,12 +339,16 @@ export function ShipmentsPage() {
 
   const selectedShipmentId = routeShipmentId ?? searchParams.get("shipment");
   const page = Number(searchParams.get("page") || "1");
+  const openOnly = searchParams.get("open_only") !== "false";
   const filters = {
     branch: activeBranchCode,
+    completedFrom: searchParams.get("completed_from") || "",
+    completedTo: searchParams.get("completed_to") || "",
     customer: searchParams.get("customer") || "",
     deliveryDate: searchParams.get("delivery_date") || "",
     externalReference: searchParams.get("external_reference") || "",
     ordering: searchParams.get("ordering") || "",
+    openOnly,
     page,
     paymentMethod: searchParams.get("payment_method") || "",
     pickingStatus: searchParams.get("picking_status") || "",
@@ -466,7 +476,7 @@ export function ShipmentsPage() {
       { key: "close_route", icon: Truck, title: "Close Route and Print Package", description: "Print every Shipment document and close the RouteRun.", dialog: "close_route" },
       { key: "change_route", icon: Shuffle, title: "Change Route", description: "Move route.", dialog: "change_route" },
       { key: "change_status", icon: SlidersHorizontal, title: "Change Status", description: "Controlled transition.", dialog: "change_status" },
-      { key: "print_documents", icon: Printer, title: "Print Shipment Document", description: "Print or reprint this Shipment document only.", run: () => selectedShipment && printDocuments.mutateAsync(selectedShipment.id) },
+      { key: "print_documents", icon: Printer, title: selectedShipment?.is_historical ? "Reprint Shipment Document" : "Print Shipment Document", description: "Print or reprint this Shipment document only.", run: () => selectedShipment && printDocuments.mutateAsync(selectedShipment.id) },
     ],
     [activate, closeRoute, confirmPickingRoute, postDocuments, postPickingLists, prepare, printDocuments, printProforma, selectedShipment],
   );
@@ -484,7 +494,7 @@ export function ShipmentsPage() {
       />
 
       <section className="shipment-command-panel" aria-label="Shipment commands">
-        {commandTiles.map((tile) => {
+        {commandTiles.filter((tile) => !selectedShipment?.is_read_only || tile.key === "print_documents").map((tile) => {
           const state = eligibility[tile.key];
           const enabled = Boolean(selectedShipment && state?.enabled);
           return (
@@ -505,7 +515,7 @@ export function ShipmentsPage() {
         })}
       </section>
 
-      {selectedLine && (
+      {selectedLine && !selectedShipment?.is_read_only && (
         <section className="shipment-line-actions">
           <span>
             Selected line {selectedLine.line_number}: <strong>{selectedLine.product_sku}</strong>
@@ -528,12 +538,16 @@ export function ShipmentsPage() {
       {message && (
         <div className="shipment-message">
           <span>{message}</span>
-          <button aria-label="Dismiss message" onClick={() => setMessage("")} type="button">×</button>
+          <button aria-label="Dismiss message" onClick={() => setMessage("")} type="button">x</button>
         </div>
       )}
 
       <section className="filter-panel shipment-filter-panel">
-        <label>
+        <label className="shipment-checkbox-label">
+          <input checked={openOnly} onChange={(event) => setFilter("open_only", event.target.checked ? "true" : "false")} type="checkbox" />
+          <span>Open only</span>
+        </label>
+        <label className="shipment-filter-search">
           <span>Search</span>
           <input onChange={(event) => setFilter("search", event.target.value)} placeholder="Shipment, customer, route" value={filters.search} />
         </label>
@@ -557,15 +571,27 @@ export function ShipmentsPage() {
           <span>Delivery date</span>
           <input onChange={(event) => setFilter("delivery_date", event.target.value)} type="date" value={filters.deliveryDate} />
         </label>
-        <label>
+        <label className="shipment-filter-customer">
           <span>Customer</span>
           <input onChange={(event) => setFilter("customer", event.target.value)} placeholder="Customer or account" value={filters.customer} />
         </label>
-        <label>
+        {!openOnly && (
+          <>
+            <label>
+              <span>Completed from</span>
+              <input onChange={(event) => setFilter("completed_from", event.target.value)} type="date" value={filters.completedFrom} />
+            </label>
+            <label>
+              <span>Completed to</span>
+              <input onChange={(event) => setFilter("completed_to", event.target.value)} type="date" value={filters.completedTo} />
+            </label>
+          </>
+        )}
+        <label className="shipment-filter-payment">
           <span>Payment</span>
           <input onChange={(event) => setFilter("payment_method", event.target.value)} placeholder="Account" value={filters.paymentMethod} />
         </label>
-        <label>
+        <label className="shipment-filter-external-reference">
           <span>External ref</span>
           <input onChange={(event) => setFilter("external_reference", event.target.value)} placeholder="AX reference" value={filters.externalReference} />
         </label>
@@ -577,7 +603,7 @@ export function ShipmentsPage() {
         error={shipments.error || selectedQuery.error}
       >
         <section className="panel shipment-table-panel">
-          <div className="table-scroll">
+          <div className="table-scroll shipment-table-scroll">
             <table>
               <thead>
                 <tr>
@@ -589,7 +615,9 @@ export function ShipmentsPage() {
                   <th>Route ID</th>
                   <th>Route Time</th>
                   <th>Cutoff</th>
-                  <th>Printed</th>
+                  <th>Completed</th>
+                  <th>Route closed</th>
+                  <th>Documents</th>
                   <th>Payment</th>
                   <th>Customer Alias</th>
                   <th>Recipient</th>
@@ -601,7 +629,7 @@ export function ShipmentsPage() {
               <tbody>
                 {(shipments.data?.results ?? []).map((shipment) => (
                   <tr
-                    className={selectedShipment?.id === shipment.id ? "selected-row" : ""}
+                    className={[selectedShipment?.id === shipment.id ? "selected-row" : "", shipment.is_historical ? "shipment-historical-row" : ""].filter(Boolean).join(" ")}
                     key={shipment.id}
                     onClick={() => selectShipment(shipment)}
                     onKeyDown={(event) => {
@@ -617,11 +645,13 @@ export function ShipmentsPage() {
                     <td>{shipment.route_identifier || "-"}</td>
                     <td>{shipment.route_time || "-"}</td>
                     <td>{shipment.cutoff_time || "-"}</td>
-                    <td>{shipment.document_status === "printed" || shipment.document_status === "posted" ? "Yes" : "-"}</td>
+                    <td>{dateTime(shipment.completed_at || shipment.cancelled_at)}</td>
+                    <td>{dateTime(shipment.route_closed_at)}</td>
+                    <td>{shipment.document_print_count || "-"}</td>
                     <td>{shipment.payment_method || "-"}</td>
                     <td>{shipment.customer_alias || "-"}</td>
                     <td>{shipment.recipient_account || "-"}</td>
-                    <td className="shipment-notes-cell">{shipment.external_notes || "-"}</td>
+                    <td className="shipment-notes-cell" title={shipment.external_notes || undefined}>{shipment.external_notes || "-"}</td>
                     <td>{shipment.delivery_name || "-"}</td>
                     <td>{dateOnly(shipment.delivery_date)}</td>
                   </tr>

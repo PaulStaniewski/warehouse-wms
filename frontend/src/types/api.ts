@@ -296,6 +296,10 @@ export type Shipment = {
   route_time: string | null;
   cutoff_time: string | null;
   route_status: string;
+  route_closed_at: string | null;
+  completed_at: string | null;
+  is_historical: boolean;
+  is_read_only: boolean;
   inter_branch_transfer: number | null;
   transfer_reference: string | null;
   destination_branch_code: string | null;
@@ -394,6 +398,7 @@ export type PickingTask = {
   shortage_quantity: string;
   quantity_prepared: string;
   remaining_quantity: string;
+  remaining_to_pick: string;
   remaining_to_prepare: string;
   is_replacement_pick?: boolean;
   replacement_shortage_reference?: string | null;
@@ -958,6 +963,13 @@ export type ScannerSession = {
   picking_job: number | null;
   worker_code: string;
   status: string;
+  session_active?: boolean;
+  cart_status?: string;
+  cart_active?: boolean;
+  cart_work_status?: string | null;
+  cart_work_active?: boolean;
+  has_unfinished_picking_work?: boolean;
+  has_unfinished_control_work?: boolean;
   started_at: string;
   ended_at: string | null;
 };
@@ -1781,11 +1793,13 @@ export type PickInstruction = {
     brand: string;
     description: string;
     image_url: string;
+    unit_of_measure: string;
   };
   required_quantity: string;
   picked_quantity: string;
   shortage_quantity: string;
   remaining_quantity: string;
+  remaining_to_pick: string;
   customer_alias: string;
 };
 

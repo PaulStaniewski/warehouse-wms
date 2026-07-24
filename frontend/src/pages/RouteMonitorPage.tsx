@@ -7,6 +7,7 @@ import { useInterBranchMMTasks, usePrintRouteDocuments, useRouteRuns } from "../
 import { DataState } from "../components/DataState";
 import { PageHeader } from "../components/PageHeader";
 import type { InterBranchMMTask, RouteRun } from "../types/api";
+import { formatQuantity } from "../utils/quantity";
 
 
 function formatStatus(status: string) {
@@ -30,9 +31,7 @@ function formatDateTime(value: string) {
   });
 }
 
-function formatUnits(value: number) {
-  return new Intl.NumberFormat("en-GB", { maximumFractionDigits: 0 }).format(value);
-}
+const formatUnits = formatQuantity;
 
 function getMmProgress(task: InterBranchMMTask) {
   if (task.expected_units <= 0) {

@@ -37,7 +37,7 @@ export function branchMembership(role: BranchMembership["role"] = "leader", code
     branch_code: code,
     branch_country: "Poland",
     branch_id: code === "GDY" ? 1 : 2,
-    branch_name: code === "GDY" ? "Magazyn Gdynia" : "Magazyn Gdansk",
+    branch_name: code === "GDY" ? "Magazyn Gdynia" : "Gdansk",
     role,
     role_label: role === "leader" ? "Leader" : "Worker",
   };

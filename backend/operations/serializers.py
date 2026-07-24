@@ -64,6 +64,7 @@ from operations.operational_projections import (
     route_run_workload_projection,
     shipment_line_progress,
     shipment_operational_projection,
+    shipment_is_open,
 )
 from operations.services import (
     discrepancy_line_remaining,
@@ -1091,6 +1092,10 @@ class ShipmentSerializer(serializers.ModelSerializer):
     status_history = ShipmentStatusHistorySerializer(many=True, read_only=True)
     command_eligibility = serializers.SerializerMethodField()
     route_close_readiness = serializers.SerializerMethodField()
+    is_historical = serializers.SerializerMethodField()
+    is_read_only = serializers.SerializerMethodField()
+    completed_at = serializers.SerializerMethodField()
+    route_closed_at = serializers.DateTimeField(source="route_run.closed_at", read_only=True, allow_null=True)
 
     def _statuses(self, obj: Shipment) -> dict:
         cache_name = "_shipment_statuses"
@@ -1108,6 +1113,16 @@ class ShipmentSerializer(serializers.ModelSerializer):
         if obj.route_run_id is None:
             return None
         return operational_identifier(obj.route_run.route, obj.route_run.service_date, obj.route_run.run_number)
+    def get_is_historical(self, obj: Shipment) -> bool:
+        return not shipment_is_open(obj)
+
+    def get_is_read_only(self, obj: Shipment) -> bool:
+        return not shipment_is_open(obj)
+
+    def get_completed_at(self, obj: Shipment):
+        if obj.status != Shipment.Status.COMPLETED:
+            return None
+        return obj.route_run.closed_at if obj.route_run_id and obj.route_run.closed_at else obj.updated_at
     def get_route_status(self, obj: Shipment) -> str:
         return self._statuses(obj)["route_status"]
 
@@ -1147,19 +1162,15 @@ class ShipmentSerializer(serializers.ModelSerializer):
         return getattr(obj.route_run, cache_name)
     def get_command_eligibility(self, obj: Shipment) -> dict:
         statuses = self._statuses(obj)
-        terminal = obj.status in {
-            Shipment.Status.DISPATCHED,
-            Shipment.Status.COMPLETED,
-            Shipment.Status.CANCELLED,
-        }
+        terminal = not shipment_is_open(obj)
         return {
             "activate": self._eligibility(
-                obj.status == Shipment.Status.PENDING_ACTIVATION,
-                "" if obj.status == Shipment.Status.PENDING_ACTIVATION else "Only pending shipments can be activated.",
+                obj.status == Shipment.Status.PENDING_ACTIVATION and not terminal,
+                "" if obj.status == Shipment.Status.PENDING_ACTIVATION and not terminal else "Only open pending shipments can be activated.",
             ),
             "post_picking_lists": self._eligibility(
-                obj.status in [Shipment.Status.ACTIVE, Shipment.Status.PICKING],
-                "" if obj.status in [Shipment.Status.ACTIVE, Shipment.Status.PICKING] else "Shipment must be active.",
+                obj.status in [Shipment.Status.ACTIVE, Shipment.Status.PICKING] and not terminal,
+                "" if obj.status in [Shipment.Status.ACTIVE, Shipment.Status.PICKING] and not terminal else "Shipment must be active on an open route.",
             ),
             "prepare": self._eligibility(
                 statuses["picking_status"] == "completed" and statuses["control_status"] == "completed" and not terminal,
@@ -1206,7 +1217,7 @@ class ShipmentSerializer(serializers.ModelSerializer):
                 ],
                 "No manual transition is available.",
             ),
-            "proforma": self._eligibility(bool(obj.order_id), "No source order is available."),
+            "proforma": self._eligibility(bool(obj.order_id) and not terminal, "Historical Shipments are read-only." if terminal else "No source order is available."),
         }
 
     class Meta:
@@ -1225,6 +1236,10 @@ class ShipmentSerializer(serializers.ModelSerializer):
             "route_time",
             "cutoff_time",
             "route_status",
+            "route_closed_at",
+            "completed_at",
+            "is_historical",
+            "is_read_only",
             "inter_branch_transfer",
             "transfer_reference",
             "destination_branch_code",
@@ -1291,6 +1306,7 @@ class PickingTaskSerializer(serializers.ModelSerializer):
     source_location_name = serializers.CharField(source="source_location.name", read_only=True)
     assigned_to_username = serializers.CharField(source="assigned_to.username", read_only=True)
     remaining_quantity = serializers.SerializerMethodField()
+    remaining_to_pick = serializers.SerializerMethodField()
     remaining_to_prepare = serializers.SerializerMethodField()
     is_replacement_pick = serializers.SerializerMethodField()
     replacement_shortage_reference = serializers.SerializerMethodField()
@@ -1300,7 +1316,10 @@ class PickingTaskSerializer(serializers.ModelSerializer):
     reallocated_from_location_code = serializers.SerializerMethodField()
 
     def get_remaining_quantity(self, obj: PickingTask) -> str:
-        return str(obj.quantity_to_pick - obj.quantity_picked - obj.shortage_quantity)
+        return str(obj.remaining_to_pick)
+
+    def get_remaining_to_pick(self, obj: PickingTask) -> str:
+        return str(obj.remaining_to_pick)
 
     def get_remaining_to_prepare(self, obj: PickingTask) -> str:
         return str(obj.quantity_to_pick - obj.quantity_prepared)
@@ -1365,6 +1384,7 @@ class PickingTaskSerializer(serializers.ModelSerializer):
             "shortage_quantity",
             "quantity_prepared",
             "remaining_quantity",
+            "remaining_to_pick",
             "remaining_to_prepare",
             "is_replacement_pick",
             "replacement_shortage_reference",
